@@ -271,6 +271,55 @@ should rise.
 | 1 | thin states, confidence floor | 61 / 63 | 8, 8, 8 per act | $0.000528 | 1435 ms |
 | 2 | **full run digest**, same floor | 61 / 63 | 7, 8, 8 | $0.000783 | 1334 ms |
 | 3 | full digest + **distribution-based acceptance** | 61 / 63 | **5, 5, 5** | $0.000783 | 1328 ms |
+| 4 | + **the game's own card/relic text** | **59 / 63** | 6, 4, 5 | $0.000859 | 1320 ms |
+
+## Reading the game's own data instead of asking the model to remember
+
+The only other JEV + Slay-the-Spire project we could find (`Ethics03/jevspire`,
+created 2026-09-19) documents two things that shaped run 4:
+
+> "Card text and some observations are missing from upstream snapshots."
+> "Missing card effects are not filled in with fabricated numbers."
+
+So neither of us was telling the model what the cards actually do — while asking it
+to judge them. `spirebrain/gamedata.py` fixes that from the player's own
+installation: Slay the Spire ships its full localization set inside
+`desktop-1.0.jar`, so we read `localization/eng/{cards,relics,potions,powers,
+monsters}.json` directly (423 cards, 195 relics, 45 potions, 178 powers, 72
+monsters on the copy we tested) and cache them under `.cache/gamedata/`.
+
+Design rules that keep it honest:
+
+* Basic cards are keyed by internal id (`Strike_R` / `Strike_G` / `Strike_B` /
+  `Strike_P`), so lookups try the character-specific key first, then the display
+  name, then a reverse `NAME → key` index built from the table itself.
+* `!D!` / `!B!` / `!M!` are the damage/block/magic slots. Given the runtime
+  numbers from the snapshot we substitute them; without them we emit a visibly
+  non-numeric `<damage>` rather than guess a value.
+* Relic `DESCRIPTIONS` is an **array the game assembles around substituted
+  values**, and the assembly rule differs per entry. We join its parts in file
+  order and never reorder them: all the text is present either way, and only a
+  leading "Gain [E]" clause may read oddly. Reordering would be a guess.
+* Unknown names return `None` and callers must say so — `"no text found in the
+  game's card data"` — which is the one thing that stops the model answering from
+  a half-remembered card.
+* No hard dependency: with no game installed the singleton stays empty and every
+  digest degrades to names.
+
+**Measured effect (run 4).** It helped where the text was decision-relevant and
+did not where the threshold was the problem:
+
+* Boss relics: one confidence moved **0.040 → 0.570**, and the ranking became
+  defensible rather than arbitrary — Runic Dome ("you can no longer see enemy
+  intents") fell to worst of the three, Philosopher's Stone ("all enemies start
+  combat with Strength") next, Coffee Dripper best.
+* Answers below the floor: 61 → 59 of 63. Marginal.
+* Card rewards: still always skipped. The text arrived, JEV still scored the
+  offered cards at normalized 0.2–0.4 on a 4-level rubric whose "Solid" level
+  sits at 0.67 — so the `SCORE_ACTION_FLOOR` of 0.55 asks for "between Solid and
+  Excellent" and almost nothing starting-deck-shaped can clear it. That is the
+  same miscalibration this experiment already caught once, in a new place.
+
 
 **The hypothesis was wrong, and the numbers say so.** Enriching the state to the
 full run digest changed nothing (61/63 again) while raising input cost ~48%. The

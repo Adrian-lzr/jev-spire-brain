@@ -40,7 +40,7 @@ from spirebrain.jev_brain.client import (
     QuestionSpec,
     ScoreSpec,
 )
-from spirebrain.jev_brain.state import RunContext
+from spirebrain.jev_brain.state import RunContext, card_effect_text, relic_effect_text
 
 CONFIDENCE_FLOOR = 0.60  # mirrored from config/strategy.json
 SCORE_ACTION_FLOOR = 0.55  # below this, "nothing here is worth taking"
@@ -296,7 +296,7 @@ class CardRewardJudge:
                 name: ScoreSpec(
                     instructions=(
                         "How much would adding this card improve the deck, given what the deck "
-                        f"already does and the run's goal? Card: {desc}"
+                        f"already does and the run's goal? Card: {self._describe(name, desc)}"
                     ),
                     criteria=list(CARD_RUBRIC),
                 )
@@ -319,6 +319,23 @@ class CardRewardJudge:
             thin["goal"] = self.goal
         extra = {"card_reward_offered": list(candidates)}
         return _state_from(self.run, extra, thin)
+
+    def _describe(self, name: str, fallback: str) -> str:
+        """The card's own text from the game install; the caller's gloss only if absent.
+
+        Measured motivation: with names and one-line glosses only, JEV's Score
+        answers for cards came back flat and every reward got skipped
+        (docs/JEV_API.md, run 3). A card's real text is the minimum a model needs
+        to compare it against a deck — and it is precisely the gap the only other
+        JEV + Slay-the-Spire project documents as a limitation ("Card text and
+        some observations are missing from upstream snapshots").
+        """
+        text = card_effect_text(name, character=self.run.character if self.run else None)
+        if text:
+            return text
+        if fallback:
+            return f"{fallback} (no text found in the game's card data)"
+        return "no text found in the game's card data"
 
 
 # --------------------------------------------------------------------------- #
@@ -521,7 +538,7 @@ class BossRelicJudge:
                 name: ScoreSpec(
                     instructions=(
                         "How good is this boss relic for this run's plan? Account for its "
-                        f"drawback, not just its upside. Relic: {desc}"
+                        f"drawback, not just its upside. Relic: {self._describe(name, desc)}"
                     ),
                     criteria=list(RELIC_RUBRIC),
                 )
@@ -546,6 +563,16 @@ class BossRelicJudge:
             thin["goal"] = self.goal
         extra = {"boss_relics_offered": list(relics)}
         return _state_from(self.run, extra, thin)
+
+    @staticmethod
+    def _describe(name: str, fallback: str) -> str:
+        """The relic's own text from the game install; the caller's gloss only if absent."""
+        text = relic_effect_text(name)
+        if text:
+            return text
+        if fallback:
+            return f"{fallback} (no text found in the game's relic data)"
+        return "no text found in the game's relic data"
 
 
 # --------------------------------------------------------------------------- #

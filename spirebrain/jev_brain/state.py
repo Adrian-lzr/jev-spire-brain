@@ -58,23 +58,83 @@ def worst_case_damage(symbol: str, act: int) -> int:
 # --------------------------------------------------------------------------- #
 # Cards / deck
 # --------------------------------------------------------------------------- #
-def card_line(card: dict) -> str:
-    """One readable line for a card. Tolerates partial data."""
+def card_values(card: dict) -> dict:
+    """The game's runtime numbers for a card, when the snapshot carries them.
+
+    CommunicationMod exposes `damage` / `block` / `magic_number` per card
+    instance, and those are exactly what the localization's `!D!` / `!B!` / `!M!`
+    slots stand for. Passing them lets the real text render with real numbers
+    instead of placeholders — and when they are absent we leave the visible
+    placeholder rather than guess a number.
+    """
+    out: dict = {}
+    for token, field in (("D", "damage"), ("B", "block"), ("M", "magic_number")):
+        v = card.get(field)
+        if isinstance(v, int) and v > 0:
+            out[token] = v
+    return out
+
+
+def card_effect_text(name: str, *, upgraded: bool = False,
+                     character: str | None = None, values: dict | None = None) -> str | None:
+    """Real card text from the player's game install, or None. Never raises.
+
+    Uses the process-wide `gamedata` singleton (read-only cache), so a machine
+    without Slay the Spire installed simply gets None and every digest falls back
+    to names — no hard dependency, no fabricated effects.
+    """
+    try:
+        from spirebrain import gamedata
+
+        return gamedata.get().card_effect(name, upgraded=upgraded,
+                                          character=character, values=values)
+    except Exception:  # noqa: BLE001 - enrichment must never break a decision
+        return None
+
+
+def card_line(card: dict, character: str | None = None) -> str:
+    """One readable line for a card: cost, type, and its real effect text.
+
+    The effect comes from the game's own data unless the caller supplied one. We
+    never invent a card effect; if the text cannot be found the line simply omits
+    it, and the question that uses this line is expected to say so.
+    """
     name = card.get("name") or card.get("id") or "unknown card"
-    upgraded = "+" if card.get("upgrades") or card.get("is_upgraded") else ""
+    upgraded = bool(card.get("upgrades") or card.get("is_upgraded"))
     cost = card.get("cost")
     cost_txt = "X" if cost == -1 else ("-" if cost is None else str(cost))
-    parts = [f"{name}{upgraded} ({cost_txt}E)"]
+    parts = [f"{name}{'+' if upgraded else ''} ({cost_txt}E)"]
     if card.get("type"):
         parts.append(str(card["type"]))
     if card.get("description"):
         parts.append(str(card["description"]))
+    else:
+        text = card_effect_text(name, upgraded=upgraded, character=character,
+                               values=card_values(card))
+        if text:
+            parts.append(text)
     return " - ".join(parts)
 
 
-def deck_digest(cards: Iterable[dict], max_lines: int = 40) -> str:
-    """Flat, countable digest of the deck. Sorted for stable prompts/logs."""
-    lines = sorted(card_line(c) for c in cards)
+def relic_effect_text(name: str) -> str | None:
+    """Real relic text from the player's game install, or None. Never raises."""
+    try:
+        from spirebrain import gamedata
+
+        return gamedata.get().relic_effect(name)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def deck_digest(cards: Iterable[dict], max_lines: int = 40,
+                character: str | None = None) -> str:
+    """Flat, countable digest of the deck, with real effect text per card.
+
+    Sorted for stable prompts/logs. Intended to be the *inputs* to a judgement:
+    a model asked "is this card good for this deck?" cannot answer while both
+    sides of the comparison are bare names.
+    """
+    lines = sorted(card_line(c, character=character) for c in cards)
     if len(lines) > max_lines:
         # Keep the digest cheap: the tail matters less than the archetype.
         extra = len(lines) - max_lines
@@ -268,7 +328,7 @@ class RunContext:
         return self
 
     def deck_line(self, max_lines: int = 40) -> str:
-        return deck_digest(self.deck, max_lines=max_lines)
+        return deck_digest(self.deck, max_lines=max_lines, character=self.character)
 
     def digest(self, extra: dict | None = None) -> dict:
         """The state object sent to JEV: full run facts, plus call-specific extras."""

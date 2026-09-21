@@ -66,19 +66,47 @@ running the expensive-looking experiment early.
 
 ## Three cheap experiments queued for the Score problem
 
-Card rewards and boss relics still never discriminate, so the deck never grows.
-In ascending order of effort:
+Card rewards still never discriminate, so the deck never grows (10 → 10 across all
+four runs). Runs 3 and 4 established that the cause is **not** missing card text:
+we now feed JEV the game's own wording and the scores stayed at normalized
+0.2–0.4. The remaining suspects, cheapest first:
 
-1. **Coarser rubric** — collapse the 4-level CARD_RUBRIC to 2 levels ("does not
-   help" / "clearly helps"). Fewer levels means a more peaked distribution.
-2. **Different primitive** — ask three separate Noul questions per card
-   ("does this fix a weakness the deck has?", "does it duplicate something the
-   deck already does well?") and combine in code. The docs recommend decomposing
-   a multi-factor judgment into atomic questions, which is exactly this case.
-3. **Accept that this may be a real limit** — if neither helps, the honest
-   conclusion is that JEV cannot rank cards from a text digest, and the card
-   policy should stay a rule while JEV keeps the decisions it demonstrably owns
-   (routing, event consequences, HP-budget risk).
+1. **The action floor, not the text.** `SCORE_ACTION_FLOOR = 0.55` sits between
+   "Solid" (0.67) and "Filler" (0.33) on a 4-level rubric — it asks for a
+   near-Excellent card before taking anything. For a 25-card cap with a starter
+   deck that is a very high bar. Lower it, or re-anchor it to the rubric's
+   midpoint, and re-measure. *This is the same class of miscalibration the
+   confidence floor had, in a new place.*
+2. **Different primitive.** Ask three atomic Noul questions per card ("does this
+   fix a weakness the deck has?", "does it duplicate something the deck already
+   does well?", "is it worth a card slot at all?") and combine in code. The docs
+   recommend decomposing multi-factor judgments, and this is one.
+3. **Accept a real limit.** If neither helps, the honest conclusion is that JEV
+   does not rank starting-deck card choices from a text digest, and the card
+   policy should stay a rule while JEV keeps the decisions it demonstrably owns —
+   routing, event consequences, HP-budget risk, and now boss relics (where the
+   game's own text moved a confidence from 0.040 to 0.570).
+
+## What the measurements changed about our beliefs
+
+Four runs against the real model, three of them disconfirming something we had
+written down as true:
+
+1. **"Thin states cause the low confidences."** ❌ Refuted (run 2): the full run
+   digest left the count at 61/63 and raised input cost ~48%.
+2. **"A 0.60 confidence floor is the right gate."** ❌ Miscalibrated (run 3): it
+   made the brain never act — 8/8 fallbacks, an expensive rule-based bot.
+   Replacing it for Choice/Score with a distribution test (top option most likely,
+   clears 0.50, leads by 0.15) cut fallbacks to 5/8 and produced the first
+   model-chosen actions: a route, and a refusal of an event the old fallback
+   would have paid 25% max HP for.
+3. **"Missing card text is why cards can't be judged."** ⚠️ Partly. ✅ It fixed
+   boss relics (0.040 → 0.570 confidence, defensible ranking). ❌ It did not fix
+   card rewards, which points the finger at the action floor instead.
+4. **Cross-project check.** The only comparable project (`Ethics03/jevspire`)
+   reports the same honest ceiling we keep hitting: "The run was abandoned early;
+   improved win rate has not been established." Anyone quoting JEV brain
+   win-rates at this stage is quoting something nobody has measured.
 
 ## Definition of "worth showing"
 - Agent completes 10 consecutive runs unattended
@@ -88,8 +116,10 @@ In ascending order of effort:
 ## What is honestly blocking what
 | Blocker | Blocks | Whose move |
 |---|---|---|
-| CommunicationMod not installed (ModTheSpire + BaseMod + StSLib are in place via Steam Workshop) | Phase 1 entirely, and Phase 3's post-combat review | user downloads 1 jar |
-| Score answers carry no discriminative signal | a deck that grows, and therefore any win-rate comparison | me — 3 experiments above |
+| CommunicationMod not installed — **it IS on Steam Workshop, id 2131373661**; ModTheSpire + BaseMod + StSLib are already in place | Phase 1 entirely, and Phase 3's post-combat review | user subscribes in Steam (no GitHub download needed) |
+| `SCORE_ACTION_FLOOR` mis-set for card rewards | a deck that grows, and therefore any win-rate comparison | me — experiment 1 above |
 | OpenRouter key permits only the `typesafe` provider | the structured-LLM baseline arm | user (add a provider) or a second key |
+| `RunContext` not yet wired into `driver/agent.py` | live play gets rich states too | me |
+
 
 
