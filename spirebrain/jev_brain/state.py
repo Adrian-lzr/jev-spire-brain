@@ -15,6 +15,7 @@ them.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 # Map node symbols as they appear in the game's map data.
@@ -214,3 +215,77 @@ def shop_items(raw_items: Iterable[dict]) -> dict[str, tuple[int, str]]:
             label = f"{label} (second copy)"
         out[label] = (int(it.get("price", it.get("cost", 0))), str(it.get("description", "")))
     return out
+
+
+# --------------------------------------------------------------------------- #
+# RunContext — the one place the run's facts live
+# --------------------------------------------------------------------------- #
+@dataclass
+class RunContext:
+    """Everything a judgement might need to know about the run, in one object.
+
+    Why this exists: the first live run against real JEV (2026-09-21) returned
+    61 of 63 answers below the confidence floor, and the recorded payloads showed
+    why — modules were hand-building thin states. The shop question passed
+    `{goal, gold}` and asked "is this worth the gold for this run's goal?"; JEV
+    answered ~0.4, which is its documented way of saying *this cannot be answered
+    from what you gave me*.
+
+    So the fix is not a prompt tweak, it is giving the model the run. Decision
+    modules take an optional `run=RunContext(...)`; when present, every question
+    is evaluated against `digest()` (deck contents and shape, relics, potions,
+    HP ratio, act, floor, gold, HP budget, goal) instead of a two-field stub.
+
+    Kept as plain data with no I/O so it is trivially constructible in tests and
+    fillable from either spirecomm game objects or the offline simulator.
+    """
+
+    act: int = 1
+    floor: int = 0
+    character: str = ""
+    hp: int = 80
+    max_hp: int = 80
+    gold: int = 0
+    deck: list = field(default_factory=list)
+    relics: list = field(default_factory=list)
+    potions: list = field(default_factory=list)
+    budget_remaining: int | None = None
+    budget_reserved: int | None = None
+    goal: str = ""
+
+    @property
+    def hp_ratio(self) -> float:
+        return round(self.hp / self.max_hp, 3) if self.max_hp else 0.0
+
+    def with_budget(self, budget) -> RunContext:
+        """Fill the HP-budget fields from an HPBudget instance (in place, chained)."""
+        if budget is not None:
+            self.budget_remaining = budget.remaining_budget
+            self.budget_reserved = budget.reserved_hp
+            self.act = budget.act
+            self.hp = budget.current_hp
+            self.max_hp = budget.max_hp
+        return self
+
+    def deck_line(self, max_lines: int = 40) -> str:
+        return deck_digest(self.deck, max_lines=max_lines)
+
+    def digest(self, extra: dict | None = None) -> dict:
+        """The state object sent to JEV: full run facts, plus call-specific extras."""
+        state = run_state(
+            act=self.act,
+            floor=self.floor,
+            character=self.character,
+            hp=self.hp,
+            max_hp=self.max_hp,
+            gold=self.gold,
+            deck=self.deck,
+            relics=self.relics,
+            potions=self.potions,
+            budget_remaining=self.budget_remaining,
+            budget_reserved=self.budget_reserved,
+            goal=self.goal,
+        )
+        if extra:
+            state.update(extra)
+        return state

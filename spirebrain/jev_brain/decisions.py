@@ -6,7 +6,7 @@ model is unsure or the call fails. This is the *semantic judgment* layer: the
 place where a written, fuzzy trade-off ("is this HP loss acceptable?", "is this
 card worth it?") becomes a typed value the rest of the code can branch on.
 
-Two conventions enforced across all modules, both derived from the official docs:
+Four conventions, all derived from primary sources or from measurement:
 
 1. ONE CALL, MANY QUESTIONS.  The API evaluates every question in parallel
    against the same state and adding questions barely costs latency. So each
@@ -15,9 +15,16 @@ Two conventions enforced across all modules, both derived from the official docs
    A probability near 0.5 means the model cannot tell, so we treat the band
    (0.40, 0.60) as "uncertain" and fall back to a rule rather than act on a
    coin flip. Outside the band, the probability itself is the answer.
-
-Score rubrics are **ordered word-labelled levels** (see client.py for why), and
-every Score answer arrives here already normalised to 0..1.
+3. SCORE RUBRICS ARE ORDERED WORD-LABELLED LEVELS (see client.py), and every
+   Score answer arrives here already normalised to 0..1.
+4. **GIVE THE MODEL THE RUN.**  Measured, not assumed: the first live run
+   against real JEV (2026-09-21) returned 61 of 63 answers below the confidence
+   floor, because modules were hand-building two-field states while asking
+   questions those two fields could not possibly answer. Passing a `RunContext`
+   makes every question evaluate against the full run digest (deck contents and
+   shape, relics, potions, HP and HP budget, act, floor, gold, goal).
+   `run=None` still works — it produces the old thin state, which is what the
+   offline tests exercise — but a real run should always pass one.
 """
 
 from __future__ import annotations
@@ -33,6 +40,7 @@ from spirebrain.jev_brain.client import (
     QuestionSpec,
     ScoreSpec,
 )
+from spirebrain.jev_brain.state import RunContext
 
 CONFIDENCE_FLOOR = 0.60  # mirrored from config/strategy.json
 SCORE_ACTION_FLOOR = 0.55  # below this, "nothing here is worth taking"
@@ -85,8 +93,106 @@ def noul_verdict(probability: float) -> bool | None:
     return None
 
 
+# Thresholds for accepting a Choice answer on the strength of its DISTRIBUTION
+# rather than on its confidence. See accept_choice() for why.
+CHOICE_TOP_FLOOR = 0.50   # the chosen option must actually be the most likely one
+CHOICE_MARGIN = 0.15      # and must beat the runner-up by this much
+
+
+def accept_choice(answer, *, floor: float = CONFIDENCE_FLOOR,
+                  top_floor: float = CHOICE_TOP_FLOOR,
+                  margin: float = CHOICE_MARGIN) -> bool:
+    """Should we act on this Choice, or defer to the safe rule?
+
+    Measured, not assumed (2026-09-21). Enriching the decision state to the full
+    run digest — deck contents, relics, potions, HP budget, act, floor, gold,
+    goal — did NOT raise JEV's confidence on our *preference* questions: the
+    fallback rate stayed at 61 of 63 answers below 0.60 while input cost rose
+    ~48%. The confidences cluster at 0.29-0.47 across every module.
+
+    That is not the model failing. Confidence summarises how peaked the answer
+    distribution is, and "which of these cards is better for an abstract goal"
+    genuinely has no sharp answer — a flat-ish distribution *is* the honest
+    response. The type docs' own worked example shows the same thing (p=0.84 on
+    the top option, confidence 0.596). The docs are explicit that the automation
+    threshold "cannot be deduced from this single case; it has to be chosen
+    against the risk and validated on labelled data from your own domain".
+
+    So for preference questions we stop asking "how sure are you?" and ask the
+    question the distribution can actually answer: **is the top option clearly
+    ahead?** Accept when the chosen option is the most likely one, its
+    probability clears `top_floor`, and it leads the runner-up by `margin`.
+    Otherwise defer to the rule, which is the old behaviour.
+
+    Noul deliberately does NOT use this: for a yes/no fact-like question the
+    probability is the belief and the (0.40, 0.60) band already means "cannot
+    tell" — see noul_verdict().
+    """
+    raw = getattr(answer, "raw", None) or {}
+    probs = raw.get("probabilities") or {}
+    if not probs:
+        # No distribution to reason about (mocks, or a provider that omits it):
+        # fall back to the confidence floor so behaviour stays predictable.
+        return getattr(answer, "confidence", 0.0) >= floor
+    try:
+        items = sorted(((k, float(v)) for k, v in probs.items()), key=lambda kv: -kv[1])
+    except (TypeError, ValueError):
+        return getattr(answer, "confidence", 0.0) >= floor
+    top_key, top_p = items[0]
+    runner_up = items[1][1] if len(items) > 1 else 0.0
+    chosen_is_top = str(answer.value) == top_key
+    return bool(chosen_is_top and top_p >= top_floor and (top_p - runner_up) >= margin)
+
+
+def accept_score(answer, *, spec=None, floor: float = CONFIDENCE_FLOOR,
+                 action_floor: float = SCORE_ACTION_FLOOR,
+                 top_floor: float = CHOICE_TOP_FLOOR,
+                 margin: float = CHOICE_MARGIN) -> bool:
+    """The Score sibling of accept_choice().
+
+    Same reasoning, one wrinkle: a Score answer's `probabilities` are keyed by
+    LEVEL INDEX (`"0"`, `"1"`, ...) while the value we normalise is a fractional
+    position between levels. So "is the chosen option clearly ahead?" becomes
+    "is the level the model actually landed on the same level the distribution
+    favours, and does it lead the runner-up?" — plus the value must still clear
+    the action floor, since a clearly-favoured 'filler card' is still filler.
+
+    Without a distribution (mocks) this degrades to the old rule exactly:
+    value above the action floor AND confidence above the floor.
+    """
+    want = getattr(answer, "value", 0.0)
+    raw = getattr(answer, "raw", None) or {}
+    probs = raw.get("probabilities") or {}
+    if not probs:
+        return bool(want >= action_floor and getattr(answer, "confidence", 0.0) >= floor)
+    try:
+        items = sorted(((k, float(v)) for k, v in probs.items()), key=lambda kv: -kv[1])
+        top_key, top_p = items[0]
+        runner_up = items[1][1] if len(items) > 1 else 0.0
+        # Which level did the model land on? Round the raw level when we have it.
+        level = raw.get("score", raw.get("level"))
+        landed = str(int(round(float(level)))) if level is not None else None
+    except (TypeError, ValueError):
+        return bool(want >= action_floor and getattr(answer, "confidence", 0.0) >= floor)
+    if landed is not None and landed != top_key:
+        return False
+    return bool(want >= action_floor and top_p >= top_floor and (top_p - runner_up) >= margin)
+
+
 def _probe_details(resp: JevResponse) -> dict:
     return {k: {"value": a.value, "confidence": a.confidence} for k, a in resp.answers.items()}
+
+
+def _state_from(run: RunContext | None, extra: dict, thin: dict) -> dict:
+    """Full run digest when a RunContext is available, else the legacy thin state.
+
+    The two branches are kept side by side on purpose: `thin` documents exactly
+    what the modules used to send, which is what made JEV answer ~0.4 to
+    questions it could not possibly resolve.
+    """
+    if run is not None:
+        return run.digest(extra)
+    return {**thin, **extra}
 
 
 # --------------------------------------------------------------------------- #
@@ -99,9 +205,10 @@ class MapRouter:
     — is asked once per candidate path in the same call as the route choice.
     """
 
-    def __init__(self, jev: JevClient, hp_budget) -> None:
+    def __init__(self, jev: JevClient, hp_budget, run: RunContext | None = None) -> None:
         self.jev = jev
         self.hp = hp_budget
+        self.run = run
 
     def decide(self, reachable: dict[str, str], path_probes: dict[str, int]) -> Decision:
         """reachable: {node_id: 'elite (risky)'}, path_probes: {node_id: predicted_worst_damage}."""
@@ -125,7 +232,7 @@ class MapRouter:
                         "run can afford to lose?"
                     )
                 )
-            resp = self.jev.ask(self._state(), questions)
+            resp = self.jev.ask(self._state(reachable, path_probes), questions)
 
             route = resp.answers["route"]
             probe_key = f"over_budget_{route.value}"
@@ -133,22 +240,26 @@ class MapRouter:
             if probe is not None and noul_verdict(probe.confidence) is True:
                 return self._fallback(reachable, path_probes,
                                       reason="chosen route judged over HP budget")
-            if route.confidence < CONFIDENCE_FLOOR:
-                return self._fallback(reachable, path_probes, reason="low confidence")
+            if not accept_choice(route):
+                return self._fallback(reachable, path_probes,
+                                      reason="route not clearly ahead")
             return Decision("map", route.value, route.confidence, False,
                             {"probes": _probe_details(resp)})
         except Exception as exc:  # noqa: BLE001 - any failure must not stop the run
             return self._fallback(reachable, path_probes, reason=f"jev error: {exc}")
 
-    def _state(self) -> dict:
-        return {
+    def _state(self, reachable: dict, path_probes: dict) -> dict:
+        extra = {
+            "reachable_nodes": reachable,
+            "estimated_damage_to_next_rest": path_probes,
+        }
+        thin = {
             "act": self.hp.act,
             "hp": {"current": self.hp.current_hp, "max": self.hp.max_hp},
-            "hp_budget": {
-                "remaining_spendable": self.hp.remaining_budget,
-                "reserved": self.hp.reserved_hp,
-            },
+            "hp_budget": {"remaining_spendable": self.hp.remaining_budget,
+                          "reserved": self.hp.reserved_hp},
         }
+        return _state_from(self.run, extra, thin)
 
     def _fallback(self, reachable, path_probes, reason: str) -> Decision:
         if path_probes:
@@ -165,12 +276,13 @@ class CardRewardJudge:
     """Card rewards: Score x candidates against the deck, with a skip path."""
 
     def __init__(self, jev: JevClient, deck_size: int, max_cards: int = 25,
-                 deck_digest: str = "", goal: str = "") -> None:
+                 deck_digest: str = "", goal: str = "", run: RunContext | None = None) -> None:
         self.jev = jev
         self.deck_size = deck_size
         self.max_cards = max_cards
         self.deck_digest = deck_digest
         self.goal = goal
+        self.run = run
 
     def decide(self, candidates: dict[str, str]) -> Decision:
         """candidates: {card_name: description}. Returns a card name or 'skip'."""
@@ -190,22 +302,23 @@ class CardRewardJudge:
                 )
                 for name, desc in candidates.items()
             }
-            resp = self.jev.ask(self._state(), questions)
+            resp = self.jev.ask(self._state(candidates), questions)
             best_name, best = max(resp.answers.items(), key=lambda kv: kv[1].value)
             scores = {k: round(v.value, 4) for k, v in resp.answers.items()}
-            if best.confidence < CONFIDENCE_FLOOR or best.value < SCORE_ACTION_FLOOR:
+            if not accept_score(best):
                 return Decision("card_reward", "skip", best.confidence, True,
                                 {"scores": scores, "best": best_name,
-                                 "reason": "best card below action floor"})
+                                 "reason": "best card not clearly worth taking"})
             return Decision("card_reward", best_name, best.confidence, False, {"scores": scores})
         except Exception:  # noqa: BLE001
             return Decision("card_reward", "skip", 0.0, True, {"reason": "jev error"})
 
-    def _state(self) -> dict:
-        state: dict = {"deck": {"size": self.deck_size, "contents": self.deck_digest}}
+    def _state(self, candidates: dict) -> dict:
+        thin: dict = {"deck": {"size": self.deck_size, "contents": self.deck_digest}}
         if self.goal:
-            state["goal"] = self.goal
-        return state
+            thin["goal"] = self.goal
+        extra = {"card_reward_offered": list(candidates)}
+        return _state_from(self.run, extra, thin)
 
 
 # --------------------------------------------------------------------------- #
@@ -214,14 +327,18 @@ class CardRewardJudge:
 class EventChooser:
     """Event options: a single Choice. Never forced — low confidence defers to rule."""
 
-    def __init__(self, jev: JevClient, goal: str = "") -> None:
+    def __init__(self, jev: JevClient, goal: str = "", run: RunContext | None = None) -> None:
         self.jev = jev
         self.goal = goal
+        self.run = run
 
     def decide(self, event_text: str, options: dict[str, str]) -> Decision:
+        thin = {"event": event_text}
+        if self.goal:
+            thin["goal"] = self.goal
         try:
             resp = self.jev.ask(
-                {"event": event_text, "goal": self.goal} if self.goal else {"event": event_text},
+                _state_from(self.run, {"event": event_text}, thin),
                 {"choice": ChoiceSpec(
                     instructions=(
                         "Which option best serves the run, weighing the reward against HP, "
@@ -231,8 +348,9 @@ class EventChooser:
                     criteria=options)},
             )
             ans = resp.answers["choice"]
-            if ans.confidence < CONFIDENCE_FLOOR:
-                return self._fallback(options, f"low confidence ({ans.confidence:.2f})")
+            if not accept_choice(ans):
+                return self._fallback(
+                    options, f"not clearly ahead (confidence {ans.confidence:.2f})")
             return Decision("event", ans.value, ans.confidence, False,
                             {"probabilities": ans.raw.get("probabilities", {})})
         except Exception as exc:  # noqa: BLE001
@@ -248,16 +366,18 @@ class EventChooser:
 # 4. Rest sites
 # --------------------------------------------------------------------------- #
 class RestSiteDecider:
-    """Rest site: Noul(heal?) + Score x upgrade candidates, in one call.
+    """Rest site: Noul(heal?) + Choice(which upgrade) in one call.
 
     Note the asymmetry we encode: an unnecessary rest is a wasted opportunity,
     but an unnecessary upgrade can kill the run. So the fallback always heals.
     """
 
-    def __init__(self, jev: JevClient, hp_budget=None, goal: str = "") -> None:
+    def __init__(self, jev: JevClient, hp_budget=None, goal: str = "",
+                 run: RunContext | None = None) -> None:
         self.jev = jev
         self.hp = hp_budget
         self.goal = goal
+        self.run = run
 
     def decide(self, *, hp_ratio: float, upgradable: dict[str, str]) -> Decision:
         """upgradable: {card_name: description}. Returns 'rest' or a card name."""
@@ -281,14 +401,14 @@ class RestSiteDecider:
                     criteria={**upgradable, "rest": "Skip the upgrade and heal instead"},
                 ),
             }
-            resp = self.jev.ask(self._state(hp_ratio), questions)
+            resp = self.jev.ask(self._state(hp_ratio, upgradable), questions)
             heal = noul_verdict(resp.answers["need_heal"].confidence)
             up = resp.answers["upgrade"]
 
             if heal is True:
                 return Decision("rest", "rest", resp.answers["need_heal"].confidence, False,
                                 {"reason": "judged to need healing"})
-            if heal is None or up.confidence < CONFIDENCE_FLOOR:
+            if heal is None or not accept_choice(up):
                 return self._fallback(upgradable, hp_ratio, "uncertain")
             if up.value == "rest" or up.value not in upgradable:
                 return Decision("rest", "rest", up.confidence, False,
@@ -298,17 +418,18 @@ class RestSiteDecider:
         except Exception as exc:  # noqa: BLE001
             return self._fallback(upgradable, hp_ratio, f"jev error: {exc}")
 
-    def _state(self, hp_ratio: float) -> dict:
-        state: dict = {"hp_ratio": round(hp_ratio, 3)}
+    def _state(self, hp_ratio: float, upgradable: dict) -> dict:
+        thin: dict = {"hp_ratio": round(hp_ratio, 3)}
         if self.hp:
-            state["hp_budget"] = {
+            thin["hp_budget"] = {
                 "remaining_spendable": self.hp.remaining_budget,
                 "reserved": self.hp.reserved_hp,
                 "act": self.hp.act,
             }
         if self.goal:
-            state["goal"] = self.goal
-        return state
+            thin["goal"] = self.goal
+        extra = {"upgradable_cards": list(upgradable)}
+        return _state_from(self.run, extra, thin)
 
     def _fallback(self, upgradable: dict, hp_ratio: float, reason: str) -> Decision:
         if hp_ratio < HEAL_WHEN_UNSURE_HP_RATIO:  # unsure and low -> heal
@@ -327,9 +448,10 @@ class ShopDecider:
     0.6 -> save the gold" needs no second-order threshold.
     """
 
-    def __init__(self, jev: JevClient, goal: str = "") -> None:
+    def __init__(self, jev: JevClient, goal: str = "", run: RunContext | None = None) -> None:
         self.jev = jev
         self.goal = goal
+        self.run = run
 
     def decide(self, *, gold: int, items: dict[str, tuple[int, str]],
                removal_cost: int | None = None, remove_candidate: str = "") -> Decision:
@@ -354,7 +476,7 @@ class ShopDecider:
                         "deck worth it for this run's goal?"
                     )
                 )
-            resp = self.jev.ask(self._state(gold), questions)
+            resp = self.jev.ask(self._state(gold, affordable), questions)
             probs = {k: a.confidence for k, a in resp.answers.items()}
             best_key = max(probs, key=probs.get)
             best_p = probs[best_key]
@@ -369,11 +491,12 @@ class ShopDecider:
         except Exception as exc:  # noqa: BLE001
             return Decision("shop", "leave", 0.0, True, {"reason": f"jev error: {exc}"})
 
-    def _state(self, gold: int) -> dict:
-        state = {"gold": gold}
+    def _state(self, gold: int, affordable: dict) -> dict:
+        thin = {"gold": gold}
         if self.goal:
-            state["goal"] = self.goal
-        return state
+            thin["goal"] = self.goal
+        extra = {"shop_affordable": {k: v[0] for k, v in affordable.items()}}
+        return _state_from(self.run, extra, thin)
 
 
 # --------------------------------------------------------------------------- #
@@ -383,10 +506,12 @@ class BossRelicJudge:
     """Boss relics: Score x 3. The choice is mandatory, so we never skip — but a
     low-confidence pick is flagged, which is what a later review reads."""
 
-    def __init__(self, jev: JevClient, goal: str = "", deck_digest: str = "") -> None:
+    def __init__(self, jev: JevClient, goal: str = "", deck_digest: str = "",
+                 run: RunContext | None = None) -> None:
         self.jev = jev
         self.goal = goal
         self.deck_digest = deck_digest
+        self.run = run
 
     def decide(self, relics: dict[str, str]) -> Decision:
         if not relics:
@@ -402,23 +527,25 @@ class BossRelicJudge:
                 )
                 for name, desc in relics.items()
             }
-            resp = self.jev.ask(self._state(), questions)
+            resp = self.jev.ask(self._state(relics), questions)
             best_name, best = max(resp.answers.items(), key=lambda kv: kv[1].value)
             scores = {k: round(v.value, 4) for k, v in resp.answers.items()}
             # Mandatory pick: take the best even when unsure, but flag it.
-            low = best.confidence < CONFIDENCE_FLOOR
+            low = not accept_score(best)
             return Decision("boss_relic", best_name, best.confidence, low,
-                            {"scores": scores, **({"reason": "mandatory pick, low confidence"} if low else {})})
+                            {"scores": scores,
+                             **({"reason": "mandatory pick, low confidence"} if low else {})})
         except Exception as exc:  # noqa: BLE001
             first = next(iter(relics))
             return Decision("boss_relic", first, 0.0, True,
                             {"reason": f"jev error: {exc}; took first offered"})
 
-    def _state(self) -> dict:
-        state: dict = {"deck": self.deck_digest}
+    def _state(self, relics: dict) -> dict:
+        thin: dict = {"deck": self.deck_digest}
         if self.goal:
-            state["goal"] = self.goal
-        return state
+            thin["goal"] = self.goal
+        extra = {"boss_relics_offered": list(relics)}
+        return _state_from(self.run, extra, thin)
 
 
 # --------------------------------------------------------------------------- #
@@ -431,23 +558,15 @@ class CombatRiskGate:
     the greedy policy block more and play safer.
     """
 
-    def __init__(self, jev: JevClient, hp_budget) -> None:
+    def __init__(self, jev: JevClient, hp_budget, run: RunContext | None = None) -> None:
         self.jev = jev
         self.hp = hp_budget
+        self.run = run
 
     def decide(self, encounter: str, predicted_damage: int) -> Decision:
         try:
             resp = self.jev.ask(
-                {
-                    "encounter": encounter,
-                    "predicted_damage": predicted_damage,
-                    "hp_budget": {
-                        "remaining_spendable": self.hp.remaining_budget,
-                        "reserved": self.hp.reserved_hp,
-                        "current_hp": self.hp.current_hp,
-                        "max_hp": self.hp.max_hp,
-                    },
-                },
+                self._state(encounter, predicted_damage),
                 {"exceeds": NoulSpec(
                     instructions=(
                         "Taking about this much damage would leave the run below its HP "
@@ -464,6 +583,20 @@ class CombatRiskGate:
         except Exception as exc:  # noqa: BLE001
             return Decision("combat_risk", True, 0.0, True,
                             {"posture": "defensive", "reason": f"jev error: {exc}"})
+
+    def _state(self, encounter: str, predicted_damage: int) -> dict:
+        extra = {"encounter": encounter, "predicted_incoming_damage": predicted_damage}
+        thin = {
+            "encounter": encounter,
+            "predicted_damage": predicted_damage,
+            "hp_budget": {
+                "remaining_spendable": self.hp.remaining_budget,
+                "reserved": self.hp.reserved_hp,
+                "current_hp": self.hp.current_hp,
+                "max_hp": self.hp.max_hp,
+            },
+        }
+        return _state_from(self.run, extra, thin)
 
 
 ALL_POINTS = (

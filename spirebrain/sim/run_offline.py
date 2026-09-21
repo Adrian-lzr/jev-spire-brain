@@ -45,6 +45,7 @@ from spirebrain.jev_brain.decisions import (
 )
 from spirebrain.jev_brain.logging_client import LoggingJevClient
 from spirebrain.jev_brain.state import (
+    RunContext,
     deck_digest,
     map_choices,
     path_damage_probes,
@@ -117,18 +118,36 @@ def run_one_simulation(seed: int = 0, confidence: float | None = None,
     rng = random.Random(seed)
 
     deck = [dict(c) for c in STARTING_DECK]
+    relics: list[str] = ["Burning Blood"]
+    potions: list[str] = []
+    gold = 150
+    run = RunContext(character="Ironclad", goal=goal, deck=deck, relics=relics,
+                     potions=potions, gold=gold)
     outcome = {"seed": seed, "goal": goal, "acts": [], "deck_size_start": len(deck)}
 
     for act in (1, 2, 3):
         hp = HPBudget(act=act, max_hp=80, current_hp=80)
-        router = MapRouter(jev, hp)
-        risk = CombatRiskGate(jev, hp)
-        rest = RestSiteDecider(jev, hp, goal=goal)
-        shop = ShopDecider(jev, goal=goal)
-        boss = BossRelicJudge(jev, goal=goal, deck_digest=deck_digest(deck))
-        cards = CardRewardJudge(jev, len(deck), strategy["deck_policy"]["max_cards"],
-                                deck_digest=deck_digest(deck), goal=goal)
-        events = EventChooser(jev, goal=goal)
+        floor = (act - 1) * 17
+
+        def _sync(hp_budget=hp, fl=floor) -> RunContext:
+            """Push live run facts into the context every module already holds.
+
+            The modules capture the RunContext once; mutating it in place is what
+            keeps their view of the run current as HP, gold and deck change.
+            """
+            run.deck = deck
+            run.relics = relics
+            run.potions = potions
+            run.gold = gold
+            run.floor = fl
+            return run.with_budget(hp_budget)
+
+        router = MapRouter(jev, hp, run=run)
+        risk = CombatRiskGate(jev, hp, run=run)
+        rest = RestSiteDecider(jev, hp, goal=goal, run=run)
+        shop = ShopDecider(jev, goal=goal, run=run)
+        boss = BossRelicJudge(jev, goal=goal, run=run)
+        events = EventChooser(jev, goal=goal, run=run)
 
         act_log: dict = {"act": act, "steps": []}
         _step = lambda kind, d: act_log["steps"].append(  # noqa: E731
@@ -137,10 +156,12 @@ def run_one_simulation(seed: int = 0, confidence: float | None = None,
 
         # -- routing -------------------------------------------------------- #
         for nodes in MAP_ROWS:
+            _sync()
             choices = map_choices(nodes)
             probes = path_damage_probes(nodes, act)
             d = router.decide(choices, probes)
             _step("map", d)
+            floor += 2
             chosen = next((n for n in nodes if str(n["id"]) == str(d.value)), nodes[0])
             symbol = chosen["symbol"]
             if symbol == "E":
@@ -151,42 +172,58 @@ def run_one_simulation(seed: int = 0, confidence: float | None = None,
                 hp.spend(rng.randint(0, 12))
 
         # -- card reward ---------------------------------------------------- #
+        _sync()
         reward = rng.choice(CARD_REWARDS)
-        c = cards.decide(reward)
+        c = CardRewardJudge(jev, len(deck), strategy["deck_policy"]["max_cards"],
+                            goal=goal, run=run).decide(reward)
         _step("card_reward", c)
+        floor += 1
         if c.value != "skip":
             deck.append({"name": str(c.value), "cost": 1, "type": "Attack"})
 
         # -- event ---------------------------------------------------------- #
+        _sync()
         text, options = rng.choice(EVENTS)
         e = events.decide(text, options)
         _step("event", e)
+        floor += 1
         if e.value == "take_it":
             hp.spend(int(hp.max_hp * 0.25))
 
         # -- rest site ------------------------------------------------------ #
+        _sync()
         upgradable = {card["name"]: f"{card['name']} ({card['type']})"
                       for card in deck if "+" not in card["name"]}
         r = rest.decide(hp_ratio=hp.current_hp / hp.max_hp, upgradable=upgradable)
         _step("rest", r)
+        floor += 1
         if r.value == "rest":
             hp.restore(int(hp.max_hp * 0.30))
 
         # -- shop ----------------------------------------------------------- #
-        gold = 150 + act * 50
+        gold = max(gold, 150 + act * 50)  # the act's earnings
         items = {
             "Ornamental Fan": (150, "block 4 after 3 attacks in a turn"),
             "Meat on the Bone": (165, "heal 12 HP at the end of combat below 50% HP"),
             "Card Removal": (75, "remove a card from your deck"),
         }
+        _sync()
         s = shop.decide(gold=gold, items=items)
         _step("shop", s)
+        floor += 1
+        if s.value not in ("leave", "remove") and s.value in items:
+            gold -= items[s.value][0]
 
         # -- boss relic (mandatory) ----------------------------------------- #
+        _sync()
         b = boss.decide({rel["name"]: rel["description"] for rel in RELICS})
         _step("boss_relic", b)
+        floor += 1
+        if isinstance(b.value, str):
+            relics.append(b.value)
 
         # -- combat risk gate ----------------------------------------------- #
+        _sync()
         predicted = 25 + act * 4
         g = risk.decide("act boss", predicted_damage=predicted)
         _step("combat_risk", g)
@@ -196,6 +233,9 @@ def run_one_simulation(seed: int = 0, confidence: float | None = None,
         act_log["hp_end"] = hp.current_hp
         act_log["budget_left"] = hp.remaining_budget
         outcome["acts"].append(act_log)
+
+    outcome["relics_end"] = list(relics)
+    outcome["state_digest_chars"] = len(json.dumps(run.digest(), ensure_ascii=False))
 
     outcome["jev_calls"] = jev.calls
     outcome["jev_cost_usd"] = jev.total_cost_usd

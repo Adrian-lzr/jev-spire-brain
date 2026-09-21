@@ -33,30 +33,52 @@ Legend: `[x]` done · `[~]` done but unreachable until an external condition is 
 
 ## Phase 5 — Real JEV + evaluation
 - [x] Real client implemented; switch with `JEV_BACKEND=openrouter` (real JEV via OpenRouter's System One route)
-- [x] **A full ascent has been run against real JEV**: 24 calls, $0.000528, p50 1435 ms — see docs/JEV_API.md
+- [x] **Three ascents run against real JEV** — see the experiment table in docs/JEV_API.md
 - [x] `analysis/calibration.py` — confidence-bucket report + fallback ratio + ECE stub
 - [x] `analysis/inspect_log.py` — read back what JEV actually answered, per question
-- [ ] **Enrich the decision states** (the actual blocker, see below)
+- [x] **Rich decision states** (`RunContext`): deck, relics, potions, HP budget, act, floor, gold, goal
+- [x] **Distribution-based acceptance** for Choice/Score: fallbacks 8/8 → 5/8; the brain now picks routes and refuses costly events on its own
+- [ ] **Make Score decisions discriminate** — card rewards still always skip (deck 10 → 10). See the three candidate experiments below
+- [ ] Decide whether `confidence=0.000` on some Score answers means zero or absent (log now records `confidence_present`)
+- [ ] Decide whether the remaining 5/8 fallbacks are the floor being right (genuinely hard calls) or still too strict
 - [ ] Run ≥50 ascents, collect stats (win rate, avg death floor, decisions log)
 - [ ] Compare: JEV brain vs. random baseline vs. greedy baseline vs. structured-LLM baseline
-- [ ] Resolve whether a missing `confidence` field is being read as 0.0 (flagged in the log as `confidence_present`)
-- [ ] Reconcile measured latency/cost with vendor claims (both now have real numbers to check against)
+- [ ] Wire `RunContext` into `driver/agent.py` so live play gets rich states too (currently only the simulator passes one)
 
-## The finding that resets the plan
+## What the measurements changed about our beliefs
 
-The first real run returned **61 of 63 answers below the 0.60 confidence floor**,
-with every module falling back to its safe rule. Diagnosed from the recorded
-payloads: this is not a model problem, it is a **state problem**. We asked
-"is this worth the gold for this run's goal?" while passing `{goal, gold}` — no
-deck, no relics, no HP — and JEV answered ≈0.4, which is its documented way of
-saying *this cannot be answered from what you gave me*.
+Two hypotheses were tested against the real model and one of them failed:
 
-`state.py` already builds full run digests (deck contents, relics, potions, HP
-ratio, act, floor, goal). The decision modules do not use it yet; each one
-hand-builds a thinner state. **Wiring the rich digest into all seven decision
-points is now the highest-value work in the project** — everything downstream
-(the calibration curve, the win-rate comparison, the whole "worth showing"
-list) is blocked behind it.
+1. **"Thin states cause the low confidences."** ❌ **Refuted.** Enriching every
+   decision to the full run digest left the score at 61/63 below the floor and
+   raised input cost ~48%. Confidence on *preference* questions is a flatness
+   statistic, not a correctness signal; a model told everything still has no
+   sharp answer to "which of these three cards is better".
+2. **"A 0.60 confidence floor is the right gate."** ❌ **Miscalibrated.** It made
+   the brain never act — 8/8 fallbacks, i.e. an expensive rule-based bot. The
+   type docs warn that this threshold must be chosen per-domain against risk.
+   Replacing it for Choice/Score with a distribution test (top option is the most
+   likely, clears 0.50, leads by 0.15) cut fallbacks to 5/8 and produced the first
+   genuinely model-chosen actions: a route and a refusal of a costly event.
+
+Both were invisible until the real model was called. That is the argument for
+running the expensive-looking experiment early.
+
+## Three cheap experiments queued for the Score problem
+
+Card rewards and boss relics still never discriminate, so the deck never grows.
+In ascending order of effort:
+
+1. **Coarser rubric** — collapse the 4-level CARD_RUBRIC to 2 levels ("does not
+   help" / "clearly helps"). Fewer levels means a more peaked distribution.
+2. **Different primitive** — ask three separate Noul questions per card
+   ("does this fix a weakness the deck has?", "does it duplicate something the
+   deck already does well?") and combine in code. The docs recommend decomposing
+   a multi-factor judgment into atomic questions, which is exactly this case.
+3. **Accept that this may be a real limit** — if neither helps, the honest
+   conclusion is that JEV cannot rank cards from a text digest, and the card
+   policy should stay a rule while JEV keeps the decisions it demonstrably owns
+   (routing, event consequences, HP-budget risk).
 
 ## Definition of "worth showing"
 - Agent completes 10 consecutive runs unattended
@@ -67,6 +89,7 @@ list) is blocked behind it.
 | Blocker | Blocks | Whose move |
 |---|---|---|
 | CommunicationMod not installed (ModTheSpire + BaseMod + StSLib are in place via Steam Workshop) | Phase 1 entirely, and Phase 3's post-combat review | user downloads 1 jar |
-| Decision states too thin | everything in Phase 5, calibration included | me — next turn |
+| Score answers carry no discriminative signal | a deck that grows, and therefore any win-rate comparison | me — 3 experiments above |
 | OpenRouter key permits only the `typesafe` provider | the structured-LLM baseline arm | user (add a provider) or a second key |
+
 

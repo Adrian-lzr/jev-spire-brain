@@ -257,6 +257,72 @@ same call reported `0.24`. A bare `.get("confidence", 0.0)` cannot distinguish
 recorded bytes rather than guesswork. **Do not read `0.000` as a calibrated zero
 until that is resolved.**
 
+## Experiment: does enriching the state raise confidence? (3 runs, 2026-09-21)
+
+A hypothesis, a refutation, and a fix — all from recorded bytes, all reproducible
+with `python -m spirebrain.sim.run_offline --backend=openrouter`.
+
+**Hypothesis.** The first run's low confidences were caused by thin decision
+states (the shop question passed `{goal, gold}`). Enrich them and confidence
+should rise.
+
+| Run | Change | Answers below 0.60 floor | Rule fallbacks | Cost / run | p50 latency |
+|---|---|---|---|---|---|
+| 1 | thin states, confidence floor | 61 / 63 | 8, 8, 8 per act | $0.000528 | 1435 ms |
+| 2 | **full run digest**, same floor | 61 / 63 | 7, 8, 8 | $0.000783 | 1334 ms |
+| 3 | full digest + **distribution-based acceptance** | 61 / 63 | **5, 5, 5** | $0.000783 | 1328 ms |
+
+**The hypothesis was wrong, and the numbers say so.** Enriching the state to the
+full run digest changed nothing (61/63 again) while raising input cost ~48%. The
+confidences cluster at 0.29–0.47 in *every* module, regardless of how much the
+model is told. That is not a state problem.
+
+**What is actually going on.** Confidence summarises how peaked the answer
+distribution is. For a *preference* question — "which of these three cards is
+better for an abstract goal" — a flat-ish distribution is the honest answer, and
+the type docs' own worked example shows the same shape (top option p=0.84 with
+confidence 0.596). The docs are explicit that the automation threshold "cannot be
+deduced from this single case; it has to be chosen against the risk and validated
+on labelled data from your own domain". Our 0.60 floor was a fact-question
+threshold applied to preference questions, and its consequence was that the brain
+**never acted** — every module fell back, making it an expensive rule-based bot.
+That is the finding, and it was invisible until we ran the real model.
+
+**The fix.** For Choice and Score, stop asking "how sure are you?" and ask what
+the distribution can actually answer: accept when the chosen option is the most
+likely one, its probability clears 0.50, and it leads the runner-up by 0.15
+(`accept_choice` / `accept_score` in `decisions.py`). Noul is untouched — for a
+yes/no question the probability *is* the belief, and the (0.40, 0.60) band
+already means "cannot tell".
+
+Effect, verbatim from run 3:
+
+```
+act1: map=n6 (chosen, not fallback)   event=leave_it (chosen, not fallback)
+      - map: route not clearly ahead        ← first map row still defers
+      - card_reward: best card not clearly worth taking
+      - rest: uncertain; rest is never wrong
+      - shop: cannot tell -> keep the gold
+      - boss_relic: mandatory pick, low confidence
+```
+
+Two behavioural changes with real consequences: the brain now picks its own route
+instead of silently rerouting to the cheapest node, and it **refuses the costly
+event** (`leave_it`), where the old fallback defaulted to the first-listed option
+(`take_it`, costing 25% of max HP).
+
+**Still unresolved, and next on the list.** Score-based points (card rewards,
+boss relics) did not improve: their distributions are flat and the level the model
+lands on rarely leads clearly, so cards are still always skipped and the deck never
+grows (10 → 10 across all runs). JEV is reporting that it does not distinguish our
+offered cards from each other. Candidate explanations worth testing, in order of
+cheapness: the 4-level rubric may be too coarse; a comparative judgment asked as
+N-per-card scores in isolation may be the wrong primitive (three separate
+"does adding this card fix a weakness this deck has?" Noul questions may carry
+more signal); and card quality may genuinely require deck-archaeology the model
+cannot do from a text digest. Each is a one-line change plus one run.
+
+
 
 ## Unverified / open
 

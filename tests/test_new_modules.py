@@ -97,6 +97,40 @@ def test_noul_verdict_band():
 
 
 # --------------------------------------------------------------------------- #
+# Choice acceptance: distribution strength over confidence
+# --------------------------------------------------------------------------- #
+def test_accept_choice_uses_distribution_not_confidence():
+    from spirebrain.jev_brain.client import JevAnswer
+    from spirebrain.jev_brain.decisions import accept_choice
+
+    # Flat-ish distribution: top option only 0.14 ahead -> defer, even though a
+    # 0.55 confidence would be "close". This is the real shape our live run showed.
+    flat = JevAnswer("a", 0.33, raw={"probabilities": {"a": 0.55, "b": 0.41, "c": 0.04}})
+    assert accept_choice(flat) is False
+
+    # Clearly separated top: act, at the SAME low confidence. Confidence is not
+    # what makes an answer actionable — the distribution is.
+    clear = JevAnswer("a", 0.33, raw={"probabilities": {"a": 0.80, "b": 0.10, "c": 0.10}})
+    assert accept_choice(clear) is True
+
+    # Chosen option is not the most likely one -> never act, however confident.
+    wrong = JevAnswer("b", 0.95, raw={"probabilities": {"a": 0.80, "b": 0.10}})
+    assert accept_choice(wrong) is False
+
+
+def test_accept_choice_falls_back_to_confidence_without_a_distribution():
+    from spirebrain.jev_brain.client import JevAnswer
+    from spirebrain.jev_brain.decisions import accept_choice
+
+    # MockJevClient and ScriptedJevClient publish no probabilities; behaviour
+    # must stay exactly as before so the offline tests remain meaningful.
+    bare_low = JevAnswer("a", 0.55, raw={"type": "choice", "choice": "a"})
+    bare_high = JevAnswer("a", 0.90, raw={"type": "choice", "choice": "a"})
+    assert accept_choice(bare_low) is False
+    assert accept_choice(bare_high) is True
+
+
+# --------------------------------------------------------------------------- #
 # Rest sites
 # --------------------------------------------------------------------------- #
 def test_rest_heals_when_model_says_so():
