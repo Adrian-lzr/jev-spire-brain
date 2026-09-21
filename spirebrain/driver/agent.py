@@ -35,7 +35,10 @@ from spirebrain.jev_brain.decisions import (
 from spirebrain.jev_brain.logging_client import LoggingJevClient
 from spirebrain.jev_brain.state import (
     RunContext,
+    card_line,
     deck_digest,
+    english_name,
+    lookup_keys,
     map_choices,
     path_damage_probes,
     shop_items,
@@ -224,7 +227,12 @@ class SpireBrainAgent:
     def _on_card_reward(self, game) -> dict:
         screen = _get(game, "screen_state", "screen", default=game)
         raw = _get(screen, "cards", default=[]) or []
-        names = [str(_get(c, "name", "card_id", default=f"card {i}")) for i, c in enumerate(raw)]
+        # `id` before `name`: the game reports names in its own language (this
+        # machine runs ZHS Chinese) while gamedata indexes the English files, so
+        # a name-first lookup silently yields "effect not found" for every card.
+        # See state.lookup_keys for the evidence and the reasoning.
+        names = [str(_get(c, "id", "card_id", "name", default=f"card {i}"))
+                 for i, c in enumerate(raw)]
         labels, index = _unique_labels(names)
         descriptions = {
             label: str(_get(raw[i], "description", "raw_description", default=names[i]))
@@ -283,9 +291,22 @@ class SpireBrainAgent:
             return self._record(d, {"command": "choose", "choice": rest_i})
 
         deck = self._deck(game)
-        upgradable = {str(_get(c, "name", default=f"card {i}")): str(_get(c, "type", default=""))
-                      for i, c in enumerate(deck)
-                      if not _get(c, "upgrades", default=0)}
+        # One label list feeds both the question and the grid index, so they can
+        # never drift apart. Labels come from `id` (language-independent) and the
+        # description is the card's own text from the game's data — this decision
+        # point used to receive nothing but a type word, which is not enough to
+        # judge an upgrade against.
+        character = self.run.character if self.run else None
+        upgradable: dict[str, str] = {}
+        labels: list[str] = []
+        for i, card in enumerate(deck):
+            if _get(card, "upgrades", default=0):
+                continue
+            keys = lookup_keys(card)
+            label = (english_name(keys, "cards", character)
+                     or str(_get(card, "name", default=f"card {i}")))
+            labels.append(label)
+            upgradable[label] = card_line(card, character=character)
         d = RestSiteDecider(self.jev, self._budget(), self.goal,
                             run=self.run).decide(hp_ratio=self._hp_ratio(),
                                                  upgradable=upgradable)
@@ -297,9 +318,7 @@ class SpireBrainAgent:
         # cards in the order the game presents them. We assume that order matches
         # the deck array; if the live game sorts the grid differently, the wrong
         # card gets upgraded — visible in the run, harmless, but worth checking.
-        names = [str(_get(c, "name", default=f"card {i}")) for i, c in enumerate(deck)
-                 if not _get(c, "upgrades", default=0)]
-        _, index = _unique_labels(names)
+        _, index = _unique_labels(labels)
         self._pending_upgrade = index.get(str(d.value), 0)
         return self._record(d, {"command": "choose", "choice": smith_i})
 
@@ -335,7 +354,7 @@ class SpireBrainAgent:
         raw = []
         for kind, key in (("card", "cards"), ("relic", "relics"), ("potion", "potions")):
             for item in (_get(screen, key, default=[]) or []):
-                raw.append({"name": str(_get(item, "name", "card_id", default=kind)),
+                raw.append({"name": str(_get(item, "id", "card_id", "name", default=kind)),
                             "price": int(_get(item, "price", default=0)),
                             "description": str(_get(item, "description", default=""))})
         items = shop_items(raw)
@@ -360,7 +379,8 @@ class SpireBrainAgent:
     def _on_boss_reward(self, game) -> dict:
         screen = _get(game, "screen_state", "screen", default=game)
         raw = _get(screen, "relics", default=[]) or []
-        names = [str(_get(r, "name", "relic_id", default=f"relic {i}")) for i, r in enumerate(raw)]
+        names = [str(_get(r, "id", "relic_id", "name", default=f"relic {i}"))
+                 for i, r in enumerate(raw)]
         labels, index = _unique_labels(names)
         descriptions = {
             label: str(_get(raw[i], "description", default=names[i]))

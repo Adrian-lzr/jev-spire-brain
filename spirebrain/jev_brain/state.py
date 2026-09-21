@@ -92,6 +92,51 @@ def card_effect_text(name: str, *, upgraded: bool = False,
         return None
 
 
+def lookup_keys(obj: dict) -> list[str]:
+    """Candidate game-data lookup keys for a card/relic/potion, best first.
+
+    **`id` before `name`, and this is not cosmetic.** Verified 2026-09-21 from a
+    live launch: this machine's game runs with `"LANGUAGE": "ZHS"` in
+    `preferences/STSGameplaySettings`, and CommunicationMod reports display names
+    in the game's own language. `gamedata` indexes the *English* localization
+    files, so a Chinese `name` ("打击") matches nothing and every card silently
+    degrades to "effect not found" — the exact failure this module exists to
+    prevent, reintroduced through the language setting.
+
+    `id` is language-independent and is the same key the localization files use
+    ("Strike_R", "Shrug It Off"), so it works under any language. `name` stays as
+    a fallback for callers that have no id (the offline simulator's synthetic
+    decks, and any hand-built state).
+    """
+    keys: list[str] = []
+    for field in ("id", "card_id", "relic_id", "name"):
+        value = obj.get(field)
+        if isinstance(value, str) and value and value not in keys:
+            keys.append(value)
+    return keys
+
+
+def english_name(keys: Iterable[str], table: str = "cards",
+                 character: str | None = None) -> str | None:
+    """The English display name from the game's data, if any of `keys` resolves.
+
+    JEV is asked English questions about English effects, so feeding it "打击"
+    alongside "Deal 6 damage." would be worse than feeding it "Strike". Returns
+    None when nothing resolves, and the caller keeps whatever name it had.
+    """
+    try:
+        from spirebrain import gamedata
+
+        data = gamedata.get()
+        for key in keys:
+            name = data.display_name(table, key, character=character)
+            if name:
+                return name
+    except Exception:  # noqa: BLE001 - enrichment must never break a decision
+        return None
+    return None
+
+
 def card_line(card: dict, character: str | None = None) -> str:
     """One readable line for a card: cost, type, and its real effect text.
 
@@ -99,18 +144,25 @@ def card_line(card: dict, character: str | None = None) -> str:
     never invent a card effect; if the text cannot be found the line simply omits
     it, and the question that uses this line is expected to say so.
     """
-    name = card.get("name") or card.get("id") or "unknown card"
+    keys = lookup_keys(card) or ["unknown card"]
     upgraded = bool(card.get("upgrades") or card.get("is_upgraded"))
     cost = card.get("cost")
     cost_txt = "X" if cost == -1 else ("-" if cost is None else str(cost))
-    parts = [f"{name}{'+' if upgraded else ''} ({cost_txt}E)"]
+    # Show the English name when the game data can supply it; the localised name
+    # is what the game says, but the questions around it are English.
+    label = english_name(keys, "cards", character) or card.get("name") or keys[0]
+    parts = [f"{label}{'+' if upgraded else ''} ({cost_txt}E)"]
     if card.get("type"):
         parts.append(str(card["type"]))
     if card.get("description"):
         parts.append(str(card["description"]))
     else:
-        text = card_effect_text(name, upgraded=upgraded, character=character,
-                               values=card_values(card))
+        text = None
+        for key in keys:
+            text = card_effect_text(key, upgraded=upgraded, character=character,
+                                   values=card_values(card))
+            if text:
+                break
         if text:
             parts.append(text)
     return " - ".join(parts)

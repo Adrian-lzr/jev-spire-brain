@@ -35,6 +35,10 @@ Usage
     python -m spirebrain.install_mod_config --show            # print the current file, decoded
     python -m spirebrain.install_mod_config --backend official --write
 
+    # let the agent start the run itself instead of waiting at the menu:
+    python -m spirebrain.install_mod_config --auto-start --write
+    python -m spirebrain.install_mod_config --auto-start --ascension 0 --write
+
 Preview is the default because this writes outside the repository, into the user's
 own mod settings directory.
 """
@@ -206,9 +210,28 @@ def parse_config(text: str) -> dict:
     return out
 
 
-def default_command(backend: str = DEFAULT_BACKEND) -> str:
-    """`<python> <repo>/run_agent.py --backend <backend>` — never the module file."""
-    return f"{sys.executable} {ROOT / 'run_agent.py'} --backend {backend}"
+def default_command(backend: str = DEFAULT_BACKEND, *, auto_start: bool = False,
+                   klass: str | None = None, ascension: int | None = None) -> str:
+    """`<python> <repo>/run_agent.py --backend <backend> [agent flags]`.
+
+    Never the module file: running a script puts *that script's* directory first
+    on `sys.path`, so pointing at `spirebrain/driver/stdio.py` cannot import the
+    package.
+
+    `--auto-start` is the flag that decides whether the agent starts a run by
+    itself when it finds the game at the main menu. Without it a live launch sits
+    silently at the menu — measured 2026-09-21, and from the outside it is
+    indistinguishable from a dead process — so the flag is offered here instead of
+    being left to a hand edit of the config file.
+    """
+    agent = f"{sys.executable} {ROOT / 'run_agent.py'} --backend {backend}"
+    if klass:
+        agent += f" --class {klass}"
+    if ascension is not None:
+        agent += f" --ascension {int(ascension)}"
+    if auto_start:
+        agent += " --auto-start"
+    return agent
 
 
 # --------------------------------------------------------------------------- #

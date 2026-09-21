@@ -283,6 +283,49 @@ def test_replay_decides_recorded_states_offline():
         assert [g["screen_type"] for g in agent.seen] == ["MAP", "REST", "COMBAT"]
 
 
+
+# --------------------------------------------------------------------------- #
+# The main menu: the state that cost an evening (measured 2026-09-21)
+# --------------------------------------------------------------------------- #
+def test_menu_without_auto_start_stays_silent_but_says_so():
+    """A real launch idled here and looked exactly like a dead agent.
+
+    The game sent one menu state (22:28:39), this transport correctly sent
+    nothing, and from the outside there was no way to tell that from a process
+    that never started at all. The silence stays — the player may want the menu —
+    but it must leave a trace on stderr.
+    """
+    menu = json.dumps({"available_commands": ["start", "state"],
+                       "ready_for_command": True, "in_game": False})
+    transport = StdioTransport(_StubAgent(), log_path=None)
+    err = io.StringIO()
+    real, sys.stderr = sys.stderr, err
+    try:
+        assert transport.handle_message(json.loads(menu)) is None
+    finally:
+        sys.stderr = real
+    assert transport.menu_idle == 1
+    assert "--auto-start" in err.getvalue()
+
+
+def test_menu_with_auto_start_starts_the_run():
+    menu = {"available_commands": ["start", "state"], "ready_for_command": True,
+            "in_game": False}
+    transport = StdioTransport(_StubAgent(), log_path=None, auto_start=True,
+                               player_class="IRONCLAD", ascension=0)
+    assert transport.handle_message(menu) == "start IRONCLAD 0"
+
+
+def test_menu_start_is_dropped_when_the_game_does_not_offer_it():
+    """Every emitted verb must be advertised, including on the menu path."""
+    menu = {"available_commands": ["state"], "ready_for_command": True, "in_game": False}
+    transport = StdioTransport(_StubAgent(), log_path=None, auto_start=True)
+    line = transport.handle_message(menu)
+    assert line == "state"
+    assert transport.substitutions[0]["wanted"] == "start IRONCLAD 0"
+
+
+
 if __name__ == "__main__":
     import traceback
 

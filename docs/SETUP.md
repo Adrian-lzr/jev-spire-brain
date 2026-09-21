@@ -125,7 +125,7 @@ posts get wrong** (`CommunicationMod.java`, `SpireConfig.java`, `ConfigUtils.jav
 Do **not** point `command=` at `spirebrain/driver/stdio.py` — see point 1 of the
 trap list below.
 
-### The four traps
+### The five traps
 
 1. **Point `command=` at `run_agent.py`, never at `spirebrain/driver/stdio.py`.**
    Running a script puts *that script's* directory first on `sys.path`, so the
@@ -140,6 +140,34 @@ trap list below.
 4. **The game spawns us with the game's environment, not your shell's.**
    `run_agent.py` therefore loads `.env` from the repo root; without that the agent
    would start keyless and silently fall back to the mock.
+5. **A subscription is not a download.** Verified live 2026-09-21: the Workshop id
+   appeared in `WorkshopItemDetails` (subscribed) while `WorkshopItemsInstalled`
+   still listed only the other three mods, and `NeedsDownload=1`. Steam processed
+   it only when the client next ran. `python -m spirebrain.doctor` reports the two
+   states separately for exactly this reason.
+
+### The evening of 2026-09-21, in one paragraph
+
+The first live launch *worked* — ModTheSpire's own log shows
+`Received message from external process: Ready` — and then looked exactly like a
+dead agent. The game sent one state (`in_game: false`, the main menu), our
+transport stayed silent by design (auto-start off), the player quit a minute
+later, and the only traces were one 144-byte log line and a banner in
+`communication_mod_errors.log` whose em dash had arrived as mojibake (`a1 aa`,
+because Python defaulted stderr to cp936). Every silent-looking failure since has
+been given a voice: menu idling prints why it is idling, the shutdown line counts
+menu states and substitutions, stderr is UTF-8, and the banner avoids non-ASCII.
+
+### The game is not in English on this machine
+
+`preferences/STSGameplaySettings` has `"LANGUAGE": "ZHS"`, so CommunicationMod
+reports Chinese display names ("打击") — and the English effect lookup used to
+match on `name`, silently finding nothing. Fixed by looking up `id` first
+(language-independent, camel-cased: `PommelStrike`) and resolving it against the
+English localization keys (`Pommel Strike`) with a whitespace/case-insensitive
+index; the digest then labels the card with the English name plus real runtime
+numbers (`Deal 9 damage. Draw 1 card.`). `tests/test_live_state.py` pins all of
+it with fixtures shaped like the live payload.
 
 ## 3. Point the agent at your game data
 
@@ -181,21 +209,45 @@ python -m spirebrain.sim.run_offline
 ## 5. First live run (smoke test)
 
 1. Launch the game through ModTheSpire with BaseMod + CommunicationMod ticked.
-2. Watch the ModTheSpire log window: our stderr appears there, and
-   `communication_mod_errors.log` keeps our stdout.
-3. Start a run. The agent answers each stable state with exactly one command.
+   The ModTheSpire log is the authoritative record: on the first real launch it
+   showed `Received message from external process: Ready` under
+   `- Communication Mod`, which is the definitive "the agent was pulled up".
+2. The agent's own traces: `communication_mod_errors.log` in the game folder
+   (our stderr — the ready banner, the menu notice, the shutdown summary) and
+   `logs/pipe.jsonl` in the repo (every message the game sent, every command we
+   answered).
+3. **What you see at the main menu depends on auto-start.** Without it, the agent
+   prints one line to stderr and waits — you start the run by hand. With
+   `--auto-start` (recommended for unattended sessions:
+   `python -m spirebrain.install_mod_config --auto-start --write`), it sends
+   `start IRONCLAD 0` itself when the game offers `start`.
+4. Each stable in-game state gets exactly one command.
 
 Success criteria — the goal is **pipe integrity**, not intelligence:
 
-- [ ] `[stdio] ready — backend=…` appears in the log (this is stderr, so it does not corrupt the protocol)
+- [ ] `[stdio] ready — backend=…` appears in `communication_mod_errors.log`
+      (readable UTF-8, no mojibake)
 - [ ] `logs/pipe.jsonl` grows: one record per message, with `"sent"` filled in
+      for in-game states (menu states correctly show `"sent": null`)
 - [ ] The cursor moves and options get picked, i.e. commands are accepted
-- [ ] `%LOCALAPPDATA%\ModTheSpire\CommunicationMod\communication_mod_errors.log` shows no protocol errors
+- [ ] No protocol errors in the error log; the shutdown line
+      (`stdin closed after N messages…`) names zero substitutions, or only
+      explainable ones
 - [ ] A full Act 1 completes without the pipe dying
 
 Expect conservative play at this stage: many judgements fall back to rules. That
 is the designed behaviour while the confidence thresholds are unvalidated — see
 `docs/MEASUREMENTS.md`.
+
+Timing, measured, so nobody rediscovers it in a hang: the *initialisation*
+timeout is the only hard deadline (`maxInitializationTimeout=10`, seconds, and
+our `Ready` precedes any JEV call, so it is not at risk). During play there is
+no documented per-command timeout, but each answer blocks the game's UI thread,
+and real JEV answers take 0.5–1.6 s per call — so a screen that batches many
+questions into one call (the shop asks several) is felt as a short freeze. That
+is acceptable for a watched smoke test; if unattended runs need snappier play,
+the fix is batching questions per screen (already the design) rather than
+threading (never: two commands for one state is a protocol violation).
 
 ### Re-deciding a recorded session offline
 

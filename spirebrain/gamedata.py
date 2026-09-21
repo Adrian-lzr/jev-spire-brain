@@ -44,12 +44,17 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 CACHE_DIR = ROOT / ".cache" / "gamedata"
+
+# "PommelStrike" -> "pommelstrike": matches CommunicationMod's camel-case ids
+# against the localization files' space-preserving keys.
+SQUEEZE_RE = re.compile(r"[\s_\-]+")
 JAR_NAME = "desktop-1.0.jar"
 LANG = "eng"
 
@@ -127,6 +132,7 @@ class GameData:
     loaded: bool = False
     tables: dict[str, dict] = field(default_factory=dict)
     _name_index: dict[str, dict] = field(default_factory=dict, repr=False)
+    _squeeze_cache: dict[str, dict] = field(default_factory=dict, repr=False)
 
     # -- loading ----------------------------------------------------------- #
     @classmethod
@@ -199,7 +205,15 @@ class GameData:
         return self._name_index[table]
 
     def _entry(self, table: str, name: str, character: str | None = None) -> dict | None:
-        """Find an entry by localization key first, then by display NAME."""
+        """Find an entry by localization key first, then by display NAME.
+
+        Then by *squeezed* key, last: CommunicationMod's card ids arrive
+        camel-cased ("PommelStrike", "AscendersBane" — verified from a live
+        payload 2026-09-21) while the localization keys keep their spaces
+        ("Pommel Strike"). Case and whitespace-insensitive matching resolves
+        those; it can only over-match where two keys differ solely by spacing,
+        which the card list does not contain.
+        """
         table_data = self.tables.get(table, {})
         if character:
             letter = CHARACTER_LETTER.get(character.upper())
@@ -213,7 +227,22 @@ class GameData:
             candidate = table_data.get(key)
             if isinstance(candidate, dict):
                 return candidate
+        squeezed = SQUEEZE_RE.sub("", name).lower()
+        if squeezed != name:
+            candidate = self._squeeze_index(table).get(squeezed)
+            if isinstance(candidate, dict):
+                return candidate
         return None
+
+    def _squeeze_index(self, table: str) -> dict[str, dict]:
+        """lowercase, no-space form of every key -> entry. Memoised per table."""
+        if table not in self._squeeze_cache:
+            idx: dict[str, dict] = {}
+            for key, entry in self.tables.get(table, {}).items():
+                if isinstance(entry, dict):
+                    idx.setdefault(SQUEEZE_RE.sub("", key).lower(), entry)
+            self._squeeze_cache[table] = idx
+        return self._squeeze_cache[table]
 
     @staticmethod
     def _render(entry: dict, *, upgraded: bool, values: dict | None = None) -> str | None:
@@ -267,6 +296,21 @@ class GameData:
 
     def known(self, table: str, name: str, character: str | None = None) -> bool:
         return self._entry(table, name, character=character) is not None
+
+    def display_name(self, table: str, key: str, character: str | None = None) -> str | None:
+        """The English `NAME` for a localization key, or None.
+
+        Exists because the *game* may not be in English: this machine runs with
+        `"LANGUAGE": "ZHS"`, so CommunicationMod reports "打击" where the English
+        files say "Strike". Asking JEV about a Chinese card name next to an English
+        effect sentence helps nobody, so digests label cards from here (see
+        `state.lookup_keys` and `state.card_line`).
+        """
+        entry = self._entry(table, key, character=character)
+        if isinstance(entry, dict):
+            name = entry.get("NAME")
+            return str(name) if name else None
+        return None
 
     def card_line(self, name: str, *, upgraded: bool = False,
                   character: str | None = None, values: dict | None = None) -> str:

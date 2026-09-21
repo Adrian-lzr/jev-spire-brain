@@ -172,6 +172,7 @@ class StdioTransport:
         self.commands = 0
         self.errors = 0
         self.skipped_not_ready = 0
+        self.menu_idle = 0
         self.substitutions: list[dict] = []
 
     # -- one message ------------------------------------------------------- #
@@ -189,10 +190,24 @@ class StdioTransport:
             # Not in a run. Starting one is a *choice*, not a default: the player
             # may be sitting in the menu on purpose, and this agent is meant to
             # be watched while it plays.
+            self.menu_idle += 1
             if not self.auto_start:
+                if self.menu_idle == 1:
+                    # Say so out loud, once. Measured 2026-09-21: a real launch with
+                    # auto_start off looks *exactly like a dead agent* from the
+                    # outside — the game sent one menu state (22:28:39), we stayed
+                    # silent by design, and nothing else happened for a minute until
+                    # the player quit. Silence in the pipe is indistinguishable from
+                    # the absence of a process unless it is recorded somewhere.
+                    print("[stdio] at the main menu and --auto-start is off: staying "
+                          "silent so the player keeps control. Start a run in-game, or "
+                          "pass --auto-start and the agent starts one itself.",
+                          file=sys.stderr, flush=True)
                 return None
-            return to_command_line({"command": "start", "player_class": self.player_class,
-                                    "ascension": self.ascension})
+            return self._ensure_offered(
+                to_command_line({"command": "start", "player_class": self.player_class,
+                                 "ascension": self.ascension}),
+                message.get("available_commands"))
 
         if not message.get("ready_for_command", True):
             # Absence of the flag is treated as "ready" rather than stalling
@@ -312,6 +327,17 @@ def replay(paths: list[Path], agent, *, log_path: str | Path | None = None,
 
 
 def main(argv: list[str]) -> int:
+    # Our diagnostics must survive the console encoding. Windows Python defaults
+    # to the locale codepage (cp936 on this machine), and the mod captures stderr
+    # into communication_mod_errors.log: the em dash in our banner arrived there
+    # as the two stray bytes `a1 aa`. Only stderr is reconfigured — stdout is the
+    # protocol stream and is ASCII by construction, so it is left alone.
+    if hasattr(sys.stderr, "reconfigure"):
+        try:
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
     def value(name: str) -> str | None:
         prefix = f"--{name}="
         hit = next((a.split("=", 1)[1] for a in argv if a.startswith(prefix)), None)
@@ -353,7 +379,9 @@ def main(argv: list[str]) -> int:
           file=sys.stderr)
     transport.run(sys.stdin, sys.stdout)
     print(f"[stdio] stdin closed after {transport.messages} messages, "
-          f"{transport.commands} commands, {transport.errors} errors",
+          f"{transport.commands} commands, {transport.errors} errors, "
+          f"{transport.menu_idle} menu states, "
+          f"{len(transport.substitutions)} substitutions",
           file=sys.stderr)
     return 0
 
