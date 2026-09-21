@@ -1,0 +1,19 @@
+{
+  "goal": "ascension_20_win",
+  "risk_appetite": 0.35,
+  "restart_budget": 50,
+  "hp_budget": {
+    "act_retention": { "1": 0.30, "2": 0.40, "3": 0.50 },
+    "elite_expected_cost": [12, 20],
+    "normal_expected_cost": [3, 8]
+  },
+  "deck_policy": {
+    "max_cards": 25,
+    "synergy_weight": 0.6,
+    "prefer": []
+  },
+  "jev": {
+    "confidence_floor": 0.60,
+    "log_dir": "logs"
+  }
+}

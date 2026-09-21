@@ -1,0 +1,9 @@
+# Runtime dependencies for Jev Spire Brain.
+#
+# The brain is intentionally close to stdlib-only: the JEV HTTP client uses
+# urllib (see spirebrain/jev_brain/client_real.py), and the strategy config is
+# plain JSON — so you can run the full offline pipeline with nothing installed.
+# The packages below are only needed for the live game pipe and the test runner.
+
+spirecomm>=0.6.0        # Slay the Spire CommunicationMod bindings (Phase 1; pin fork then)
+pytest>=8.0             # optional: tests are plain scripts and run without it
