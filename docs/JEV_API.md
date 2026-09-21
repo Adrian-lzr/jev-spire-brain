@@ -6,20 +6,88 @@ Cloudflare AI docs page for `typesafe/jev`. Anything not verified is marked as
 such. Do not let this file drift from the code: `spirebrain/jev_brain/client.py`
 and `client_real.py` are the implementation of what is written here.
 
-## Endpoint
+## Endpoints — four routes, one shape
 
-| | |
-|---|---|
-| URL | `POST https://api.typesafe.ai/v1/systemone` |
-| Auth | `Authorization: Bearer $TYPESAFE_API_KEY` |
-| Key from | `console.typesafe.ai` (early access is waitlisted) |
-| Model | `jev-latest` |
-| Content | `application/json` |
+| Route | URL | Auth | Model id | Notes |
+|---|---|---|---|---|
+| **OpenRouter (used here)** | `POST https://openrouter.ai/api/v1/systemone` | `OPENROUTER_API_KEY` | `jev-1.13` | ✅ **verified live 2026-09-21.** Adds `id`, `provider`, and `usage.cost` |
+| TypeSafe direct | `POST https://api.typesafe.ai/v1/systemone` | `TYPESAFE_API_KEY` | `jev-latest` | key from `console.typesafe.ai`, waitlisted |
+| Cloudflare AI | `POST .../accounts/$ID/ai/run` | `CLOUDFLARE_API_TOKEN` | `typesafe/jev` | 32K ctx; answers wrapped under `result.result` |
+| Vercel AI Gateway | via gateway SDK | gateway key | `typesafe-ai/jev` | documented by Vercel, not implemented here |
 
-Three ways to reach Jev are documented: TypeSafe direct (above), Cloudflare AI
-(`typesafe/jev`, 32K context, `env.AI.run('typesafe/jev', {state, questions})`),
-and the Vercel AI Gateway model id `typesafe-ai/jev`. This repo implements the
-first two — see `OfficialJevClient` and `CloudflareJevClient`.
+`OpenRouterJevClient` is what this project uses (`JEV_BACKEND=openrouter`).
+`CloudflareJevClient` is implemented but unexercised; the TypeSafe-direct client is
+identical in shape and only differs by host and key.
+
+### ⚠️ The OpenRouter gotcha that costs an hour
+
+**JEV is not callable through OpenRouter's chat completions endpoint.** All of
+these return `400 "... is not a valid model ID"`:
+
+```
+POST /api/v1/chat/completions   {model: "typesafe/jev"}          -> 400
+POST /api/v1/chat/completions   {model: "typesafe/jev-latest"}   -> 400
+POST /api/v1/chat/completions   {model: "typesafe/jev-1.13"}     -> 400
+GET  /api/v1/models/typesafe/jev/endpoints                       -> 404
+```
+
+JEV is absent from the public `/api/v1/models` listing (446 models on
+2026-09-21, no match for `jev`/`typesafe`/`systemone`) — it is reachable but
+unlisted. Only the **System One / decisions route** serves it. OpenRouter also
+exposes `POST /api/alpha/decisions` with the alias `~typesafe/jev-latest`; both
+were verified working, and this repo uses `/api/v1/systemone` because it is the
+documented, SDK-compatible shape.
+
+Model-id quirks: bare `jev-1.13` is mapped by OpenRouter onto `typesafe/…`;
+`typesafe/jev-1.13` is accepted as-is; the **family alias** `~typesafe/jev-latest`
+exists but a pinned `~typesafe/jev-1.13.0` 404s.
+
+### Another gotcha: the account's provider policy
+
+OpenRouter accounts can restrict which providers they will route to, and the
+restriction is enforced with a confusing 404 rather than a 403:
+
+```json
+{"error":{"message":"No allowed providers are available for the selected model.
+Providers serving qwen/qwen3.7-flash: alibaba, but your account's allowed-providers
+setting permits only: typesafe.","code":404}}
+```
+
+The account this project was developed against permits **only `typesafe`** — which
+is why it can call JEV but nothing else. Practical consequence: the structured-LLM
+*baseline* client (`JEV_BACKEND=llm`) is code-complete but unrunnable on that key
+until a provider is allowed at <https://openrouter.ai/settings/privacy>.
+
+### What a live call actually returned
+
+Verified 2026-09-21, first real run of the project against JEV:
+
+```
+POST https://openrouter.ai/api/v1/systemone
+{"model":"jev-1.13", "state":"Help! My payouts have been failing for 3 days.", "questions":{…}}
+
+-> {"model":"typesafe/jev-1.13-20260917",
+    "provider":"TypeSafe",
+    "answers":{"is_urgent":{"type":"noul","noul":0.95},
+               "department":{"type":"choice","choice":"billing",
+                             "probabilities":{"technical":0.11,"billing":0.89,"sales":0},
+                             "confidence":0.84}},
+    "usage":{"input_tokens":362,"output_tokens":57,"cost":0.000015204},
+    "id":"gen-dec-1789991218-vznpx4vtJonKuiIRyLlv"}
+```
+
+Three things this settles that the docs alone did not:
+
+1. `usage.cost` is **provider-computed in USD**. Use it; our price-table estimate
+   (`estimate_cost_usd`) is only a fallback. `client_real.resolve_cost` prefers the
+   provider's number and records which source was used in `usage.cost_source`.
+2. Usage keys came back **snake_case** on this route (`input_tokens`), though docs
+   say camelCase may appear. `normalize_usage` accepts both.
+3. Latency was **1135–1620 ms** per call (p50 ≈ 1435 ms) from this machine, against
+   TypeSafe's US-West claim of 70–500 ms. This matches an independent third-party
+   measurement of 0.5–1.4 s via OpenRouter from Asia. Attribute latency in reporting;
+   do not repeat the vendor's 70–500 ms figure as if it were measured here.
+
 
 ## Request body
 
@@ -117,24 +185,78 @@ The docs' own worked example is the reason for the first rule: a Choice answered
 ## Wiring it up
 
 ```bash
+# real JEV — the route this project uses
+export JEV_BACKEND=openrouter
+export OPENROUTER_API_KEY=...
+
 # offline, no key, no network: deterministic mock
 export JEV_BACKEND=mock
-python -m spirebrain.sim.run_offline
 
-# real JEV, TypeSafe direct
-export JEV_BACKEND=official
-export TYPESAFE_API_KEY=...
+# structured-LLM baseline (NOT JEV) — needs a non-restricted key, see gotcha above
+export JEV_BACKEND=llm
 
-# real JEV, via Cloudflare
-export JEV_BACKEND=cloudflare
-export CLOUDFLARE_ACCOUNT_ID=...
-export CLOUDFLARE_API_TOKEN=...
+# other real-JEV routes (different accounts)
+export JEV_BACKEND=official    # + TYPESAFE_API_KEY
+export JEV_BACKEND=cloudflare  # + CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN
 ```
 
 `JEV_BACKEND` is read by `get_client()`. A missing key raises an explicit
 `JevApiError` naming the environment variable rather than failing obscurely at
 the first call. HTTP 402 (no credits) and non-429 4xx are **not** retried: they
 are not transient. 429/5xx/socket errors are retried with exponential backoff.
+
+Run the whole pipeline against real JEV:
+
+```bash
+python -m spirebrain.sim.run_offline --backend=openrouter
+python -m spirebrain.analysis.inspect_log --summary   # what JEV actually said
+python -m spirebrain.analysis.calibration logs
+```
+
+## First real run: what we learned (2026-09-21)
+
+The first end-to-end ascent against real JEV cost **$0.00052836** for 24 calls
+(avg $0.000022). Results that matter more than the cost:
+
+| Observation | Number | What it means |
+|---|---|---|
+| Calls | 24 (3 acts × 8 decision points) | the full pipeline works against the real model |
+| Latency | 1135–1620 ms, p50 1435 ms | ~3× slower than the vendor's claim from our network |
+| Answers below the 0.60 confidence floor | **61 of 63** | JEV says our questions are under-specified |
+| Rule fallbacks fired | 7/8, 8/8, 8/8 per act | on thin state, the safe path *is* the answer |
+
+Representative answers, taken verbatim from `logs/jev_calls.jsonl`:
+
+```
+#22  state={"goal":"ascension_20_win","gold":300}
+       buy_Ornamental Fan   noul  p(yes)=0.36
+       buy_Meat on the Bone noul  p(yes)=0.40
+       buy_Card Removal     noul  p(yes)=0.42
+
+#23  state={"deck":"Bash (2E) - Attack; Defend (1E) - Skill; …"}
+       Philosopher's Stone  score level=0.76  confidence=0.24
+       Runic Dome           score level=1.04  confidence=0.000
+       Coffee Dripper       score level=1.26  confidence=0.000
+```
+
+Reading these correctly matters, and the honest reading is: **the bottleneck is
+our state, not the model.** The shop question asked "is this worth the gold for
+this run's goal?" while passing only `{goal, gold}` — no deck, no HP, no relics.
+JEV answered ~0.4, which is the documented way of saying *this question cannot be
+answered from what you gave me*. The project's existing `state.py` builds far
+richer digests; the decision modules simply do not use them yet. Enriching those
+states is the next milestone, and it is the difference between a brain that
+falls back 8/8 and one that actually steers.
+
+### Open item: missing vs zero confidence
+
+In call #23 two Score answers reported `confidence=0.000` while a sibling in the
+same call reported `0.24`. A bare `.get("confidence", 0.0)` cannot distinguish
+"the model said zero" from "the field was absent". `parse_answers` now records
+`confidence_present` alongside every raw answer so the next run settles it from
+recorded bytes rather than guesswork. **Do not read `0.000` as a calibrated zero
+until that is resolved.**
+
 
 ## Unverified / open
 

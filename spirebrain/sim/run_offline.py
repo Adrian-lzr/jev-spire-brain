@@ -97,13 +97,22 @@ RELICS = [
 ]
 
 
-def run_one_simulation(seed: int = 0, confidence: float | None = None) -> dict:
-    """One ascent. `confidence=None` -> strategy.json's pessimistic mock."""
+def run_one_simulation(seed: int = 0, confidence: float | None = None,
+                       backend: str | None = None) -> dict:
+    """One ascent.
+
+    `backend=None` uses the mock (pessimistic by default, or `confidence=` for the
+    optimistic variant). Pass `backend="openrouter"` to run the real thing against
+    JEV via OpenRouter — same code path, same questions, real answers.
+    """
     strategy = json.loads((ROOT / "config" / "strategy.json").read_text(encoding="utf-8"))
     floor = strategy["jev"]["confidence_floor"]
     goal = strategy["goal"]
 
-    inner = get_client("mock") if confidence is None else MockJevClient(confidence=confidence)
+    if backend and backend != "mock":
+        inner = get_client(backend)
+    else:
+        inner = get_client("mock") if confidence is None else MockJevClient(confidence=confidence)
     jev = LoggingJevClient(inner, log_dir=ROOT / strategy["jev"]["log_dir"])
     rng = random.Random(seed)
 
@@ -220,9 +229,14 @@ if __name__ == "__main__":
 
     optimistic = "--optimistic" in sys.argv
     conf = 0.90 if optimistic else None
-    result = run_one_simulation(seed=42, confidence=conf)
-    print(f"=== {'optimistic' if optimistic else 'pessimistic'} mock run ===")
+
+    backend = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--backend=")), None)
+    if backend is None and "--backend" in sys.argv:
+        backend = sys.argv[sys.argv.index("--backend") + 1]
+
+    result = run_one_simulation(seed=42, confidence=conf, backend=backend)
+    label = backend or ("optimistic mock" if optimistic else "pessimistic mock")
+    print(f"=== run [{label}] ===")
     print(_summary(result))
     print(json.dumps(result, ensure_ascii=False, indent=2)[:1200])
-    print(f"\njev calls: {result['jev_calls']} | cost: ${result['jev_cost_usd']:.8f} "
-          "(mock: no real spend)")
+    print(f"\njev calls: {result['jev_calls']} | cost: ${result['jev_cost_usd']:.8f}")

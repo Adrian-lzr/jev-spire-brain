@@ -39,15 +39,23 @@ Both come straight from the official docs ([docs/JEV_API.md](docs/JEV_API.md)):
 
 ## Status
 
-🚧 **Phases 0/2/3/4 complete offline; Phase 5 client written.** All 7 decision modules + HP budget + greedy combat + logging + simulation harness + the real JEV HTTP client are in place, with **56 tests passing**. Phase 1 (the live game pipe) is the one piece that needs the mods installed — see [docs/SETUP.md](docs/SETUP.md).
+🚧 **The brain runs against real JEV.** All 7 decision modules + HP budget + greedy combat + logging + simulation harness + agent router + the real JEV client are in place, with **76 tests passing**. A full three-act ascent has been run end-to-end on JEV via OpenRouter for **$0.000528** (24 calls). Phase 1 (the live game pipe) still needs CommunicationMod in place — see [docs/SETUP.md](docs/SETUP.md).
 
 ```bash
 # run everything offline right now (no game, no API key):
-python -m spirebrain.sim.run_offline                # pessimistic mock: every module falls back (24 calls)
-python -m spirebrain.sim.run_offline --optimistic   # confident mock: JEV actually steers the run
-python -m spirebrain.analysis.calibration logs      # confidence bucket report
-python tests\test_client_real.py                    # payload/parse against the published API response
+python -m spirebrain.sim.run_offline                # pessimistic mock: every module falls back
+python -m spirebrain.sim.run_offline --optimistic   # confident mock: answers steer the run
+
+# run it against real JEV (needs OPENROUTER_API_KEY):
+python -m spirebrain.sim.run_offline --backend=openrouter
+python -m spirebrain.analysis.inspect_log --summary  # what JEV actually answered
+python -m spirebrain.analysis.calibration logs       # confidence bucket report
 ```
+
+**First real run, in one line:** 24 calls, $0.000528, and **61 of 63 answers below
+the 0.60 confidence floor** — JEV telling us our decision states are too thin to
+judge from. That diagnosis, not a bug, is the next milestone. Details and verbatim
+answers: [docs/JEV_API.md](docs/JEV_API.md#first-real-run-what-we-learned-2026-09-21).
 
 Python package name stays `spirebrain` (import name); repo name is `jev-spire-brain`.
 

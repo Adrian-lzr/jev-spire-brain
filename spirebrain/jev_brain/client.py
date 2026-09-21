@@ -232,9 +232,17 @@ class ScriptedJevClient(JevClient):
 # Factory
 # --------------------------------------------------------------------------- #
 def get_client(backend: str | None = None) -> JevClient:
-    """`backend`: "mock" (default) | "scripted" | "official" | "cloudflare".
+    """`backend`: "mock" (default) | "scripted" | "openrouter" | "llm" | "official" | "cloudflare".
 
     Also honours the JEV_BACKEND environment variable when `backend` is None.
+
+    * "openrouter" — REAL JEV via OpenRouter's System One route (model jev-1.13).
+      This is the route this project uses; it needs OPENROUTER_API_KEY.
+    * "llm"        — a schema-constrained chat model posing as JEV. NOT JEV: a
+      labelled baseline for comparing self-reported confidence against JEV's
+      calibrated probabilities. Backend name is `llm:<model>`.
+    * "official"/"cloudflare" — TypeSafe direct / Cloudflare AI (both need their
+      own accounts; neither is what we have).
     """
     import os
 
@@ -243,10 +251,22 @@ def get_client(backend: str | None = None) -> JevClient:
         return MockJevClient()
     if backend == "scripted":
         return ScriptedJevClient({})
-    if backend in ("official", "cloudflare"):
-        from spirebrain.jev_brain.client_real import CloudflareJevClient, OfficialJevClient
+    if backend == "llm":
+        from spirebrain.jev_brain.openrouter_client import LlmStructuredClient
 
-        return CloudflareJevClient() if backend == "cloudflare" else OfficialJevClient()
+        return LlmStructuredClient()
+    if backend in ("openrouter", "official", "cloudflare"):
+        from spirebrain.jev_brain.client_real import (
+            CloudflareJevClient,
+            OfficialJevClient,
+            OpenRouterJevClient,
+        )
+
+        return {
+            "openrouter": OpenRouterJevClient,
+            "official": OfficialJevClient,
+            "cloudflare": CloudflareJevClient,
+        }[backend]()
     raise ValueError(f"unknown backend: {backend}")
 
 

@@ -32,12 +32,31 @@ Legend: `[x]` done · `[~]` done but unreachable until an external condition is 
 - [ ] Optional: scumthespire-style search with STSStateSaver rollbacks
 
 ## Phase 5 — Real JEV + evaluation
-- [x] Real client implemented; switch with `JEV_BACKEND=official|cloudflare`
-- [~] Confidence handling validated against a publisher-provided response; **real** calibration needs a key
+- [x] Real client implemented; switch with `JEV_BACKEND=openrouter` (real JEV via OpenRouter's System One route)
+- [x] **A full ascent has been run against real JEV**: 24 calls, $0.000528, p50 1435 ms — see docs/JEV_API.md
 - [x] `analysis/calibration.py` — confidence-bucket report + fallback ratio + ECE stub
+- [x] `analysis/inspect_log.py` — read back what JEV actually answered, per question
+- [ ] **Enrich the decision states** (the actual blocker, see below)
 - [ ] Run ≥50 ascents, collect stats (win rate, avg death floor, decisions log)
-- [ ] Compare: JEV brain vs. random baseline vs. greedy baseline
-- [ ] Reconcile measured latency/cost with the assumed $0.042/Mtok
+- [ ] Compare: JEV brain vs. random baseline vs. greedy baseline vs. structured-LLM baseline
+- [ ] Resolve whether a missing `confidence` field is being read as 0.0 (flagged in the log as `confidence_present`)
+- [ ] Reconcile measured latency/cost with vendor claims (both now have real numbers to check against)
+
+## The finding that resets the plan
+
+The first real run returned **61 of 63 answers below the 0.60 confidence floor**,
+with every module falling back to its safe rule. Diagnosed from the recorded
+payloads: this is not a model problem, it is a **state problem**. We asked
+"is this worth the gold for this run's goal?" while passing `{goal, gold}` — no
+deck, no relics, no HP — and JEV answered ≈0.4, which is its documented way of
+saying *this cannot be answered from what you gave me*.
+
+`state.py` already builds full run digests (deck contents, relics, potions, HP
+ratio, act, floor, goal). The decision modules do not use it yet; each one
+hand-builds a thinner state. **Wiring the rich digest into all seven decision
+points is now the highest-value work in the project** — everything downstream
+(the calibration curve, the win-rate comparison, the whole "worth showing"
+list) is blocked behind it.
 
 ## Definition of "worth showing"
 - Agent completes 10 consecutive runs unattended
@@ -47,5 +66,7 @@ Legend: `[x]` done · `[~]` done but unreachable until an external condition is 
 ## What is honestly blocking what
 | Blocker | Blocks | Whose move |
 |---|---|---|
-| Mods not installed | Phase 1 entirely, and Phase 3's post-combat review | user |
-| No JEV API key | real calibration, cost reconciliation, Phase 5 stats | user |
+| CommunicationMod not installed (ModTheSpire + BaseMod + StSLib are in place via Steam Workshop) | Phase 1 entirely, and Phase 3's post-combat review | user downloads 1 jar |
+| Decision states too thin | everything in Phase 5, calibration included | me — next turn |
+| OpenRouter key permits only the `typesafe` provider | the structured-LLM baseline arm | user (add a provider) or a second key |
+
