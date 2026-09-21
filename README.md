@@ -39,50 +39,96 @@ Both come straight from the official docs ([docs/JEV_API.md](docs/JEV_API.md)):
 
 ## Status
 
-🚧 **The brain runs against real JEV.** All 7 decision modules + HP budget + greedy combat + logging + simulation harness + agent router + the real JEV client are in place, with **76 tests passing**. A full three-act ascent has been run end-to-end on JEV via OpenRouter for **$0.000528** (24 calls). Phase 1 (the live game pipe) still needs CommunicationMod in place — see [docs/SETUP.md](docs/SETUP.md).
+🚧 **Both halves of Phase 1 exist now, and the brain has run against real JEV.**
+All 7 decision modules + HP budget + greedy combat + logging + simulation harness
++ agent router + the real JEV client + the **CommunicationMod stdio transport** are
+in place, with **128 tests passing**. Live decisions and simulator decisions now
+share the same rich `RunContext`, so both paths ask JEV against the full run
+digest and the game's own card/relic text.
+
+What is left is hardware, not code: install CommunicationMod (see
+[docs/SETUP.md](docs/SETUP.md)), which is a jar download and one config line.
 
 ```bash
 # run everything offline right now (no game, no API key):
-python -m spirebrain.sim.run_offline                # pessimistic mock: every module falls back
-python -m spirebrain.sim.run_offline --optimistic   # confident mock: answers steer the run
+python -m spirebrain.sim.run_offline                     # pessimistic mock: every module falls back
+python -m spirebrain.sim.run_offline --optimistic         # confident mock: answers steer the run
+python -m spirebrain.sim.batch --seeds calibration --backend mock   # 10 ascents, aggregated
 
-# run it against real JEV (needs OPENROUTER_API_KEY):
-python -m spirebrain.sim.run_offline --backend=openrouter
-python -m spirebrain.analysis.inspect_log --summary  # what JEV actually answered
-python -m spirebrain.analysis.calibration logs       # confidence bucket report
+# run it against real JEV (needs OPENROUTER_API_KEY; the score gate is switchable):
+python -m spirebrain.sim.batch --seeds calibration --backend openrouter --acceptance argmax
+
+# be the thing the game launches:
+python run_agent.py --backend openrouter
+python run_agent.py --replay logs/recorded_states        # re-decide recorded states offline
+
+# read back what JEV actually answered:
+python -m spirebrain.analysis.inspect_log --summary
+python -m spirebrain.analysis.calibration logs
+python -m spirebrain.analysis.repeatability --backend openrouter --repeats 5
 ```
 
-**First real run, in one line:** 24 calls, $0.000528, and **61 of 63 answers below
-the 0.60 confidence floor** — JEV telling us our decision states are too thin to
-judge from. That diagnosis, not a bug, is the next milestone. Details and verbatim
-answers: [docs/JEV_API.md](docs/JEV_API.md#first-real-run-what-we-learned-2026-09-21).
+**Everything measured so far is in [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md)** —
+each run with its sample size, what it established, what it refuted, and the
+protocol the next one has to follow. Four claims have already been overturned by
+it, including two of our own. Read that file before quoting any number from this
+project.
+
+**One-line summary of the first real run:** 24 calls, $0.000528, and 61 of 63
+answers below the 0.60 confidence floor. The floor turned out to be the wrong
+instrument for preference questions; see
+[docs/JEV_API.md](docs/JEV_API.md#first-real-run-what-we-learned-2026-09-21).
 
 Python package name stays `spirebrain` (import name); repo name is `jev-spire-brain`.
+
+## The protocol layer, which is where unattended runs die
+
+`spirebrain/driver/stdio.py` implements CommunicationMod's side of the pipe.
+Four details are easy to get wrong and are all handled, verified against the
+mod's README (2026-09-21):
+
+- **`Ready\n` first**, or the game waits ten seconds and kills the process;
+- **`PLAY` is 1-indexed** while `CHOOSE` is 0-indexed — the conversion happens in
+  exactly one function;
+- **there is no `skip`, `purge`, or `smith` verb** — skipping a reward and leaving
+  a shop are both `RETURN`;
+- **nothing prints to stdout except `Ready` and commands**, because stdout *is*
+  the protocol.
+
+Plus three rules that keep a long run alive: answer only when the game says it is
+ready, never send a verb the game did not advertise, and one command per state.
 
 ## Prerequisites
 
 - Steam copy of Slay the Spire
-- ModTheSpire + BaseMod + CommunicationMod (free)
+- ModTheSpire + BaseMod (+ StSLib) + CommunicationMod — all free
 - Python 3.10+
-- JEV access (TypeSafe early access, Cloudflare `typesafe/jev`, or Vercel AI Gateway `typesafe-ai/jev`) — **not required for development**: the mock client lets you build, run and test everything offline.
+- JEV access — **not required for development**: the mock client lets you build,
+  run and test everything offline. Real JEV is reachable on OpenRouter's System
+  One route (see [docs/JEV_API.md](docs/JEV_API.md)).
 
-## Setup (once playable)
+## Setup
 
 ```bash
 git clone https://github.com/Adrian-lzr/jev-spire-brain.git
 cd jev-spire-brain
-pip install -r requirements.txt
-# configure CommunicationMod to launch driver/agent.py (see docs/SETUP.md)
+pip install -r requirements.txt          # optional: the brain is stdlib-only
+python tests\test_stdio.py               # prove the pipe logic offline
+# then point CommunicationMod's `command=` at run_agent.py — docs/SETUP.md
 ```
 
 ## Switching the brain on
 
 ```bash
-export JEV_BACKEND=mock        # default: deterministic, offline
-export JEV_BACKEND=official    # TypeSafe direct ...
-export TYPESAFE_API_KEY=...    #    ... needs this
-export JEV_BACKEND=cloudflare  # Cloudflare AI ...
-export CLOUDFLARE_ACCOUNT_ID=... CLOUDFLARE_API_TOKEN=...   #    ... needs these
+export JEV_BACKEND=mock             # default: deterministic, offline
+export JEV_BACKEND=openrouter       # real JEV, System One route ...
+export OPENROUTER_API_KEY=...       #    ... needs this
+export JEV_BACKEND=official         # TypeSafe direct (waitlisted early access)
+export TYPESAFE_API_KEY=...
+export JEV_BACKEND=cloudflare       # Cloudflare AI
+export CLOUDFLARE_ACCOUNT_ID=... CLOUDFLARE_API_TOKEN=...
+export JEV_BACKEND=llm              # labelled stand-in, NOT JEV: a schema-constrained
+                                    # chat model through the same three primitives
 ```
 
 The verified request/response shapes, the confidence conventions, and what is

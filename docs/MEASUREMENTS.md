@@ -18,6 +18,62 @@ stated otherwise. Raw call logs land in `logs/` (gitignored) and are readable wi
 | 3 | 2026-09-21 | + distribution-based acceptance for Choice/Score | 61 / 63 | **5, 5, 5** | $0.000783 | 1328 ms |
 | 4 | 2026-09-21 | + the game's own card/relic text (`gamedata.py`) | **59 / 63** | 6, 4, 5 | $0.000859 | 1320 ms |
 | 5 | 2026-09-21 | repeatability probe: 4 scenarios × 5 identical repeats | — | **0 % flip rate** | $0.0007 (20 calls) | — |
+| 6 | 2026-09-21 | **pre-registered arm A:** 10 ascents, `margin` gate | — | 0.667 rate (160/240) | $0.000858 | — |
+| 7 | 2026-09-21 | **pre-registered arm B:** 10 ascents, `argmax` gate | — | 0.508 rate (122/240) | $0.000881 | — |
+| 8 | 2026-09-21 | repeatability probe under `argmax` | — | **0 % flip rate** | $0.0006 (20 calls) | — |
+| 9 | 2026-09-21 | **re-run of both arms on the fixed harness** (seed-driven maps) | — | margin 0.537 / argmax **0.411** | $0.001004 / $0.001027 | — |
+
+Runs 6–8 are the pre-registered experiment from the previous version of this file.
+Runs 6 and 7 also destroyed the harness they were run on (below), so run 9 repeats
+both arms on the repaired instrument.
+
+## Run 9 — the comparison that decided the Score gate
+
+`python -m spirebrain.sim.batch --seeds calibration --backend openrouter --acceptance {margin,argmax}`
+
+10 ascents per arm, same seeds, same harness, same code except the gate.
+
+| | `margin` | `argmax` |
+|---|---|---|
+| Cards taken (10 ascents) | 1 | **30 — 3 in every ascent** |
+| Deck at Act 3 start | 10.1 | **13.0** |
+| Mean HP at each act end | 48.3 / 43.9 / 43.0 | **49.5 / 44.7** / 43.0 |
+| Rule fallback rate | 0.537 | **0.411** |
+| JEV calls per ascent | 27 | 27 |
+| Cost per ascent | $0.001004 | $0.001027 (+2.3 %) |
+| Decision flip rate (5 repeats, run 8) | 0 % | 0 % |
+
+**Every rejection margin made was a shape rejection.** Not one of the 29 rejections
+across the ten ascents was "the value is too low" — the values ran 0.657–0.757,
+comfortably above the 0.55 action floor. Thirteen said *"landed on level 2.1x,
+distribution favours 3"* and sixteen said *"flat distribution"*. So the gate was
+never protecting the deck from bad cards; it was refusing to choose between cards
+it had already ranked, and it did so on a criterion (`landed == argmax level`) that
+was invented from a single run and never justified.
+
+**Pre-registered acceptance, as written before the run:**
+
+- (a) takes cards in every ascent — **met**, 3 per ascent, 10/10;
+- (b) does not lower mean HP at act-3 entry by more than 5 % of max HP — **met on
+  the proxy available**: per-act end HP is 49.5/44.7/43.0 versus 48.3/43.9/43.0;
+- (c) 0 % flip rate under `--repeats 5` — **met** (run 8).
+
+**Honest caveats on (b).** The simulator resets HP to 80 at the start of each act,
+so "HP entering Act 3" as a cumulative quantity does not exist here — what is
+comparable is the per-act ending HP, which is what the table reports. Carrying HP
+across acts is a harness improvement with its own pre-registration, queued in the
+ROADMAP. Also note act 3 ended at 43.0 in both arms: under this simulator the card
+gate has no effect there.
+
+**Decision.** `argmax` is adopted as the default Score gate, recorded in
+`config/strategy.json` (`jev.score_acceptance`) so it stays a strategy-layer choice
+rather than a hard-coded one, with `margin` still selectable for comparison.
+
+**What this does NOT establish.** That the deck improved. The simulator has no
+ground truth for card quality, so "3 cards instead of 1" is a change in *what the
+agent does*, not evidence that it plays better. That claim needs recorded live runs
+or a labelled dataset, and it is now the top item in the ROADMAP.
+
 
 ## What each measurement actually established
 
@@ -28,6 +84,47 @@ stated otherwise. Raw call logs land in `logs/` (gitignored) and are readable wi
 | 3 | A 0.60 confidence floor made the brain never act (8/8 fallbacks = an expensive rule-based bot). Distribution-based acceptance cut fallbacks to 5/8 and produced the first genuinely model-chosen actions: a route, and a refusal of an event the old fallback would have paid 25 % max HP for | That the new margins (0.50 / 0.15) are the *right* values — they were fitted to this single run |
 | 4 | Real card/relic text moved a boss-relic confidence from 0.040 → 0.570 and made the ranking legible; floor-breaches fell 61 → 59 | That card rewards are fixed (they still always skip); that JEV's relic ranking matches expert consensus (see below) |
 | 5 | **No threshold in the project is a coin at 5 repeats.** All four scenarios returned the same verdict on every repeat | Stability at higher repeat counts, or for question sets not probed |
+| 6 | The `margin` gate blocks **100 %** of card rewards: 30 rejections over 10 ascents, none of them because the value was too low — every one was a distribution-shape rejection | Anything about card quality, because the harness defect below made these 10 ascents one ascent |
+| 7 | **`argmax` takes 3 cards per ascent, every ascent** (deck 10 → 13) and cuts rule fallbacks from 0.667 to 0.508 — while costing the same per call ($0.000858 → $0.000881, +2.7 %, from the longer deck digest) | That the wider deck *helps*, or that act-3 entry HP is unharmed: see the next row |
+| 8 | The `argmax` gate is stable: 0 % flip rate across all four scenarios at 5 repeats, so criterion (c) of the pre-registration is met | Those four scenarios only; other question sets are unprobed |
+| 9 | On a harness that can fail, `argmax` takes 3 cards per ascent in 10/10 runs where `margin` took 1 in 10, raises fallback-free play from 46 % to 59 %, and costs 2.3 % more per ascent. All 29 of margin's rejections were distribution-shape rejections, none a value rejection | That the deck got *better*: no ground truth exists for card quality here |
+
+## The instrument was lying (found by run 6)
+
+Run 6's ten ascents returned **ten identical HP trajectories** — 51, 47, 43 in
+every single seed — and the identical route. Firing the same seed-dependence check
+on the mock confirmed it: `random.Random(seed)` was constructed correctly, but the
+outcomes did not depend on it.
+
+Two causes, both in the harness rather than the agent:
+
+1. **The map was a fixed constant** (two rows, same three nodes every run), so the
+   only variation a seed could introduce was *which reward and which event* were
+   drawn — and those do not change what a rule fallback does.
+2. **The fallback router always walks the least damaging node, and a rest node
+   always cost nothing.** So "safest" was always free: routing could not cost HP
+   at all, which removed the one variable the HP-budget system exists to reason
+   about.
+
+Consequence for reading the table above: **runs 6 and 7 have an effective sample
+size of 1**, not 10. Their result — `argmax` takes cards, `margin` never does — is
+a property of the gate, which is exactly what was being tested, so it survives.
+Their HP column proves nothing, which is why criterion (b) is reported as
+**uninformative rather than passed**.
+
+Fixed in the same commit that records the finding:
+
+- maps are generated per seed (3 rows × 3 nodes, act-specific symbol pools, and a
+  row is *not* guaranteed to contain a free option);
+- node damage is a seeded jitter of the symbol's worst case;
+- the walk now spends at most the probe's estimate, recorded per step as
+  `probe`/`spent` — previously probes said "24 HP for an elite" while the spend
+  was an unrelated `randint(14, 26)`;
+- `tests/test_sim_harness.py` asserts seeds change outcomes, routes differ, and
+  `spent <= probe`, so this class of defect cannot come back silently.
+
+The locked `TEST_SEEDS` were **not** spent on the broken harness. Spending a test
+set on an instrument that cannot fail the test is worse than not measuring.
 
 ## Run 5 in detail — the repeatability probe
 
@@ -99,17 +196,32 @@ decisively, and at 72 it said the field was tied").
 
 Written before the run, as required by point 2 above.
 
-**Question.** Does replacing the Score margin test with a value-floor argmax take
-card rewards without hurting decision quality?
+Two open questions, and the order matters: the harness one invalidates the other.
 
-**Design.** 10 ascents on `CALIBRATION_SEEDS` with margin, 10 with argmax; compare
-cards taken, deck size, HP at act boundaries. Then 10 ascents on `TEST_SEEDS` with
-whichever wins, and report that number as the result.
+**Question 1 — the harness (must come first).** HP resets to 80 at each act start,
+so cumulative HP damage — the thing the HP-budget system reasons about — cannot be
+observed. Does carrying HP across acts (with the act-reserve policy recomputed on
+entry) change the routing decisions?
 
-**Acceptance.** The change is adopted only if it (a) raises cards taken above 0,
-(b) does not lower mean HP at act-3 entry, and (c) survives one
-`--repeats 5` probe with 0 % flip rate. Any other outcome is reported as a null
-result, not spun as a partial success.
+**Design.** 10 ascents on `CALIBRATION_SEEDS`, `argmax`, HP carried across acts.
+Compare the chosen route's probe cost per row against the run-9 batch.
+
+**Acceptance for keeping it.** Carrying HP is adopted only if the routing decision
+differs from run 9 in at least 3 of 30 row decisions — i.e. only if the budget
+actually constrains routing once damage is cumulative. If nothing changes, the
+extra realism buys nothing and the simpler harness stays.
+
+**Question 2 — card quality (blocked on ground truth).** Does taking three cards
+per ascent beat taking one, measured by something other than deck size?
+
+**Design.** Cannot be answered in the simulator: it has no notion of a card being
+*good*, only of its text. Two routes, both requiring the live pipe: (a) record real
+ascent states via `--replay` and score the gate against outcomes (floor reached,
+HP at death); (b) label a small set of card-reward decisions by hand and compute
+agreement. Until one exists, deck size is a description, not a result.
+
+**Explicitly not a criterion.** Any claim about win rate. `TEST_SEEDS` remain
+untouched and must not be spent on a harness whose HP semantics are still wrong.
 
 ## Known threats to validity
 
@@ -126,3 +238,9 @@ result, not spun as a partial success.
   Brier score for our own decisions, because the simulator does not record whether
   a judgement turned out to be right. Until it does, "calibration" here means
   consistency, not correctness.
+- **The margin gate's consistency check is stricter than it looks.** In run 6,
+  roughly a third of the rejections were not "flat distribution" but *"landed on
+  level 2.14, distribution favours 3"* — the model's own fractional score and its
+  own level distribution disagreed. Requiring them to agree is an extra
+  requirement that was never justified, and it is part of what `argmax` removes.
+

@@ -50,6 +50,7 @@ from spirebrain.jev_brain.state import (
     map_choices,
     path_damage_probes,
     run_state,
+    worst_case_damage,
 )
 from spirebrain.tactical.hp_budget import HPBudget
 
@@ -68,12 +69,46 @@ STARTING_DECK = [
     {"name": "Bash", "cost": 2, "type": "Attack"},
 ]
 
-MAP_ROWS = [
-    ([{"id": "n1", "symbol": "M", "y": 3}, {"id": "n2", "symbol": "E", "y": 4},
-      {"id": "n3", "symbol": "R", "y": 5}]),
-    ([{"id": "n4", "symbol": "$", "y": 7}, {"id": "n5", "symbol": "?", "y": 8},
-      {"id": "n6", "symbol": "R", "y": 9}]),
-]
+# --------------------------------------------------------------------------- #
+# Maps
+# --------------------------------------------------------------------------- #
+# Maps are generated per seed. They used to be a fixed two-row constant, and
+# that made the seed meaningless: the fallback router always walks the least
+# damaging node, a rest node costs nothing, so every "different" seed produced
+# the identical route and the identical HP trajectory. Ten ascents were really
+# one ascent repeated (docs/MEASUREMENTS.md, run 6).
+#
+# The pools below are sampled three-at-a-time per row, and a row is NOT guaranteed
+# to contain a free option — otherwise "safest" would always be "free" and
+# routing would never cost anything.
+SYMBOL_POOLS = {
+    1: ["M", "M", "M", "E", "?", "$", "R"],
+    2: ["M", "M", "E", "E", "?", "$", "R"],
+    3: ["M", "E", "E", "?", "R", "R"],
+}
+# Node damage is the symbol's worst case, jittered by the seed so two maps of the
+# same shape are not the same map.
+ROWS_PER_ACT = 3
+
+
+def make_map(rng: random.Random, act: int) -> list[list[dict]]:
+    """Three rows of three reachable nodes, shaped and costed from the seed."""
+    pool = SYMBOL_POOLS.get(act, SYMBOL_POOLS[1])
+    rows: list[list[dict]] = []
+    for row_i in range(ROWS_PER_ACT):
+        symbols = rng.sample(pool, 3)
+        nodes = []
+        for col, symbol in enumerate(symbols):
+            base = worst_case_damage(symbol, act)
+            jitter = rng.uniform(0.8, 1.25) if base else 0.0
+            nodes.append({
+                "id": f"a{act}r{row_i}c{col}",
+                "symbol": symbol,
+                "y": act * 17 + row_i * 4 + col,
+                "damage_hint": int(round(base * jitter)),
+            })
+        rows.append(nodes)
+    return rows
 
 CARD_REWARDS = [
     {"strike": "basic attack", "inflame": "gain strength each combat",
@@ -98,17 +133,36 @@ RELICS = [
 ]
 
 
+def load_seeds(which: str) -> list[int]:
+    """Resolve a seed group name ("calibration" | "test") from config/seeds.json.
+
+    The split is the project's guard against fitting thresholds to the data it
+    then reports as evidence (docs/MEASUREMENTS.md, protocol rule 1).
+    """
+    cfg = json.loads((ROOT / "config" / "seeds.json").read_text(encoding="utf-8"))
+    key = f"{which}_seeds"
+    if key not in cfg:
+        raise KeyError(f"no such seed group: {which!r} (have {sorted(k for k in cfg if k.endswith('_seeds'))})")
+    return [int(s) for s in cfg[key]]
+
+
 def run_one_simulation(seed: int = 0, confidence: float | None = None,
-                       backend: str | None = None) -> dict:
+                       backend: str | None = None,
+                       acceptance: str | None = None) -> dict:
     """One ascent.
 
     `backend=None` uses the mock (pessimistic by default, or `confidence=` for the
     optimistic variant). Pass `backend="openrouter"` to run the real thing against
     JEV via OpenRouter — same code path, same questions, real answers.
+
+    `acceptance` selects the Score gate: "margin" (default, demands a peaked
+    distribution) or "argmax" (value floor only). See decisions.evaluate_score.
     """
     strategy = json.loads((ROOT / "config" / "strategy.json").read_text(encoding="utf-8"))
-    floor = strategy["jev"]["confidence_floor"]
     goal = strategy["goal"]
+    # The gate is a strategy-layer choice, so the config wins when the caller does
+    # not name one: switching it should be a config edit, not a code edit.
+    acceptance = acceptance or strategy.get("jev", {}).get("score_acceptance")
 
     if backend and backend != "mock":
         inner = get_client(backend)
@@ -123,13 +177,20 @@ def run_one_simulation(seed: int = 0, confidence: float | None = None,
     gold = 150
     run = RunContext(character="Ironclad", goal=goal, deck=deck, relics=relics,
                      potions=potions, gold=gold)
-    outcome = {"seed": seed, "goal": goal, "acts": [], "deck_size_start": len(deck)}
+    outcome = {"seed": seed, "goal": goal, "acts": [], "deck_size_start": len(deck),
+               "acceptance": acceptance or "margin", "cards_taken": 0,
+               "score_rejections": []}
 
     for act in (1, 2, 3):
         hp = HPBudget(act=act, max_hp=80, current_hp=80)
-        floor = (act - 1) * 17
+        # `run_floor` is the map floor we are standing on. It used to be called
+        # `floor`, which silently collided with the confidence floor read from
+        # strategy.json and made `outcome["confidence_floor"]` report a map row
+        # instead of a threshold. Renamed so the two can never be confused again.
+        run_floor = (act - 1) * 17
+        act_map = make_map(rng, act)
 
-        def _sync(hp_budget=hp, fl=floor) -> RunContext:
+        def _sync(hp_budget=hp, fl=run_floor) -> RunContext:
             """Push live run facts into the context every module already holds.
 
             The modules capture the RunContext once; mutating it in place is what
@@ -146,47 +207,62 @@ def run_one_simulation(seed: int = 0, confidence: float | None = None,
         risk = CombatRiskGate(jev, hp, run=run)
         rest = RestSiteDecider(jev, hp, goal=goal, run=run)
         shop = ShopDecider(jev, goal=goal, run=run)
-        boss = BossRelicJudge(jev, goal=goal, run=run)
+        boss = BossRelicJudge(jev, goal=goal, run=run, acceptance=acceptance)
         events = EventChooser(jev, goal=goal, run=run)
 
         act_log: dict = {"act": act, "steps": []}
-        _step = lambda kind, d: act_log["steps"].append(  # noqa: E731
-            {"kind": kind, "choice": d.value, "conf": round(d.confidence, 3),
-             "fb": d.used_fallback, "why": d.detail.get("reason")})
+
+        def _step(kind: str, d) -> None:
+            rec = {"kind": kind, "choice": d.value, "conf": round(d.confidence, 3),
+                   "fb": d.used_fallback, "why": d.detail.get("reason")}
+            gate = d.detail.get("gate")
+            if gate:  # keep the full Score-gate breakdown: the experiment needs reasons
+                rec["gate"] = gate
+                if kind == "card_reward" and not gate["accepted"]:
+                    outcome["score_rejections"].append(
+                        {"act": act, "reason": gate["reason"], "value": gate["value"]})
+            act_log["steps"].append(rec)
 
         # -- routing -------------------------------------------------------- #
-        for nodes in MAP_ROWS:
+        for nodes in act_map:
             _sync()
             choices = map_choices(nodes)
             probes = path_damage_probes(nodes, act)
             d = router.decide(choices, probes)
             _step("map", d)
-            floor += 2
+            run_floor += 2
             chosen = next((n for n in nodes if str(n["id"]) == str(d.value)), nodes[0])
-            symbol = chosen["symbol"]
-            if symbol == "E":
-                hp.spend(rng.randint(14, 26))
-            elif symbol == "M":
-                hp.spend(rng.randint(4, 10))
-            elif symbol == "?":
-                hp.spend(rng.randint(0, 12))
+            # Spend what the node actually costs, drawn BELOW the probe's worst
+            # case — the probe is an upper bound, so the agent's budget reasoning
+            # is conservative rather than fictional. Before this, probes said "24
+            # HP for an elite" while the spend was an unrelated randint(14, 26).
+            hint = int(chosen.get("damage_hint") or 0)
+            spent = rng.randint(int(hint * 0.5), hint) if hint else 0
+            if spent:
+                hp.spend(spent)
+            # Keep both numbers: the estimate the agent reasoned with, and what the
+            # walk actually cost. That pair is the harness's own audit trail, and
+            # tests/test_sim_harness.py checks it stays honest.
+            act_log["steps"][-1]["probe"] = int(probes.get(str(d.value), 0))
+            act_log["steps"][-1]["spent"] = spent
 
         # -- card reward ---------------------------------------------------- #
         _sync()
         reward = rng.choice(CARD_REWARDS)
         c = CardRewardJudge(jev, len(deck), strategy["deck_policy"]["max_cards"],
-                            goal=goal, run=run).decide(reward)
+                            goal=goal, run=run, acceptance=acceptance).decide(reward)
         _step("card_reward", c)
-        floor += 1
+        run_floor += 1
         if c.value != "skip":
             deck.append({"name": str(c.value), "cost": 1, "type": "Attack"})
+            outcome["cards_taken"] += 1
 
         # -- event ---------------------------------------------------------- #
         _sync()
         text, options = rng.choice(EVENTS)
         e = events.decide(text, options)
         _step("event", e)
-        floor += 1
+        run_floor += 1
         if e.value == "take_it":
             hp.spend(int(hp.max_hp * 0.25))
 
@@ -196,7 +272,7 @@ def run_one_simulation(seed: int = 0, confidence: float | None = None,
                       for card in deck if "+" not in card["name"]}
         r = rest.decide(hp_ratio=hp.current_hp / hp.max_hp, upgradable=upgradable)
         _step("rest", r)
-        floor += 1
+        run_floor += 1
         if r.value == "rest":
             hp.restore(int(hp.max_hp * 0.30))
 
@@ -210,7 +286,7 @@ def run_one_simulation(seed: int = 0, confidence: float | None = None,
         _sync()
         s = shop.decide(gold=gold, items=items)
         _step("shop", s)
-        floor += 1
+        run_floor += 1
         if s.value not in ("leave", "remove") and s.value in items:
             gold -= items[s.value][0]
 
@@ -218,7 +294,7 @@ def run_one_simulation(seed: int = 0, confidence: float | None = None,
         _sync()
         b = boss.decide({rel["name"]: rel["description"] for rel in RELICS})
         _step("boss_relic", b)
-        floor += 1
+        run_floor += 1
         if isinstance(b.value, str):
             relics.append(b.value)
 
@@ -240,14 +316,16 @@ def run_one_simulation(seed: int = 0, confidence: float | None = None,
     outcome["jev_calls"] = jev.calls
     outcome["jev_cost_usd"] = jev.total_cost_usd
     outcome["deck_end"] = len(deck)
-    outcome["confidence_floor"] = floor
+    outcome["floor_final"] = run_floor
     return outcome
 
 
 def _summary(result: dict) -> str:
     lines = [
-        f"seed={result['seed']}  goal={result['goal']}  "
-        f"calls={result['jev_calls']}  deck={result['deck_size_start']}->{result['deck_end']}",
+        f"seed={result['seed']}  goal={result['goal']}  acceptance={result.get('acceptance')}  "
+        f"calls={result['jev_calls']}  "
+        f"deck={result['deck_size_start']}->{result['deck_end']} "
+        f"(cards taken: {result.get('cards_taken', 0)})",
     ]
     for act in result["acts"]:
         kinds = {p["kind"]: p for p in act["steps"]}
@@ -264,17 +342,27 @@ def _summary(result: dict) -> str:
     return "\n".join(lines)
 
 
+def _cli_value(argv: list[str], name: str) -> str | None:
+    """Read `--name value` or `--name=value` out of argv."""
+    prefix = f"--{name}="
+    hit = next((a.split("=", 1)[1] for a in argv if a.startswith(prefix)), None)
+    if hit is None and f"--{name}" in argv:
+        hit = argv[argv.index(f"--{name}") + 1]
+    return hit
+
+
 if __name__ == "__main__":
     import sys
 
     optimistic = "--optimistic" in sys.argv
     conf = 0.90 if optimistic else None
 
-    backend = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--backend=")), None)
-    if backend is None and "--backend" in sys.argv:
-        backend = sys.argv[sys.argv.index("--backend") + 1]
+    backend = _cli_value(sys.argv, "backend")
+    acceptance = _cli_value(sys.argv, "acceptance")
+    seed = int(_cli_value(sys.argv, "seed") or 42)
 
-    result = run_one_simulation(seed=42, confidence=conf, backend=backend)
+    result = run_one_simulation(seed=seed, confidence=conf, backend=backend,
+                                acceptance=acceptance)
     label = backend or ("optimistic mock" if optimistic else "pessimistic mock")
     print(f"=== run [{label}] ===")
     print(_summary(result))

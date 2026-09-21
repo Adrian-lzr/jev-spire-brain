@@ -3,6 +3,10 @@
 The fake "game" objects are plain dicts on purpose — that is exactly what the
 duck-typed `_get()` accessor is there to support, and it means the router can be
 verified before the game exists. Logs go to a temp dir so the repo stays clean.
+
+Screen payloads live under `screen_state`, which is where CommunicationMod
+actually puts them (README, verified 2026-09-21); some tests also pass the legacy
+`screen` key to prove the fallback chain still works.
 """
 
 from __future__ import annotations
@@ -14,7 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from spirebrain.driver.agent import SpireBrainAgent
+from spirebrain.driver.agent import PROTOCOL_VERBS, SpireBrainAgent
 
 DECK_10 = [{"name": "Strike", "type": "Attack", "cost": 1}] * 5 + \
           [{"name": "Defend", "type": "Skill", "cost": 1}] * 4 + \
@@ -64,33 +68,34 @@ def test_card_reward_skips_at_deck_cap():
         agent = _agent(tmp)
         full_deck = [{"name": f"Card{i}", "type": "Attack", "cost": 1} for i in range(25)]
         game = _base(screen_type="CARD_REWARD", deck=full_deck,
-                     screen={"cards": [{"name": "Inflame", "description": "gain strength"}]})
+                     screen_state={"cards": [{"name": "Inflame", "description": "gain strength"}]})
         cmd = agent.choose_action(game)
-        assert cmd["command"] == "skip"
+        # RETURN, not "skip": the protocol has no skip verb (README, 2026-09-21).
+        assert cmd["command"] == "return"
         assert "25/25" in agent.history[-1]["detail"]["reason"]
 
 
 def test_card_reward_maps_label_to_index():
     with tempfile.TemporaryDirectory() as tmp:
         agent = _agent(tmp)
-        game = _base(screen_type="CARD_REWARD", screen={"cards": [
+        game = _base(screen_type="CARD_REWARD", screen_state={"cards": [
             {"name": "Anger", "description": "0-cost attack"},
             {"name": "Pommel Strike", "description": "damage and draw"},
         ]})
         cmd = agent.choose_action(game)
-        assert cmd["command"] in ("skip",)
-        assert cmd["command"] == "skip" or 0 <= cmd["choice"] <= 1
+        assert cmd["command"] in ("return",)
+        assert cmd["command"] == "return" or 0 <= cmd["choice"] <= 1
 
 
 def test_card_reward_duplicate_names_do_not_misroute():
     with tempfile.TemporaryDirectory() as tmp:
         agent = _agent(tmp)
-        game = _base(screen_type="CARD_REWARD", screen={"cards": [
+        game = _base(screen_type="CARD_REWARD", screen_state={"cards": [
             {"name": "Strike", "description": "a"},
             {"name": "Strike", "description": "b"},
         ]})
         cmd = agent.choose_action(game)
-        assert cmd["command"] == "skip" or cmd["choice"] in (0, 1)
+        assert cmd["command"] == "return" or cmd["choice"] in (0, 1)
 
 
 # --------------------------------------------------------------------------- #
@@ -99,7 +104,7 @@ def test_card_reward_duplicate_names_do_not_misroute():
 def test_event_skips_disabled_options():
     with tempfile.TemporaryDirectory() as tmp:
         agent = _agent(tmp)
-        game = _base(screen_type="EVENT", screen={
+        game = _base(screen_type="EVENT", screen_state={
             "event_id": "Golden Idol",
             "body": "A golden idol on a trapped altar.",
             "options": [
@@ -115,7 +120,7 @@ def test_event_skips_disabled_options():
 def test_event_with_no_options_is_safe():
     with tempfile.TemporaryDirectory() as tmp:
         agent = _agent(tmp)
-        cmd = agent.choose_action(_base(screen_type="EVENT", screen={"options": []}))
+        cmd = agent.choose_action(_base(screen_type="EVENT", screen_state={"options": []}))
         assert cmd == {"command": "choose", "choice": 0}
 
 
@@ -125,19 +130,34 @@ def test_event_with_no_options_is_safe():
 def test_rest_without_smith_rests_without_asking_jev():
     with tempfile.TemporaryDirectory() as tmp:
         agent = _agent(tmp)
-        game = _base(screen_type="REST", screen={"rest_options": ["rest"]})
+        game = _base(screen_type="REST", screen_state={"rest_options": ["rest"]})
         cmd = agent.choose_action(game)
-        assert cmd["command"] == "rest"
+        assert cmd == {"command": "choose", "choice": 0}  # index of "rest"
+        assert agent.jev.calls == 0
 
 
-def test_rest_with_smith_returns_command():
+def test_rest_with_smith_chooses_the_option_then_answers_the_grid():
     with tempfile.TemporaryDirectory() as tmp:
         agent = _agent(tmp)
-        game = _base(screen_type="REST", screen={"rest_options": ["rest", "smith"]})
+        game = _base(screen_type="REST", screen_state={"rest_options": ["rest", "smith"]})
         cmd = agent.choose_action(game)
-        assert cmd["command"] in ("rest", "smith")
-        if cmd["command"] == "smith":
-            assert isinstance(cmd["choice"], int)
+        assert cmd["command"] == "choose" and cmd["choice"] in (0, 1)
+        # If it chose to upgrade, the intent has to survive until the grid screen
+        # — the protocol allows only one command per state.
+        if cmd["choice"] == 1:
+            assert agent._pending_upgrade is not None
+            grid = _base(screen_type="GRID", screen_state={"cards": DECK_10})
+            follow_up = agent.choose_action(grid)
+            assert follow_up["command"] == "choose"
+            assert follow_up["choice"] == agent._pending_upgrade or agent._pending_upgrade is None
+
+
+def test_grid_without_a_pending_intent_takes_the_first_card():
+    with tempfile.TemporaryDirectory() as tmp:
+        agent = _agent(tmp)
+        cmd = agent.choose_action(_base(screen_type="GRID", screen_state={"cards": DECK_10}))
+        assert cmd["command"] == "choose" and cmd["choice"] == 0
+        assert "no pending intent" in cmd["reason"]
 
 
 # --------------------------------------------------------------------------- #
@@ -146,24 +166,24 @@ def test_rest_with_smith_returns_command():
 def test_shop_leaves_when_broke():
     with tempfile.TemporaryDirectory() as tmp:
         agent = _agent(tmp)
-        game = _base(screen_type="SHOP_SCREEN", gold=0, screen={
+        game = _base(screen_type="SHOP_SCREEN", gold=0, screen_state={
             "cards": [{"name": "Ornamental Fan", "price": 150, "description": "block"}],
             "relics": [], "potions": [],
         })
         cmd = agent.choose_action(game)
-        assert cmd["command"] == "leave"
+        assert cmd["command"] == "return"  # leaving a shop is RETURN
 
 
 def test_shop_buys_when_priced_and_affordable():
     with tempfile.TemporaryDirectory() as tmp:
         agent = _agent(tmp)
-        game = _base(screen_type="SHOP_SCREEN", gold=500, screen={
+        game = _base(screen_type="SHOP_SCREEN", gold=500, screen_state={
             "cards": [{"name": "Ornamental Fan", "price": 150, "description": "block"}],
             "relics": [], "potions": [],
         })
         cmd = agent.choose_action(game)
         # pessimistic mock (0.55) is inside the uncertain band -> keep the gold
-        assert cmd["command"] == "leave"
+        assert cmd["command"] == "return"
         assert agent.history[-1]["fallback"] is True
 
 
@@ -173,7 +193,7 @@ def test_shop_buys_when_priced_and_affordable():
 def test_boss_reward_always_picks_something():
     with tempfile.TemporaryDirectory() as tmp:
         agent = _agent(tmp)
-        game = _base(screen_type="BOSS_REWARD", screen={"relics": [
+        game = _base(screen_type="BOSS_REWARD", screen_state={"relics": [
             {"name": "Philosopher's Stone", "description": "energy, enemies gain strength"},
             {"name": "Runic Dome", "description": "energy, no enemy intents"},
         ]})
@@ -184,7 +204,7 @@ def test_boss_reward_always_picks_something():
 def test_boss_reward_empty_is_safe():
     with tempfile.TemporaryDirectory() as tmp:
         agent = _agent(tmp)
-        cmd = agent.choose_action(_base(screen_type="BOSS_REWARD", screen={"relics": []}))
+        cmd = agent.choose_action(_base(screen_type="BOSS_REWARD", screen_state={"relics": []}))
         assert cmd == {"command": "choose", "choice": 0}
 
 
@@ -204,7 +224,8 @@ def test_combat_routine_turn_costs_zero_jev_calls():
         agent = _agent(tmp)
         cmd = agent.choose_action(_base(screen_type="COMBAT", combat=COMBAT))
         assert cmd["command"] == "play"
-        assert cmd["card_index"] == 0          # blocks first against the attack
+        assert cmd["card"] == 0                # blocks first against the attack
+        assert cmd["target"] == 0
         assert agent.jev.calls == 0            # drone rule: no JEV at control rate
         assert agent.history == []
 
@@ -238,8 +259,11 @@ def test_combat_consults_jev_when_damage_threatens_the_budget():
 def test_unknown_screen_waits():
     with tempfile.TemporaryDirectory() as tmp:
         agent = _agent(tmp)
-        cmd = agent.choose_action(_base(screen_type="GRID"))
+        # GRID is handled now (see _on_grid); this is a screen we genuinely have
+        # no rule for, e.g. one added by another mod.
+        cmd = agent.choose_action(_base(screen_type="MODDED_UNKNOWN_SCREEN"))
         assert cmd["command"] == "wait"
+        assert "no handler" in cmd["reason"]
 
 
 def test_full_screen_sweep_produces_valid_commands():
@@ -247,17 +271,89 @@ def test_full_screen_sweep_produces_valid_commands():
         agent = _agent(tmp)
         screens = [
             _base(screen_type="MAP", map={"next_nodes": [{"x": 0, "y": 4, "symbol": "M"}]}),
-            _base(screen_type="CARD_REWARD", screen={"cards": [{"name": "Inflame"}]}),
-            _base(screen_type="EVENT", screen={"options": [{"label": "a"}, {"label": "b"}]}),
-            _base(screen_type="REST", screen={"rest_options": ["rest", "smith"]}),
-            _base(screen_type="SHOP_SCREEN", screen={"cards": [], "relics": [], "potions": []}),
-            _base(screen_type="BOSS_REWARD", screen={"relics": [{"name": "Runic Dome"}]}),
+            _base(screen_type="CARD_REWARD", screen_state={"cards": [{"name": "Inflame"}]}),
+            _base(screen_type="EVENT", screen_state={"options": [{"label": "a"}, {"label": "b"}]}),
+            _base(screen_type="REST", screen_state={"rest_options": ["rest", "smith"]}),
+            _base(screen_type="SHOP_SCREEN",
+                  screen_state={"cards": [], "relics": [], "potions": []}),
+            _base(screen_type="BOSS_REWARD", screen_state={"relics": [{"name": "Runic Dome"}]}),
             _base(screen_type="COMBAT", combat=COMBAT),
         ]
         for game in screens:
             cmd = agent.choose_action(game)
             assert "command" in cmd and isinstance(cmd["command"], str)
         assert agent.jev.calls > 0
+
+
+def test_every_emitted_verb_is_a_real_protocol_verb():
+    """The CI contract: an invented verb is silently ignored by the game, which
+    looks exactly like a dead pipe. This test is why the vocabulary was fixed."""
+    with tempfile.TemporaryDirectory() as tmp:
+        agent = _agent(tmp)
+        screens = [
+            _base(screen_type="MAP", map={"next_nodes": [{"x": 0, "y": 4, "symbol": "M"},
+                                                         {"x": 1, "y": 4, "symbol": "E"}]}),
+            _base(screen_type="MAP", map={"next_nodes": []}),
+            _base(screen_type="CARD_REWARD", screen_state={"cards": [{"name": "Anger"}]}),
+            _base(screen_type="CARD_REWARD", deck=[{"name": f"C{i}"} for i in range(25)],
+                  screen_state={"cards": [{"name": "Anger"}]}),
+            _base(screen_type="EVENT", screen_state={"options": [{"label": "a"}]}),
+            _base(screen_type="EVENT", screen_state={"options": []}),
+            _base(screen_type="REST", screen_state={"rest_options": ["rest"]}),
+            _base(screen_type="REST", screen_state={"rest_options": ["rest", "smith"]}),
+            _base(screen_type="GRID", screen_state={"cards": DECK_10}),
+            _base(screen_type="SHOP_SCREEN", screen_state={"cards": [], "relics": [], "potions": []}),
+            _base(screen_type="SHOP_SCREEN", gold=999, screen_state={
+                "cards": [{"name": "Fan", "price": 10, "description": "d"}],
+                "relics": [], "potions": [], "purge_cost": 75}),
+            _base(screen_type="BOSS_REWARD", screen_state={"relics": [{"name": "Runic Dome"}]}),
+            _base(screen_type="BOSS_REWARD", screen_state={"relics": []}),
+            _base(screen_type="COMBAT", combat=COMBAT),
+            _base(screen_type="COMBAT", combat=dict(COMBAT, player={"current_hp": 30, "block": 0,
+                                                                    "energy": 2})),
+            _base(screen_type="GRID"),                       # unknown screen variants
+        ]
+        for game in screens:
+            cmd = agent.choose_action(game)
+            verb = cmd["command"].split(" ")[0].lower()
+            if verb.startswith("("):
+                continue  # "(posture only)" is an audit record, never sent
+            assert verb in PROTOCOL_VERBS, f"{verb!r} from {game['screen_type']} is not a protocol verb"
+
+
+def test_the_run_context_is_populated_for_every_decision():
+    """The live path must feed the judges the same rich state the simulator does,
+    or every live question is under-specified in the way runs 1-2 measured."""
+    with tempfile.TemporaryDirectory() as tmp:
+        agent = _agent(tmp)
+        game = _base(screen_type="CARD_REWARD", gold=213,
+                     relics=["Burning Blood", {"name": "Vajra"}],
+                     potions=[{"name": "Fire Potion"}],
+                     screen_state={"cards": [{"name": "Anger"}]})
+        agent.choose_action(game)
+        run = agent.run
+        assert run is not None
+        assert run.gold == 213
+        assert run.deck and len(run.deck) == 10
+        assert run.relics == ["Burning Blood", "Vajra"]
+        assert run.potions == ["Fire Potion"]
+        assert run.hp == 80 and run.max_hp == 80
+        assert run.budget_remaining is not None
+        # And the digest it would send carries them through.
+        digest = run.digest()
+        assert digest["gold"] == 213
+        assert digest["deck"]["summary"]["size"] == 10
+        assert digest["hp"]["ratio"] == 1.0
+        assert "Burning Blood" in digest["relics"]
+        assert "Fire Potion" in digest["potions"]
+
+
+def test_acceptance_mode_reaches_the_score_judges():
+    with tempfile.TemporaryDirectory() as tmp:
+        agent = _agent(tmp, acceptance="argmax")
+        agent.choose_action(_base(screen_type="BOSS_REWARD", screen_state={
+            "relics": [{"name": "Runic Dome", "description": "energy, no intents"}]}))
+        assert agent.history[-1]["detail"]["gate"]["mode"] == "argmax"
 
 
 def test_every_decision_is_logged_to_jsonl():

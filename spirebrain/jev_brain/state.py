@@ -194,13 +194,18 @@ def map_choices(nodes: Iterable[dict]) -> dict[str, str]:
 def path_damage_probes(nodes: Iterable[dict], act: int) -> dict[str, int]:
     """{node_id: estimated worst-case damage} for the HP-budget Noul probes.
 
-    Placeholder estimates from NODE_DAMAGE_HINT; the tactical layer should
-    replace these with per-path predictions (sum over nodes to the next rest).
+    Estimates come from NODE_DAMAGE_HINT, or from the node's own `damage_hint`
+    when it has one. That override exists because the offline harness generates
+    maps per seed, and without it every map of the same shape would cost the same
+    — which is how this project spent ten "different" ascents producing one
+    identical HP trajectory (docs/MEASUREMENTS.md, run 6).
     """
     probes: dict[str, int] = {}
     for n in nodes:
         node_id = str(n.get("id", f"{n.get('x')},{n.get('y')}"))
-        probes[node_id] = worst_case_damage(str(n.get("symbol", "?")), act)
+        hint = n.get("damage_hint")
+        probes[node_id] = (int(hint) if hint is not None
+                           else worst_case_damage(str(n.get("symbol", "?")), act))
     return probes
 
 

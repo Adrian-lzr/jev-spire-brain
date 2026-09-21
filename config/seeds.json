@@ -1,0 +1,6 @@
+{
+  "_note": "Seed split, adopted 2026-09-21 after external research showed this project had been tuning and evaluating on the same single-run data (docs/MEASUREMENTS.md, protocol). CALIBRATION_SEEDS may be re-run freely while picking thresholds. TEST_SEEDS is LOCKED: run it once, at the end, report that number as the result, and never re-run it after changing anything. If you look at it twice it stops being a test set.",
+  "calibration_seeds": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+  "test_seeds": [101, 102, 103, 104, 105, 106, 107, 108, 109, 110],
+  "note_on_test_seeds": "Chosen as a contiguous block disjoint from calibration, and fixed before any run. Do not substitute seeds after seeing results."
+}

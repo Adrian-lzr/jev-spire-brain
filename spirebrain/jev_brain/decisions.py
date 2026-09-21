@@ -152,39 +152,115 @@ def accept_choice(answer, *, floor: float = CONFIDENCE_FLOOR,
     return bool(chosen_is_top and top_p >= top_floor and (top_p - runner_up) >= margin)
 
 
-def accept_score(answer, *, spec=None, floor: float = CONFIDENCE_FLOOR,
-                 action_floor: float = SCORE_ACTION_FLOOR,
-                 top_floor: float = CHOICE_TOP_FLOOR,
-                 margin: float = CHOICE_MARGIN) -> bool:
-    """The Score sibling of accept_choice().
+# How a Score answer is accepted. Two modes, and the difference matters:
+#
+#   "argmax" (DEFAULT, adopted 2026-09-21)  value clears the action floor. The
+#                       distribution's shape is not examined.
+#   "margin"            value clears the action floor AND the level distribution
+#                       is peaked (landed level is the most likely, top >= 0.50,
+#                       leads the runner-up by 0.15).
+#
+# Why argmax is the default — pre-registered comparison, 10 ascents per arm on
+# real JEV (docs/MEASUREMENTS.md runs 6-9):
+#
+#   | | margin | argmax |
+#   |---|---|---|
+#   | cards taken (10 ascents) | 1 | 30, every ascent |
+#   | rule fallback rate | 0.537 | 0.411 |
+#   | mean HP at each act end | 48.3 / 43.9 / 43.0 | 49.5 / 44.7 / 43.0 |
+#   | decision flip rate (5 repeats) | 0 % | 0 % |
+#
+# "margin" was fitted to a single run (run 3) and then shown to be the sole
+# blocker on card rewards: values were stable to +-0.02, correctly ordered, and
+# already clearing the 0.55 action floor, yet every reward was skipped because a
+# preference question's distribution is not peaked. Two thirds of its rejections
+# were distribution-shape rejections, and a third of those were the *consistency*
+# check ("landed on 2.14, distribution favours 3") — a requirement nobody ever
+# justified. The value floor remains, so argmax still refuses genuinely bad cards.
+SCORE_ACCEPTANCE = "argmax"
+VALID_SCORE_ACCEPTANCE = ("margin", "argmax")
 
-    Same reasoning, one wrinkle: a Score answer's `probabilities` are keyed by
-    LEVEL INDEX (`"0"`, `"1"`, ...) while the value we normalise is a fractional
-    position between levels. So "is the chosen option clearly ahead?" becomes
-    "is the level the model actually landed on the same level the distribution
-    favours, and does it lead the runner-up?" — plus the value must still clear
-    the action floor, since a clearly-favoured 'filler card' is still filler.
 
-    Without a distribution (mocks) this degrades to the old rule exactly:
-    value above the action floor AND confidence above the floor.
+def evaluate_score(answer, *, mode: str | None = None,
+                   floor: float = CONFIDENCE_FLOOR,
+                   action_floor: float = SCORE_ACTION_FLOOR,
+                   top_floor: float = CHOICE_TOP_FLOOR,
+                   margin: float = CHOICE_MARGIN) -> dict:
+    """Full breakdown of the Score gate — accepted flag plus every condition.
+
+    Returning the reasons rather than just a boolean is deliberate: the
+    pre-registered experiment has to report *why* a card was skipped, otherwise
+    "deck did not grow" is indistinguishable from "the gate is still shut".
+
+    A Score answer's `probabilities` are keyed by LEVEL INDEX (`"0"`, `"1"`, ...)
+    while the value we normalise is a fractional position between levels, so
+    "is the chosen option clearly ahead?" becomes "is the level the model landed
+    on the level the distribution favours, and does it lead the runner-up?"
     """
-    want = getattr(answer, "value", 0.0)
+    resolved = mode or SCORE_ACCEPTANCE
+    if resolved not in VALID_SCORE_ACCEPTANCE:
+        raise ValueError(f"unknown score acceptance mode: {resolved!r}")
+
+    want = float(getattr(answer, "value", 0.0) or 0.0)
+    conf = float(getattr(answer, "confidence", 0.0) or 0.0)
     raw = getattr(answer, "raw", None) or {}
     probs = raw.get("probabilities") or {}
+
+    out: dict = {"mode": resolved, "value": round(want, 4), "confidence": round(conf, 4),
+                 "action_floor": action_floor, "value_ok": want >= action_floor,
+                 "peaked": None, "landed_is_top": None, "top_p": None,
+                 "margin_ok": None, "accepted": False, "reason": ""}
+
     if not probs:
-        return bool(want >= action_floor and getattr(answer, "confidence", 0.0) >= floor)
+        # No distribution (mocks, or a provider that omits it): keep the previous
+        # behaviour exactly, so mock runs stay predictable.
+        out["accepted"] = bool(out["value_ok"] and conf >= floor)
+        out["reason"] = "" if out["accepted"] else (
+            "mock/no distribution: value or confidence below floor")
+        return out
+
     try:
         items = sorted(((k, float(v)) for k, v in probs.items()), key=lambda kv: -kv[1])
         top_key, top_p = items[0]
         runner_up = items[1][1] if len(items) > 1 else 0.0
-        # Which level did the model land on? Round the raw level when we have it.
         level = raw.get("score", raw.get("level"))
         landed = str(int(round(float(level)))) if level is not None else None
     except (TypeError, ValueError):
-        return bool(want >= action_floor and getattr(answer, "confidence", 0.0) >= floor)
-    if landed is not None and landed != top_key:
-        return False
-    return bool(want >= action_floor and top_p >= top_floor and (top_p - runner_up) >= margin)
+        out["accepted"] = bool(out["value_ok"] and conf >= floor)
+        out["reason"] = "unparseable distribution: fell back to value+confidence"
+        return out
+
+    out["top_p"] = round(top_p, 4)
+    out["margin_ok"] = (top_p - runner_up) >= margin
+    out["landed_is_top"] = None if landed is None else (landed == top_key)
+    out["peaked"] = bool(top_p >= top_floor and (top_p - runner_up) >= margin
+                         and out["landed_is_top"] is not False)
+
+    if resolved == "argmax":
+        out["accepted"] = bool(out["value_ok"])
+        if not out["accepted"]:
+            out["reason"] = f"value {out['value']} below action floor {action_floor}"
+        return out
+
+    if not out["value_ok"]:
+        out["reason"] = f"value {out['value']} below action floor {action_floor}"
+    elif out["landed_is_top"] is False:
+        out["reason"] = f"landed on level {level}, distribution favours {top_key}"
+    elif not out["margin_ok"]:
+        out["reason"] = f"flat distribution: top {top_p:.2f} vs runner-up {runner_up:.2f}"
+    else:
+        out["accepted"] = True
+    return out
+
+
+def accept_score(answer, *, mode: str | None = None, spec=None,
+                 floor: float = CONFIDENCE_FLOOR,
+                 action_floor: float = SCORE_ACTION_FLOOR,
+                 top_floor: float = CHOICE_TOP_FLOOR,
+                 margin: float = CHOICE_MARGIN) -> bool:
+    """The Score sibling of accept_choice(). See evaluate_score() for the detail."""
+    return bool(evaluate_score(answer, mode=mode, floor=floor, action_floor=action_floor,
+                               top_floor=top_floor, margin=margin)["accepted"])
 
 
 def _probe_details(resp: JevResponse) -> dict:
@@ -284,13 +360,15 @@ class CardRewardJudge:
     """Card rewards: Score x candidates against the deck, with a skip path."""
 
     def __init__(self, jev: JevClient, deck_size: int, max_cards: int = 25,
-                 deck_digest: str = "", goal: str = "", run: RunContext | None = None) -> None:
+                 deck_digest: str = "", goal: str = "", run: RunContext | None = None,
+                 acceptance: str | None = None) -> None:
         self.jev = jev
         self.deck_size = deck_size
         self.max_cards = max_cards
         self.deck_digest = deck_digest
         self.goal = goal
         self.run = run
+        self.acceptance = acceptance
 
     def decide(self, candidates: dict[str, str]) -> Decision:
         """candidates: {card_name: description}. Returns a card name or 'skip'."""
@@ -313,11 +391,14 @@ class CardRewardJudge:
             resp = self.jev.ask(self._state(candidates), questions)
             best_name, best = max(resp.answers.items(), key=lambda kv: kv[1].value)
             scores = {k: round(v.value, 4) for k, v in resp.answers.items()}
-            if not accept_score(best):
+            gate = evaluate_score(best, mode=self.acceptance)
+            gate["ranking"] = sorted(scores, key=scores.get, reverse=True)
+            if not gate["accepted"]:
                 return Decision("card_reward", "skip", best.confidence, True,
-                                {"scores": scores, "best": best_name,
-                                 "reason": "best card not clearly worth taking"})
-            return Decision("card_reward", best_name, best.confidence, False, {"scores": scores})
+                                {"scores": scores, "best": best_name, "gate": gate,
+                                 "reason": f"best card rejected: {gate['reason']}"})
+            return Decision("card_reward", best_name, best.confidence, False,
+                            {"scores": scores, "gate": gate})
         except Exception:  # noqa: BLE001
             return Decision("card_reward", "skip", 0.0, True, {"reason": "jev error"})
 
@@ -532,11 +613,12 @@ class BossRelicJudge:
     low-confidence pick is flagged, which is what a later review reads."""
 
     def __init__(self, jev: JevClient, goal: str = "", deck_digest: str = "",
-                 run: RunContext | None = None) -> None:
+                 run: RunContext | None = None, acceptance: str | None = None) -> None:
         self.jev = jev
         self.goal = goal
         self.deck_digest = deck_digest
         self.run = run
+        self.acceptance = acceptance
 
     def decide(self, relics: dict[str, str]) -> Decision:
         if not relics:
@@ -555,11 +637,13 @@ class BossRelicJudge:
             resp = self.jev.ask(self._state(relics), questions)
             best_name, best = max(resp.answers.items(), key=lambda kv: kv[1].value)
             scores = {k: round(v.value, 4) for k, v in resp.answers.items()}
+            gate = evaluate_score(best, mode=self.acceptance)
             # Mandatory pick: take the best even when unsure, but flag it.
-            low = not accept_score(best)
+            low = not gate["accepted"]
             return Decision("boss_relic", best_name, best.confidence, low,
-                            {"scores": scores,
-                             **({"reason": "mandatory pick, low confidence"} if low else {})})
+                            {"scores": scores, "gate": gate,
+                             **({"reason": f"mandatory pick, gate says: {gate['reason']}"}
+                                if low else {})})
         except Exception as exc:  # noqa: BLE001
             first = next(iter(relics))
             return Decision("boss_relic", first, 0.0, True,

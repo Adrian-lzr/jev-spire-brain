@@ -34,6 +34,7 @@ from spirebrain.jev_brain.decisions import (
 )
 from spirebrain.jev_brain.logging_client import LoggingJevClient
 from spirebrain.jev_brain.state import (
+    RunContext,
     deck_digest,
     map_choices,
     path_damage_probes,
@@ -51,6 +52,25 @@ REST_SCREEN = "REST"
 SHOP_SCREEN = "SHOP_SCREEN"
 BOSS_REWARD_SCREEN = "BOSS_REWARD"
 COMBAT_SCREEN = "COMBAT"
+# The grid you pick a card from after choosing "smith" at a rest site.
+GRID_SCREENS = ("GRID", "CARD_SELECT", "HAND_SELECT")
+
+# --------------------------------------------------------------------------- #
+# What we are allowed to say
+# --------------------------------------------------------------------------- #
+# CommunicationMod understands a fixed verb set (verified against its README,
+# 2026-09-21). Our route to a command does NOT get to invent words: an unknown
+# verb is ignored by the game, which from the agent's side is indistinguishable
+# from the pipe having died. So this set is the contract, and
+# `tests/test_stdio.py` asserts every command the router can emit is inside it.
+#
+# Two traps this list makes explicit: there is no `skip` (skipping a card reward
+# is RETURN, "equivalent to SKIP, CANCEL, and LEAVE"), and there is no `purge` or
+# `smith` — every screen choice is CHOOSE.
+PROTOCOL_VERBS = frozenset({
+    "start", "potion", "play", "end", "choose", "proceed", "return", "key",
+    "click", "wait", "state",
+})
 
 
 def _get(obj, *names, default=None):
@@ -88,20 +108,30 @@ class SpireBrainAgent:
     """Receives game state, routes to decision modules, returns one command."""
 
     def __init__(self, jev_backend: str = "mock", strategy_path: str | Path | None = None,
-                 log_dir: str | Path | None = None) -> None:
+                 log_dir: str | Path | None = None,
+                 acceptance: str | None = None) -> None:
         strategy_file = Path(strategy_path) if strategy_path else ROOT / "config" / "strategy.json"
         self.strategy = json.loads(strategy_file.read_text(encoding="utf-8"))
         self.goal = self.strategy.get("goal", "")
+        # "margin" | "argmax" — the Score gate, see decisions.evaluate_score. The
+        # default is the one the pre-registered comparison in docs/MEASUREMENTS.md
+        # selected; the strategy file carries it so it stays a human choice.
+        self.acceptance = acceptance or self.strategy.get("jev", {}).get("score_acceptance")
 
         client = get_client(jev_backend)
         self.jev = LoggingJevClient(
             client, log_dir=log_dir or ROOT / self.strategy.get("jev", {}).get("log_dir", "logs"))
         self.hp: HPBudget | None = None
+        self.run: RunContext | None = None
+        # Set when JEV picks an upgrade at a rest site; consumed by the card grid
+        # that follows. The protocol is one command per screen, so the intent has
+        # to survive across two states.
+        self._pending_upgrade: int | None = None
         self.history: list[dict] = []
 
     # -- lifecycle --------------------------------------------------------- #
     def observe(self, game) -> None:
-        """Sync our model of the world (currently: HP budget) from the game."""
+        """Sync our model of the world (HP budget + run context) from the game."""
         act = int(_get(game, "act", default=1))
         max_hp = int(_get(game, "max_hp", default=80))
         current_hp = int(_get(game, "current_hp", "hp", default=max_hp))
@@ -110,6 +140,25 @@ class SpireBrainAgent:
         else:
             self.hp.max_hp = max_hp
             self.hp.current_hp = current_hp
+
+        # The live state must be as rich as the simulator's, or every question we
+        # ask JEV is under-specified in exactly the way run 1-2 measured. Same
+        # object, same digest, both paths.
+        deck = self._deck(game)
+        self.run = RunContext(
+            act=act,
+            floor=int(_get(game, "floor", "floor_num", default=0)),
+            character=str(_get(game, "character", "class", "player_class", default="")).upper(),
+            hp=current_hp,
+            max_hp=max_hp,
+            gold=int(_get(game, "gold", default=0)),
+            deck=deck,
+            relics=[str(r if isinstance(r, str) else _get(r, "name", "relic_id", default=""))
+                    for r in (_get(game, "relics", default=[]) or [])],
+            potions=[str(p if isinstance(p, str) else _get(p, "name", "potion_id", default=""))
+                     for p in (_get(game, "potions", default=[]) or [])],
+            goal=self.goal,
+        ).with_budget(self.hp)
 
     def choose_action(self, game) -> dict:
         """Return ONE CommunicationMod command for the current screen."""
@@ -124,6 +173,8 @@ class SpireBrainAgent:
             BOSS_REWARD_SCREEN: self._on_boss_reward,
             COMBAT_SCREEN: self._on_combat,
         }.get(screen)
+        if handler is None and screen in GRID_SCREENS:
+            handler = self._on_grid
         if handler is None:
             return {"command": "wait", "reason": f"no handler for screen {screen!r}"}
         return handler(game)
@@ -164,14 +215,14 @@ class SpireBrainAgent:
         act = self._budget().act
         choices = map_choices(nodes)
         probes = path_damage_probes(nodes, act)
-        d = MapRouter(self.jev, self._budget()).decide(choices, probes)
+        d = MapRouter(self.jev, self._budget(), run=self.run).decide(choices, probes)
         index = {str(n["id"]): i for i, n in enumerate(nodes)}
         choice = index.get(str(d.value), 0)
         return self._record(d, {"command": "choose", "choice": choice})
 
     # -- 2. card reward ---------------------------------------------------- #
     def _on_card_reward(self, game) -> dict:
-        screen = _get(game, "screen", default=game)
+        screen = _get(game, "screen_state", "screen", default=game)
         raw = _get(screen, "cards", default=[]) or []
         names = [str(_get(c, "name", "card_id", default=f"card {i}")) for i, c in enumerate(raw)]
         labels, index = _unique_labels(names)
@@ -182,15 +233,18 @@ class SpireBrainAgent:
         deck = self._deck(game)
         d = CardRewardJudge(
             self.jev, len(deck), self.strategy["deck_policy"]["max_cards"],
-            deck_digest=deck_digest(deck), goal=self.goal,
+            deck_digest=deck_digest(deck), goal=self.goal, run=self.run,
+            acceptance=self.acceptance,
         ).decide(descriptions)
         if d.value == "skip":
-            return self._record(d, {"command": "skip"})
+            # There is no `skip` verb in the protocol: RETURN *is* skip
+            # ("equivalent to SKIP, CANCEL, and LEAVE").
+            return self._record(d, {"command": "return"})
         return self._record(d, {"command": "choose", "choice": index.get(str(d.value), 0)})
 
     # -- 3. event ---------------------------------------------------------- #
     def _on_event(self, game) -> dict:
-        screen = _get(game, "screen", default=game)
+        screen = _get(game, "screen_state", "screen", default=game)
         raw = _get(screen, "options", default=[]) or []
         event_text = str(_get(screen, "body", "event_id", default="an event"))
         texts = [str(_get(o, "label", "text", default=f"option {i}"))
@@ -205,30 +259,62 @@ class SpireBrainAgent:
         if not available:
             return {"command": "choose", "choice": 0}
 
-        d = EventChooser(self.jev, goal=self.goal).decide(event_text, available)
+        d = EventChooser(self.jev, goal=self.goal, run=self.run).decide(event_text, available)
         return self._record(d, {"command": "choose", "choice": index.get(str(d.value), 0)})
 
     # -- 4. rest site ------------------------------------------------------ #
     def _on_rest(self, game) -> dict:
-        screen = _get(game, "screen", default=game)
+        """Rest sites are a CHOOSE, not a `rest`/`smith` verb (there are neither).
+
+        The protocol takes one command per screen, so an upgrade decision spans
+        two states: this answers the rest-site screen, and `_on_grid` answers the
+        card grid that follows using the intent stashed in `_pending_upgrade`.
+        """
+        screen = _get(game, "screen_state", "screen", default=game)
         options = [str(o) for o in (_get(screen, "rest_options", default=[]) or [])]
-        has_smith = any("smith" in o.lower() or "upgrade" in o.lower() for o in options)
-        deck = self._deck(game)
-        if not has_smith:
+        rest_i = next((i for i, o in enumerate(options) if "rest" in o.lower()), 0)
+        smith_i = next((i for i, o in enumerate(options)
+                        if "smith" in o.lower() or "upgrade" in o.lower()), None)
+        if smith_i is None:
             # Nothing to decide: JEV is not consulted when there is no choice.
-            d = RestSiteDecider(self.jev, self._budget(), self.goal).decide(
-                hp_ratio=self._hp_ratio(), upgradable={})
-            return self._record(d, {"command": "rest"})
+            d = RestSiteDecider(self.jev, self._budget(), self.goal,
+                                run=self.run).decide(hp_ratio=self._hp_ratio(), upgradable={})
+            self._pending_upgrade = None
+            return self._record(d, {"command": "choose", "choice": rest_i})
+
+        deck = self._deck(game)
         upgradable = {str(_get(c, "name", default=f"card {i}")): str(_get(c, "type", default=""))
                       for i, c in enumerate(deck)
                       if not _get(c, "upgrades", default=0)}
-        d = RestSiteDecider(self.jev, self._budget(), self.goal).decide(
-            hp_ratio=self._hp_ratio(), upgradable=upgradable)
+        d = RestSiteDecider(self.jev, self._budget(), self.goal,
+                            run=self.run).decide(hp_ratio=self._hp_ratio(),
+                                                 upgradable=upgradable)
         if d.value == "rest":
-            return self._record(d, {"command": "rest"})
-        cards = [str(_get(c, "name", default=f"card {i}")) for i, c in enumerate(deck)]
-        _, index = _unique_labels(cards)
-        return self._record(d, {"command": "smith", "choice": index.get(str(d.value), 0)})
+            self._pending_upgrade = None
+            return self._record(d, {"command": "choose", "choice": rest_i})
+
+        # PHASE 1 VERIFY: the grid's index is the position among *upgradable*
+        # cards in the order the game presents them. We assume that order matches
+        # the deck array; if the live game sorts the grid differently, the wrong
+        # card gets upgraded — visible in the run, harmless, but worth checking.
+        names = [str(_get(c, "name", default=f"card {i}")) for i, c in enumerate(deck)
+                 if not _get(c, "upgrades", default=0)]
+        _, index = _unique_labels(names)
+        self._pending_upgrade = index.get(str(d.value), 0)
+        return self._record(d, {"command": "choose", "choice": smith_i})
+
+    def _on_grid(self, game) -> dict:
+        """Card-grid screens: fulfil the pending upgrade, else take the first card.
+
+        A grid we did not ask for (card-removal, discard) gets the conservative
+        first card — that is a real choice with a real cost, so it is logged as a
+        fallback rather than passed off as a decision.
+        """
+        if self._pending_upgrade is not None:
+            choice, self._pending_upgrade = self._pending_upgrade, None
+            return {"command": "choose", "choice": choice}
+        return {"command": "choose", "choice": 0,
+                "reason": "grid screen with no pending intent; took the first option"}
 
     def _hp_ratio(self) -> float:
         hp = self._budget()
@@ -236,10 +322,15 @@ class SpireBrainAgent:
 
     # -- 5. shop ----------------------------------------------------------- #
     def _on_shop(self, game) -> dict:
-        """PHASE 1 VERIFY: CommunicationMod's shop commands and whether purchases
-        pause the screen. Until a live run confirms it, we emit a conservative
-        `leave` and let the callers of Phase 1 decide how aggressive to be."""
-        screen = _get(game, "screen", default=game)
+        """Shop: buying is CHOOSE by shelf index, leaving is RETURN.
+
+        PHASE 1 VERIFY: CHOOSE addresses the shelves in the order cards, then
+        relics, then potions (the order we build `index` in below), and the
+        card-removal service is one more choice after them. Confirm on the live
+        pipe — if the ordering differs, we buy the wrong item, which is visible
+        and recoverable, so this stays a flagged assumption rather than a blocker.
+        """
+        screen = _get(game, "screen_state", "screen", default=game)
         gold = int(_get(game, "gold", default=0))
         raw = []
         for kind, key in (("card", "cards"), ("relic", "relics"), ("potion", "potions")):
@@ -248,20 +339,26 @@ class SpireBrainAgent:
                             "price": int(_get(item, "price", default=0)),
                             "description": str(_get(item, "description", default=""))})
         items = shop_items(raw)
-        d = ShopDecider(self.jev, goal=self.goal).decide(
+        purge_cost = int(_get(screen, "purge_cost", default=0)) or None
+        d = ShopDecider(self.jev, goal=self.goal, run=self.run).decide(
             gold=gold, items=items,
-            removal_cost=int(_get(screen, "purge_cost", default=0)) or None,
+            removal_cost=purge_cost,
             remove_candidate="a starter Strike or Defend",
         )
         if d.value == "leave":
-            return self._record(d, {"command": "leave"})
+            return self._record(d, {"command": "return"})
         if d.value == "remove":
-            return self._record(d, {"command": "purge", "target": "Strike"})
-        return self._record(d, {"command": "buy", "target": str(d.value)})
+            # The purge service sits after the shelves; PURGE is not a verb.
+            return self._record(d, {"command": "choose", "choice": len(raw)})
+        choice = next((i for i, r in enumerate(raw) if r["name"] == str(d.value)), None)
+        if choice is None:  # label came from a disambiguated duplicate
+            choice = next((i for i, r in enumerate(raw)
+                           if str(d.value).startswith(r["name"])), 0)
+        return self._record(d, {"command": "choose", "choice": choice})
 
     # -- 6. boss relic ----------------------------------------------------- #
     def _on_boss_reward(self, game) -> dict:
-        screen = _get(game, "screen", default=game)
+        screen = _get(game, "screen_state", "screen", default=game)
         raw = _get(screen, "relics", default=[]) or []
         names = [str(_get(r, "name", "relic_id", default=f"relic {i}")) for i, r in enumerate(raw)]
         labels, index = _unique_labels(names)
@@ -271,7 +368,8 @@ class SpireBrainAgent:
         }
         if not descriptions:
             return {"command": "choose", "choice": 0}
-        d = BossRelicJudge(self.jev, goal=self.goal).decide(descriptions)
+        d = BossRelicJudge(self.jev, goal=self.goal, run=self.run,
+                           acceptance=self.acceptance).decide(descriptions)
         return self._record(d, {"command": "choose", "choice": index.get(str(d.value), 0)})
 
     # -- 7. combat --------------------------------------------------------- #
@@ -303,7 +401,7 @@ class SpireBrainAgent:
         # routine turn costs zero JEV calls.
         incoming = sum(e["damage"] for e in state.enemies if e["intent"] == "attack")
         if incoming > self._budget().remaining_budget:
-            gate = CombatRiskGate(self.jev, self._budget())
+            gate = CombatRiskGate(self.jev, self._budget(), run=self.run)
             d = gate.decide(str(_get(combat, "encounter_name", default="a fight")), incoming)
             self._record(d, {"command": "(posture only)"})
 
@@ -313,11 +411,12 @@ class SpireBrainAgent:
 
     @staticmethod
     def _first_play(state: CombatState) -> dict:
+        """0-indexed card and target: the +1 the protocol wants happens at the wire."""
         order = play_order(state)
         if not order:
             return {"command": "end"}
         target = order[0]
         for i, card in enumerate(state.hand):
             if card is target or card.name == target.name:
-                return {"command": "play", "card_index": i, "target_index": 0}
+                return {"command": "play", "card": i, "target": 0}
         return {"command": "end"}

@@ -273,6 +273,12 @@ should rise.
 | 3 | full digest + **distribution-based acceptance** | 61 / 63 | **5, 5, 5** | $0.000783 | 1328 ms |
 | 4 | + **the game's own card/relic text** | **59 / 63** | 6, 4, 5 | $0.000859 | 1320 ms |
 
+> **This table stops at run 4 on purpose.** The single-ascent runs above are
+> superseded by the multi-seed batches and their protocol — including what those
+> batches refuted, and the harness bug they exposed — in
+> **[docs/MEASUREMENTS.md](MEASUREMENTS.md)**. That file is the authoritative
+> record; treat this table as the story of how the questions got asked.
+
 ## Reading the game's own data instead of asking the model to remember
 
 The only other JEV + Slay-the-Spire project we could find (`Ethics03/jevspire`,

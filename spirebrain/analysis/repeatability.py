@@ -96,7 +96,7 @@ class Scenario:
         return decision
 
 
-def build_scenarios() -> list[Scenario]:
+def build_scenarios(acceptance: str | None = None) -> list[Scenario]:
     hp = HPBudget(act=1, max_hp=80, current_hp=62)
     run = RunContext(act=1, floor=7, character="IRONCLAD", hp=62, max_hp=80,
                      gold=300, deck=DECK, relics=RELICS, potions=POTIONS,
@@ -115,7 +115,7 @@ def build_scenarios() -> list[Scenario]:
 
     def card_scenario(jev, hp_budget, r):
         judge = CardRewardJudge(jev, deck_len, 25, deck_digest=deck_digest(DECK, character=r.character),
-                                goal=r.goal, run=r)
+                                goal=r.goal, run=r, acceptance=acceptance)
         return lambda: judge.decide({"Pommel Strike": "", "Twin Strike": "", "Anger": ""})
 
     def shop_scenario(jev, hp_budget, r):
@@ -128,7 +128,7 @@ def build_scenarios() -> list[Scenario]:
         )
 
     def relic_scenario(jev, hp_budget, r):
-        judge = BossRelicJudge(jev, goal=r.goal, run=r)
+        judge = BossRelicJudge(jev, goal=r.goal, run=r, acceptance=acceptance)
         return lambda: judge.decide({"Philosopher's Stone": "", "Runic Dome": "",
                                      "Coffee Dripper": ""})
 
@@ -208,17 +208,19 @@ def _per_question(scenario: Scenario) -> dict:
     return out
 
 
-def run(repeats: int = 5, backend: str = "openrouter", as_json: str | None = None) -> dict:
+def run(repeats: int = 5, backend: str = "openrouter", as_json: str | None = None,
+        acceptance: str | None = None) -> dict:
     inner = get_client(backend)
     recorder = RecordingClient(inner)
     hp = HPBudget(act=1, max_hp=80, current_hp=62)
     results = []
 
-    print(f"backend={backend}  repeats={repeats}  scenarios=4")
+    print(f"backend={backend}  repeats={repeats}  scenarios=4  "
+          f"score_gate={acceptance or 'margin'}")
     print("Each scenario sends the IDENTICAL request N times; a threshold is only "
           "meaningful if the verdict does not move.\n")
 
-    for scenario in build_scenarios():
+    for scenario in build_scenarios(acceptance):
         for _ in range(repeats):
             scenario.once(recorder, hp)
         # attach the slice of responses belonging to this scenario
@@ -255,7 +257,8 @@ def run(repeats: int = 5, backend: str = "openrouter", as_json: str | None = Non
         print("\nNo threshold crossed back and forth at this repeat count. Raise --repeats\n"
               "before treating that as settled; absence of flips is not proof of stability.")
 
-    payload = {"backend": backend, "repeats": repeats, "results": results}
+    payload = {"backend": backend, "repeats": repeats,
+               "score_gate": acceptance or "margin", "results": results}
     if as_json:
         Path(as_json).write_text(json.dumps(payload, ensure_ascii=False, indent=2),
                                  encoding="utf-8")
@@ -270,7 +273,7 @@ def main(argv: list[str]) -> None:
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
 
-    repeats, backend, as_json = 5, "openrouter", None
+    repeats, backend, as_json, acceptance = 5, "openrouter", None, None
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -282,12 +285,16 @@ def main(argv: list[str]) -> None:
             backend = argv[i + 1]; i += 2; continue
         if a.startswith("--backend="):
             backend = a.split("=", 1)[1]; i += 1; continue
+        if a == "--acceptance" and i + 1 < len(argv):
+            acceptance = argv[i + 1]; i += 2; continue
+        if a.startswith("--acceptance="):
+            acceptance = a.split("=", 1)[1]; i += 1; continue
         if a == "--json" and i + 1 < len(argv):
             as_json = argv[i + 1]; i += 2; continue
         if a.startswith("--json="):
             as_json = a.split("=", 1)[1]; i += 1; continue
         i += 1
-    run(repeats=repeats, backend=backend, as_json=as_json)
+    run(repeats=repeats, backend=backend, as_json=as_json, acceptance=acceptance)
 
 
 if __name__ == "__main__":

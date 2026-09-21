@@ -1,0 +1,247 @@
+"""Tests for the CommunicationMod stdio transport.
+
+Every case here corresponds to a documented way an unattended run dies: no
+`Ready` handshake (the game waits ten seconds and kills the process), a command
+outside `available_commands`, a verb the protocol does not have, or two commands
+for one state. The protocol details were verified against the CommunicationMod
+README on 2026-09-21 — see the module docstring of `spirebrain/driver/stdio.py`.
+"""
+
+from __future__ import annotations
+
+import io
+import json
+import sys
+import tempfile
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from spirebrain.driver.agent import PROTOCOL_VERBS
+from spirebrain.driver.stdio import (
+    StdioTransport,
+    replay,
+    to_command_line,
+)
+
+
+class _StubAgent:
+    """Records what it was asked and returns a fixed command."""
+
+    def __init__(self, command: dict | None = None) -> None:
+        self.command = command or {"command": "choose", "choice": 0}
+        self.seen: list[dict] = []
+
+    def choose_action(self, game):
+        self.seen.append(game)
+        return self.command
+
+
+def _msg(state: dict | None = None, **over) -> str:
+    message = {"in_game": True, "ready_for_command": True,
+               "available_commands": ["play", "end", "choose", "proceed", "return", "wait",
+                                      "state", "potion", "key", "click", "start"],
+               "game_state": state if state is not None else {"screen_type": "MAP"}}
+    message.update(over)
+    return json.dumps(message)
+
+
+# --------------------------------------------------------------------------- #
+# Command formatting
+# --------------------------------------------------------------------------- #
+def test_play_is_one_indexed_on_the_wire():
+    # README: "CardIndex is 1-indexed to match up with the card numbers in game."
+    assert to_command_line({"command": "play", "card": 0}) == "play 1"
+    assert to_command_line({"command": "play", "card": 0, "target": 2}) == "play 1 2"
+    assert to_command_line({"command": "play", "card_index": 4, "target_index": 1}) == "play 5 1"
+
+
+def test_skip_and_leave_are_return():
+    # README: RETURN is "Equivalent to SKIP, CANCEL, and LEAVE".
+    assert to_command_line({"command": "skip"}) == "return"
+    assert to_command_line({"command": "leave"}) == "return"
+    assert to_command_line({"command": "return"}) == "return"
+
+
+def test_choose_accepts_index_or_name():
+    assert to_command_line({"command": "choose", "choice": 0}) == "choose 0"
+    assert to_command_line({"command": "choose", "choice": 3}) == "choose 3"
+    assert to_command_line({"command": "choose", "name": "rest"}) == "choose rest"
+
+
+def test_potion_needs_use_or_discard_and_a_slot():
+    assert to_command_line({"command": "potion", "slot": 0}) == "potion use 0"
+    assert to_command_line({"command": "potion", "action": "discard", "slot": 1, "target": 0}) \
+        == "potion discard 1 0"
+
+
+def test_start_argument_order_is_class_then_ascension_then_seed():
+    # README: START PlayerClass [AscensionLevel] [Seed]. The order is NOT
+    # (seed, ascension) — getting it wrong starts a different game silently.
+    assert to_command_line({"command": "start", "player_class": "IRONCLAD"}) == "start IRONCLAD"
+    assert to_command_line({"command": "start", "player_class": "IRONCLAD",
+                            "ascension": 20}) == "start IRONCLAD 20"
+    assert to_command_line({"command": "start", "player_class": "IRONCLAD",
+                            "ascension": 1, "seed": "ABC123"}) == "start IRONCLAD 1 ABC123"
+
+
+def test_simple_verbs_and_wait_and_key():
+    for verb in ("end", "proceed", "state"):
+        assert to_command_line({"command": verb}) == verb
+    assert to_command_line({"command": "wait"}) == "wait"
+    assert to_command_line({"command": "wait", "frames": 30}) == "wait 30"
+    assert to_command_line({"command": "key", "key": "End_Turn"}) == "key End_Turn"
+    assert to_command_line({"command": "key", "key": "Map", "timeout": 50}) == "key Map 50"
+
+
+def test_every_formattable_verb_is_a_protocol_verb():
+    for verb in ("play", "end", "choose", "proceed", "return", "wait", "state",
+                 "start", "potion", "key"):
+        assert verb in PROTOCOL_VERBS
+
+
+def test_malformed_commands_fail_loudly():
+    for bad in ({"command": "play"}, {"command": "choose"}, {"command": "start"},
+                {"command": "potion"}, {"command": "key"}, {}):
+        try:
+            to_command_line(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"{bad!r} should have raised")
+
+
+# --------------------------------------------------------------------------- #
+# The stream
+# --------------------------------------------------------------------------- #
+def test_ready_is_sent_before_anything_else():
+    agent = _StubAgent()
+    out = io.StringIO()
+    transport = StdioTransport(agent, log_path=None)
+    transport.run([_msg()], out)
+    assert out.getvalue().startswith("Ready\n"), "the game hangs 10s without this"
+
+
+def test_replay_mode_does_not_send_ready():
+    with tempfile.TemporaryDirectory() as tmp:
+        p = Path(tmp) / "001.json"
+        p.write_text(_msg(), encoding="utf-8")
+        out = io.StringIO()
+        replay([p], _StubAgent(), log_path=None, outstream=out)
+        assert "Ready" not in out.getvalue()
+
+
+def test_non_json_lines_are_ignored_not_fatal():
+    agent = _StubAgent()
+    out = io.StringIO()
+    transport = StdioTransport(agent, log_path=None)
+    transport.run(["ModTheSpire booting...\n", "\n", "not json\n", _msg()], out)
+    assert agent.seen, "the JSON line after the noise must still be handled"
+    assert out.getvalue().count("\n") == 2  # Ready + one command
+
+
+def test_one_command_per_message_never_two():
+    agent = _StubAgent()
+    out = io.StringIO()
+    transport = StdioTransport(agent, log_path=None)
+    transport.run([_msg(), _msg()], out)
+    lines = [ln for ln in out.getvalue().splitlines() if ln]
+    assert lines[0] == "Ready"
+    assert len(lines) == 3  # Ready + exactly one command per message
+
+
+def test_not_ready_is_met_with_silence():
+    agent = _StubAgent()
+    out = io.StringIO()
+    transport = StdioTransport(agent, log_path=None)
+    transport.run([_msg(ready_for_command=False)], out)
+    assert out.getvalue() == "Ready\n"
+    assert transport.skipped_not_ready == 1
+    assert not agent.seen
+
+
+def test_an_error_message_asks_for_state_instead_of_stalling():
+    # The game waits for input after an error; silence would hang the run.
+    agent = _StubAgent()
+    out = io.StringIO()
+    transport = StdioTransport(agent, log_path=None)
+    transport.run([json.dumps({"error": "invalid command", "ready_for_command": True})], out)
+    assert out.getvalue() == "Ready\nstate\n"
+    assert transport.errors == 1
+    assert not agent.seen
+
+
+def test_out_of_run_is_silent_unless_auto_start():
+    agent = _StubAgent()
+    game = {"screen_type": "NONE"}
+    with tempfile.TemporaryDirectory() as tmp:
+        silent = StdioTransport(agent, log_path=Path(tmp) / "a.jsonl")
+        assert silent.handle_message({"in_game": False}) is None
+        assert not agent.seen
+
+        starter = StdioTransport(_StubAgent(), log_path=Path(tmp) / "b.jsonl",
+                                 auto_start=True, player_class="SILENT", ascension=5)
+        assert starter.handle_message({"in_game": False}) == "start SILENT 5"
+
+
+def test_a_command_outside_available_commands_is_substituted_and_recorded():
+    agent = _StubAgent({"command": "end"})  # END is not offered in this message
+    transport = StdioTransport(agent, log_path=None)
+    line = transport.handle_message(json.loads(
+        _msg(available_commands=["choose", "proceed"])))
+    assert line == "proceed"
+    assert transport.substitutions == [{"wanted": "end", "sent": "proceed"}]
+
+
+def test_no_safe_substitute_means_no_command_at_all():
+    transport = StdioTransport(_StubAgent({"command": "end"}), log_path=None)
+    line = transport.handle_message(json.loads(_msg(available_commands=["play"])))
+    assert line == ""
+    assert transport.substitutions[-1]["sent"] == ""
+
+
+def test_a_ready_message_without_state_asks_for_state():
+    transport = StdioTransport(_StubAgent(), log_path=None)
+    assert transport.handle_message({"ready_for_command": True, "in_game": True}) == "state"
+
+
+def test_the_pipe_log_records_both_sides():
+    with tempfile.TemporaryDirectory() as tmp:
+        log = Path(tmp) / "pipe.jsonl"
+        transport = StdioTransport(_StubAgent(), log_path=log)
+        transport.run([_msg()], io.StringIO())
+        rec = json.loads(log.read_text(encoding="utf-8").splitlines()[0])
+        assert rec["sent"] == "choose 0"
+        assert "game_state" in rec["msg"]
+
+
+def test_replay_decides_recorded_states_offline():
+    with tempfile.TemporaryDirectory() as tmp:
+        files = []
+        for i, screen in enumerate(("MAP", "REST", "COMBAT")):
+            p = Path(tmp) / f"{i:03d}.json"
+            p.write_text(_msg({"screen_type": screen}), encoding="utf-8")
+            files.append(p)
+        agent = _StubAgent()
+        out = io.StringIO()
+        transport = replay(files, agent, log_path=None, outstream=out)
+        assert transport.messages == 3 and transport.commands == 3
+        assert [g["screen_type"] for g in agent.seen] == ["MAP", "REST", "COMBAT"]
+
+
+if __name__ == "__main__":
+    import traceback
+
+    passed = failed = 0
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            try:
+                fn()
+                passed += 1
+                print(f"ok   {name}")
+            except Exception:
+                failed += 1
+                print(f"FAIL {name}")
+                traceback.print_exc()
+    print(f"\n{passed} passed, {failed} failed")
+    sys.exit(1 if failed else 0)
