@@ -42,7 +42,7 @@ Both come straight from the official docs ([docs/JEV_API.md](docs/JEV_API.md)):
 🚧 **Both halves of Phase 1 exist now, and the brain has run against real JEV.**
 All 7 decision modules + HP budget + greedy combat + logging + simulation harness
 + agent router + the real JEV client + the **CommunicationMod stdio transport** are
-in place, with **128 tests passing**. Live decisions and simulator decisions now
+in place, with **133 tests passing**. Live decisions and simulator decisions now
 share the same rich `RunContext`, so both paths ask JEV against the full run
 digest and the game's own card/relic text.
 
@@ -51,6 +51,7 @@ What is left is hardware, not code: install CommunicationMod (see
 
 ```bash
 # run everything offline right now (no game, no API key):
+python -m spirebrain.doctor                              # what is missing, and how to fix it
 python -m spirebrain.sim.run_offline                     # pessimistic mock: every module falls back
 python -m spirebrain.sim.run_offline --optimistic         # confident mock: answers steer the run
 python -m spirebrain.sim.batch --seeds calibration --backend mock   # 10 ascents, aggregated
@@ -113,9 +114,16 @@ ready, never send a verb the game did not advertise, and one command per state.
 git clone https://github.com/Adrian-lzr/jev-spire-brain.git
 cd jev-spire-brain
 pip install -r requirements.txt          # optional: the brain is stdlib-only
+python -m spirebrain.doctor               # names every missing piece and its fix
 python tests\test_stdio.py               # prove the pipe logic offline
 # then point CommunicationMod's `command=` at run_agent.py — docs/SETUP.md
 ```
+
+`doctor` exists because "is the mod installed?" turned out to need six manual
+checks, and one of them is genuinely non-obvious: a Steam Workshop **subscription**
+and a Workshop **download** are different states in `appworkshop_<appid>.acf`. The
+id under `WorkshopItemDetails` means Steam knows you subscribed; only
+`WorkshopItemsInstalled` means the files are on disk.
 
 ## Switching the brain on
 

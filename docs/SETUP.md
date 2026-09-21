@@ -17,30 +17,49 @@ Checked directly, not assumed:
 | Game | **installed** at `E:\LeStoreDownload\steam\steamapps\common\SlayTheSpire` (Steam appid 646570; `desktop-1.0.jar`, bundled `jre\bin\java.exe`, `mts-launcher.jar`) |
 | Workshop content | 3 items in `E:\LeStoreDownload\steam\steamapps\workshop\content\646570\`: ModTheSpire `1605060445`, BaseMod `1605833019`, StSLib `1609158507` |
 | `mods\` folder | **does not exist yet** — create it |
-| CommunicationMod | **not installed**; see step 1 |
+| CommunicationMod | **subscribed but not downloaded** (Steam ledger lists the id under `WorkshopItemDetails`, not under `WorkshopItemsInstalled`) — see step 1 |
 | CommunicationMod config | **does not exist yet** (`%LOCALAPPDATA%\ModTheSpire\CommunicationMod\`) |
 | Game data | readable: `gamedata.py` loads 423 cards / 195 relics / 45 potions from the jar |
 
 ## 1. Get CommunicationMod
 
-Two routes. The Workshop is easier; the GitHub release is the authoritative
-source and is what the mod's own docs point to.
+**This machine: subscribed but NOT downloaded.** Verified 2026-09-21 from Steam's
+own ledger (`steamapps\workshop\appworkshop_646570.acf`):
 
-| Route | Where |
+| Evidence | Value |
 |---|---|
-| Steam Workshop | item **2131373661** *(found by search 2026-09-21; not yet confirmed subscribed on this machine)* |
-| GitHub | `https://github.com/ForgottenArbiter/CommunicationMod/releases/latest` → `CommunicationMod.jar` |
+| `WorkshopItemDetails` contains `2131373661` and `3748153752` | the subscription **is** registered on the account |
+| `WorkshopItemsInstalled` contains only the original three | the content is **not** on disk |
+| `NeedsDownload` | `1` |
+| `steamapps\workshop\content\646570\` | three folders: ModTheSpire, BaseMod, StSLib — no `2131373661` |
+| Disk-wide search for `CommunicationMod*` | **no file found** anywhere on C:, D:, E: |
 
-Then put the jar where the mod loader looks for it:
+`2131373661` is identified as CommunicationMod from an independent listing that
+pairs the name with that id (AudioGames forum, "CommunicationMod —
+steamcommunity.com/sharedfiles/…2131373661"). Steam's own page for the item could
+not be fetched from here, so the decisive confirmation is the downloaded jar's
+filename. `3748153752` is a second subscribed item that public listings do not
+identify; it is not needed for this project.
 
-```
-E:\LeStoreDownload\steam\steamapps\common\SlayTheSpire\mods\CommunicationMod.jar
-```
+Fix — a subscription is not an install:
 
-Create `mods\` if it is missing (it is). Three of the four mods are already
-downloaded via the Workshop; the Workshop copies live in their own folder, so
-putting the jar in `mods\` as well is the simplest thing that works — ModTheSpire
-reads both locations.
+1. In the Steam client: Library → Slay the Spire → **Workshop**, open the item and
+   use **Download** if it is offered; or
+2. Restart the Steam client (the three other items arrived this way when they were
+   subscribed), or
+3. Launch the game once — a launch triggers workshop downloads.
+
+After it lands, expect `…\workshop\content\646570\2131373661\CommunicationMod.jar`.
+**Do not copy it anywhere**: ModTheSpire has loaded mods from the Workshop folder
+automatically since **v3.7.0** ("Steam Workshop support"), and since v3.13.0 it
+caches those paths so they work even with Steam closed. The workshop jar and a jar
+in `mods\` are equivalent; enable it in the ModTheSpire launcher's checkbox list
+either way.
+
+Fallback if the Workshop item will not download: get `CommunicationMod.jar` from
+`https://github.com/ForgottenArbiter/CommunicationMod/releases/latest` in a browser
+(the sandbox here cannot fetch GitHub binaries) and put it in
+`…\steamapps\common\SlayTheSpire\mods\` — create that folder, it does not exist yet.
 
 Optional but recommended for unattended runs:
 
@@ -170,6 +189,7 @@ rejects it. Details and the measured numbers are in `docs/JEV_API.md`.
 
 | Symptom | Cause | Fix |
 |---|---|---|
+| Subscribed on the Workshop but no jar appears in `content\646570\` | a subscription is not an install; `NeedsDownload` stays `1` because Steam never processed the item (the other three arrived only when the client next ran) | open the item in the Steam client and use Download, restart the Steam client, or launch the game once |
 | Game hangs ~10 s, then the process exits | no `Ready` handshake, or the command line is wrong | check `command=`; the launcher sends `Ready` already |
 | `ModuleNotFoundError: spirebrain` | `command=` points at the module file | point it at `run_agent.py` |
 | Nothing at all in the log | `config.properties` path wrong, or escaping broken (`\` and `:`) | the folder only exists after the mod has run once |
