@@ -22,6 +22,7 @@ stated otherwise. Raw call logs land in `logs/` (gitignored) and are readable wi
 | 7 | 2026-09-21 | **pre-registered arm B:** 10 ascents, `argmax` gate | — | 0.508 rate (122/240) | $0.000881 | — |
 | 8 | 2026-09-21 | repeatability probe under `argmax` | — | **0 % flip rate** | $0.0006 (20 calls) | — |
 | 9 | 2026-09-21 | **re-run of both arms on the fixed harness** (seed-driven maps) | — | margin 0.537 / argmax **0.411** | $0.001004 / $0.001027 | — |
+| 10 | 2026-09-21 | **corpus analysis of every logged answer** (no API calls) | — | 1410 distributions, r = +0.89 | $0 | — |
 
 Runs 6–8 are the pre-registered experiment from the previous version of this file.
 Runs 6 and 7 also destroyed the harness they were run on (below), so run 9 repeats
@@ -88,6 +89,55 @@ or a labelled dataset, and it is now the top item in the ROADMAP.
 | 7 | **`argmax` takes 3 cards per ascent, every ascent** (deck 10 → 13) and cuts rule fallbacks from 0.667 to 0.508 — while costing the same per call ($0.000858 → $0.000881, +2.7 %, from the longer deck digest) | That the wider deck *helps*, or that act-3 entry HP is unharmed: see the next row |
 | 8 | The `argmax` gate is stable: 0 % flip rate across all four scenarios at 5 repeats, so criterion (c) of the pre-registration is met | Those four scenarios only; other question sets are unprobed |
 | 9 | On a harness that can fail, `argmax` takes 3 cards per ascent in 10/10 runs where `margin` took 1 in 10, raises fallback-free play from 46 % to 59 %, and costs 2.3 % more per ascent. All 29 of margin's rejections were distribution-shape rejections, none a value rejection | That the deck got *better*: no ground truth exists for card quality here |
+| 10 | **What confidence is.** Over 1410 answers carrying a distribution, confidence correlates **+0.885 (Choice) / +0.899 (Score)** with our own peakedness measure, so it is a flatness statistic we can compute rather than something we must ask for. All 157 `confidence=0.000` answers are genuine zeros (field absent: 0) with peakedness ≤ 0.127, i.e. uniform. And **value anti-correlates with peakedness at r = −0.51**, which is why `margin` fired on 2 of 810 Score answers | What *causes* the anti-correlation; whether 0.55 is the right action floor; whether JEV's own confidence is available for Noul (it is not — its probability is the belief) |
+
+## Run 10 in detail — what the confidence number is
+
+`python -m spirebrain.analysis.confidence` (read-only; no API calls)
+
+Answering a question the project had carried since run 1 and never resolved:
+**what does JEV's confidence mean, and is `0.000` a value or a missing field?**
+
+| Question type | n | confidence range | peakedness range | r |
+|---|---|---|---|---|
+| Choice | 600 | 0.000 – 0.880 | 0.000 – 0.719 | **+0.885** |
+| Score | 810 | 0.000 – 0.920 | 0.030 – 0.797 | **+0.899** |
+
+where peakedness = 1 − (normalised entropy of the answer distribution).
+
+**Three findings:**
+
+1. **`0.000` is a genuine zero, 157 times, and never a missing field** (absent: 0
+   of 3075 answers). Every zero has peakedness ≤ 0.127 — a near-uniform
+   distribution with a top option between 0.29 and 0.50. So a zero means *no
+   preference among the options offered*, not *certain this is bad*. The docs' old
+   warning ("do not read 0.000 as a calibrated zero") is lifted and replaced by a
+   sharper one.
+2. **Confidence is peakedness, and we can compute it ourselves.** r ≈ 0.9 against
+   our own entropy measure means the model's number adds little we cannot derive
+   from the distribution it already returns. This is the justification for reading
+   distributions directly in the gates.
+3. **Value and peakedness anti-correlate (r = −0.51)** over the 810 Score answers,
+   which turns run 9's finding into a structural explanation. The joint
+   distribution is nearly a diagonal:
+
+   | value band | near-uniform | weak | clear | strong |
+   |---|---|---|---|---|
+   | below Filler (<0.33) | 24 | 155 | 101 | 65 |
+   | Filler..floor (0.33–0.55) | 198 | 61 | 2 | 1 |
+   | Solid..Excellent (0.55–0.80) | **134** | **69** | 0 | 0 |
+   | Excellent+ (≥0.80) | 0 | 0 | 0 | 0 |
+
+   `margin` accepted 2 of 810; `argmax` accepts 203. Also visible: **nothing ever
+   scored above 0.80**, so the 0.55 floor sits near the top of the range JEV
+   actually uses for these judgments.
+
+**What this does not establish.** Anything about whether the accepted options are
+*good* — it counts preferences, not outcomes. And a new caveat it does create: every
+option `argmax` accepts comes with a flat distribution, so the value floor is
+carrying the whole decision. Whether 0.55 is the right place for it is now the first
+pre-registered question below.
+
 
 ## The instrument was lying (found by run 6)
 
@@ -196,7 +246,8 @@ decisively, and at 72 it said the field was tied").
 
 Written before the run, as required by point 2 above.
 
-Two open questions, and the order matters: the harness one invalidates the other.
+Three open questions, in the order they must be answered: the harness one
+invalidates the others, and the last one still has no ground truth.
 
 **Question 1 — the harness (must come first).** HP resets to 80 at each act start,
 so cumulative HP damage — the thing the HP-budget system reasons about — cannot be
@@ -211,7 +262,21 @@ differs from run 9 in at least 3 of 30 row decisions — i.e. only if the budget
 actually constrains routing once damage is cumulative. If nothing changes, the
 extra realism buys nothing and the simpler harness stays.
 
-**Question 2 — card quality (blocked on ground truth).** Does taking three cards
+**Question 2 — where should `SCORE_ACTION_FLOOR` sit?** Run 10 showed that every
+option `argmax` accepts arrives with a flat distribution, so this single number
+carries the whole card decision — and 0.55 was chosen from one run.
+
+**Design.** Replay the logged Score answers offline at floors 0.33 / 0.45 / 0.55 /
+0.67 and report cards taken per ascent and the resulting deck composition. Offline,
+so the sweep is free; then one confirming ascent batch at whichever floor the sweep
+suggests.
+
+**Acceptance.** A new floor is adopted only if it (a) changes cards taken per
+ascent, (b) keeps the run-9 HP table within 5 %, and (c) survives `--repeats 5` at
+0 % flip rate. **This can select a threshold but cannot show it is correct** — "takes
+more cards" is not "takes better cards", and the gap between those needs labels.
+
+**Question 3 — card quality (blocked on ground truth).** Does taking three cards
 per ascent beat taking one, measured by something other than deck size?
 
 **Design.** Cannot be answered in the simulator: it has no notion of a card being
@@ -243,4 +308,15 @@ untouched and must not be spent on a harness whose HP semantics are still wrong.
   level 2.14, distribution favours 3"* — the model's own fractional score and its
   own level distribution disagreed. Requiring them to agree is an extra
   requirement that was never justified, and it is part of what `argmax` removes.
+- **Run 10's correlation is a description, not a mechanism.** confidence tracks our
+  peakedness measure at r ≈ 0.9 *on this question set*, with these rubrics, at this
+  prompt version. It says confidence behaves like a flatness statistic; it does not
+  say JEV computes entropy, and a different question set could break the relation.
+- **The `argmax` gate leans entirely on one unvalidated number.** Every option it
+  accepted in run 10's corpus came with a flat distribution, so `SCORE_ACTION_FLOOR`
+  is doing all the work. Until Question 2 below is run, "the deck grew" and "the
+  gate got looser" are the same statement.
+- **`confidence` for Noul is not a separate field at all** — its probability *is*
+  its belief — so none of run 10's correlation applies to Noul questions, which are
+  two thirds of all the answers logged (1665 of 3075).
 

@@ -68,8 +68,15 @@ Legend: `[x]` done · `[~]` done but unverifiable until an external condition is
   cumulative HP damage, the thing the HP-budget system reasons about, is currently
   unobservable. Pre-registered in docs/MEASUREMENTS.md, and it must land before
   `TEST_SEEDS` are spent
-- [ ] Decide whether `confidence=0.000` on some Score answers means zero or absent
-  (the log records `confidence_present`; nobody has read it back yet)
+- [x] **Confidence semantics settled** (run 10, no API calls needed): `confidence`
+  tracks a peakedness measure we can compute ourselves at r = +0.89/+0.90 over 1410
+  answers; all 157 `confidence=0.000` answers are genuine zeros with a near-uniform
+  distribution, so a zero means "no preference", not "certain it is bad". See
+  `python -m spirebrain.analysis.confidence` and docs/JEV_API.md
+- [ ] Where should `SCORE_ACTION_FLOOR` sit? Run 10 showed every option `argmax`
+  accepts arrives with a flat distribution, so this one number carries the whole
+  card decision — and it was chosen from a single run. Pre-registered as Question 2
+  in docs/MEASUREMENTS.md (an offline replay sweep, then one confirming batch)
 - [ ] Card *quality*, not just card *quantity* — the simulator has no ground truth,
   so this needs recorded live runs (`--replay`) or a labelled dataset
 - [ ] Run ≥50 ascents; compare against random / greedy / structured-LLM baselines
@@ -114,6 +121,15 @@ written down as true:
    (runs 6–9): not one of its 29 rejections was a value rejection. It was refusing
    to choose between cards it had already ranked — and 13 of those refusals came
    from a consistency rule (`landed == argmax level`) nobody ever justified.
+8. **"A `confidence=0.000` answer might be a missing field."** ❌ Resolved as a real
+   zero (run 10, 157 of them, field absent 0 times) — and the meaning is the
+   opposite of the intuition: a zero means the model had *no preference*, and every
+   zero comes with a near-uniform distribution.
+9. **"Value and confidence are independent signals."** ❌ Refuted (run 10): they
+   anti-correlate at r = −0.51 over 810 Score answers. High-rated options come with
+   flat distributions; the model's clear preferences are about options it rates
+   *low*. So `margin` was never asking for two conditions — it was asking for two
+   that almost never coincide.
 
 ## One conclusion that needs re-opening
 

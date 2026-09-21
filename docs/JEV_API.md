@@ -172,15 +172,51 @@ curve" a normal thing to do rather than a research budget.
 Confidence summarises how peaked the answer distribution is. The docs are
 explicit that the threshold above which to automate is **not** derivable from the
 model — it has to be chosen against the risk of the specific call and validated
-on your own labelled data. Our choices, all in `decisions.py`:
+on your own labelled data.
 
-- `CONFIDENCE_FLOOR = 0.60` — for Choice and Score, below this we fall back to a rule.
-- `NOUL_UNCERTAIN_BAND = (0.40, 0.60)` — for Noul, inside this band means "cannot tell".
-- `SCORE_ACTION_FLOOR = 0.55` — a card or upgrade must clear this to be taken at all.
+**Measured, not assumed** (`python -m spirebrain.analysis.confidence`, 1410 real
+answers carrying a distribution, 2026-09-21):
 
-The docs' own worked example is the reason for the first rule: a Choice answered
-`billing` at p=0.84 with confidence 0.596 was the model reporting an
-*under-specified question*, not a confident answer.
+| Question type | n | confidence range | Pearson r vs our peakedness |
+|---|---|---|---|
+| Choice | 600 | 0.000 – 0.880 | **+0.885** |
+| Score | 810 | 0.000 – 0.920 | **+0.899** |
+
+where peakedness = 1 − (Shannon entropy of the answer distribution ÷ log n).
+A correlation near +0.9 means **confidence is a flatness statistic we can compute
+ourselves**, which is why the gates below were rewritten to read the distribution
+directly instead of asking the model to summarise it.
+
+The rules that came out of that (all in `decisions.py`, switchable via
+`config/strategy.json`):
+
+- `SCORE_ACCEPTANCE = "argmax"` — a Score option is taken when its value clears the
+  action floor. The `"margin"` alternative additionally demanded a peaked
+  distribution, and over 810 Score answers it fired **twice**.
+- `NOUL_UNCERTAIN_BAND = (0.40, 0.60)` — inside this band means "cannot tell".
+- `SCORE_ACTION_FLOOR = 0.55` — nothing observed has scored above 0.80, so this
+  floor sits near the top of the range the model actually uses.
+
+**A structural finding worth knowing before tuning anything else:** value and
+peakedness anti-correlate at **r = −0.51** over 810 Score answers. High values come
+with flat distributions, and peaked answers come with low values. So `margin` was
+not asking for two things — it was asking for two things that almost never occur
+together:
+
+| value band | near-uniform | weak | clear | strong |
+|---|---|---|---|---|
+| below Filler (<0.33) | 24 | 155 | 101 | 65 |
+| Filler..floor (0.33–0.55) | 198 | 61 | 2 | 1 |
+| Solid..Excellent (0.55–0.80) | **134** | **69** | 0 | 0 |
+| Excellent+ (≥0.80) | 0 | 0 | 0 | 0 |
+
+`margin` accepted 2 of those 810; `argmax` accepts 203. Note what that means for
+`argmax` too: **every option it accepts was reported with a flat distribution** —
+the model's own answer is "this is the best of a mediocre lot". The value floor is
+doing all the discriminating work and nothing has established that 0.55 is where it
+belongs. That is a pre-registered question in `docs/MEASUREMENTS.md`, not a licence
+to move it.
+
 
 ## Wiring it up
 
@@ -248,14 +284,31 @@ richer digests; the decision modules simply do not use them yet. Enriching those
 states is the next milestone, and it is the difference between a brain that
 falls back 8/8 and one that actually steers.
 
-### Open item: missing vs zero confidence
+### RESOLVED: missing vs zero confidence
 
 In call #23 two Score answers reported `confidence=0.000` while a sibling in the
-same call reported `0.24`. A bare `.get("confidence", 0.0)` cannot distinguish
-"the model said zero" from "the field was absent". `parse_answers` now records
-`confidence_present` alongside every raw answer so the next run settles it from
-recorded bytes rather than guesswork. **Do not read `0.000` as a calibrated zero
-until that is resolved.**
+same call reported `0.24`. A bare `.get("confidence", 0.0)` could not distinguish
+"the model said zero" from "the field was absent", so `parse_answers` was changed to
+record `confidence_present` alongside every raw answer and the docs said *do not
+read 0.000 as a calibrated zero until this is resolved*.
+
+It is resolved, from the recorded bytes rather than from a new run:
+
+| | count |
+|---|---|
+| `confidence == 0.000` with the field **present** | **157** |
+| `confidence == 0.000` with the field **absent** | **0** |
+
+Every zero is genuine — the model reports 0.000 on purpose — and the shape behind
+them is now known: all 157 have a distribution of peakedness **≤ 0.127**, i.e.
+essentially uniform, with a top option anywhere from 0.29 to 0.50. So **0.000 does
+not mean "certain this is bad"; it means "no preference among the options I was
+given."** `python -m spirebrain.analysis.confidence` reproduces the table.
+
+The old warning is lifted, and replaced by a sharper one: a zero-confidence answer
+is one where the model declined to rank, which is information about the *question*,
+not about the option.
+
 
 ## Experiment: does enriching the state raise confidence? (3 runs, 2026-09-21)
 

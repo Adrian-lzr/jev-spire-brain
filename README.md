@@ -42,7 +42,7 @@ Both come straight from the official docs ([docs/JEV_API.md](docs/JEV_API.md)):
 🚧 **Both halves of Phase 1 exist now, and the brain has run against real JEV.**
 All 7 decision modules + HP budget + greedy combat + logging + simulation harness
 + agent router + the real JEV client + the **CommunicationMod stdio transport** are
-in place, with **133 tests passing**. Live decisions and simulator decisions now
+in place, with **145 tests passing**. Live decisions and simulator decisions now
 share the same rich `RunContext`, so both paths ask JEV against the full run
 digest and the game's own card/relic text.
 
@@ -67,6 +67,7 @@ python run_agent.py --replay logs/recorded_states        # re-decide recorded st
 python -m spirebrain.analysis.inspect_log --summary
 python -m spirebrain.analysis.calibration logs
 python -m spirebrain.analysis.repeatability --backend openrouter --repeats 5
+python -m spirebrain.analysis.confidence           # what the confidence number means
 ```
 
 **Everything measured so far is in [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md)** —
