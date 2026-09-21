@@ -1,8 +1,8 @@
-# Jev Spire Brain
+﻿# Jev Spire Brain
 
-> A JEV-powered external brain for [Slay the Spire](https://store.steampowered.com/app/646570/Slay_the_Spire/) — letting a TypeSafe **System One model** make the strategy calls while deterministic code handles the tactics.
+> A JEV-powered external brain for [Slay the Spire](https://store.steampowered.com/app/646570/Slay_the_Spire/) 鈥?letting a TypeSafe **System One model** make the strategy calls while deterministic code handles the tactics.
 
-让 JEV（TypeSafe System One 决策模型）作为外置大脑玩杀戮尖塔：语义判断归 JEV，精确计算归代码。
+璁?JEV锛圱ypeSafe System One 鍐崇瓥妯″瀷锛変綔涓哄缃ぇ鑴戠帺鏉€鎴皷濉旓細璇箟鍒ゆ柇褰?JEV锛岀簿纭绠楀綊浠ｇ爜銆?
 
 ## What it is
 
@@ -20,13 +20,13 @@ The agent observes the full game state via [CommunicationMod](https://github.com
 
 All seven are implemented in `spirebrain/jev_brain/decisions.py` and covered by tests.
 
-- **Map routing** — `Choice` over reachable nodes + parallel `Noul` risk probes against the HP budget (`MapRouter`)
-- **Card rewards** — `Score` × candidates against the deck, with a skip path (`CardRewardJudge`)
-- **Events** — `Choice` over event options (`EventChooser`)
-- **Rest sites** — `Noul` (heal?) + `Choice` (which upgrade) in one call (`RestSiteDecider`)
-- **Shops** — one parallel `Noul` per affordable item, "worth the gold for this goal?" (`ShopDecider`)
-- **Boss relics** — `Score` × 3; the pick is mandatory, so an unsure pick is flagged rather than skipped (`BossRelicJudge`)
-- **Combat risk** — `Noul` (will predicted damage exceed the HP budget?) → tactical posture (`CombatRiskGate`)
+- **Map routing** 鈥?`Choice` over reachable nodes + parallel `Noul` risk probes against the HP budget (`MapRouter`)
+- **Card rewards** 鈥?`Score` 脳 candidates against the deck, with a skip path (`CardRewardJudge`)
+- **Events** 鈥?`Choice` over event options (`EventChooser`)
+- **Rest sites** 鈥?`Noul` (heal?) + `Choice` (which upgrade) in one call (`RestSiteDecider`)
+- **Shops** 鈥?one parallel `Noul` per affordable item, "worth the gold for this goal?" (`ShopDecider`)
+- **Boss relics** 鈥?`Score` 脳 3; the pick is mandatory, so an unsure pick is flagged rather than skipped (`BossRelicJudge`)
+- **Combat risk** 鈥?`Noul` (will predicted damage exceed the HP budget?) 鈫?tactical posture (`CombatRiskGate`)
 
 Combat card play itself stays in code (search/greedy), per the drone-rule: *JEV cannot be the perception layer and cannot run at control rate.*
 
@@ -34,15 +34,15 @@ Combat card play itself stays in code (search/greedy), per the drone-rule: *JEV 
 
 Both come straight from the official docs ([docs/JEV_API.md](docs/JEV_API.md)):
 
-1. **One call, many questions.** Jev evaluates every question in parallel against the same state and adding questions barely costs latency — so each module asks everything it needs at once for free.
-2. **Noul has no separate confidence** — the returned probability *is* the belief. A probability near 0.5 means "cannot tell", so the band `(0.40, 0.60)` triggers a rule fallback instead of a coin-flip action.
+1. **One call, many questions.** Jev evaluates every question in parallel against the same state and adding questions barely costs latency 鈥?so each module asks everything it needs at once for free.
+2. **Noul has no separate confidence** 鈥?the returned probability *is* the belief. A probability near 0.5 means "cannot tell", so the band `(0.40, 0.60)` triggers a rule fallback instead of a coin-flip action.
 
 ## Status
 
-🚧 **Both halves of Phase 1 exist now, and the brain has run against real JEV.**
+馃毀 **Both halves of Phase 1 exist now, and the brain has run against real JEV.**
 All 7 decision modules + HP budget + greedy combat + logging + simulation harness
 + agent router + the real JEV client + the **CommunicationMod stdio transport** are
-in place, with **161 tests passing**. Live decisions and simulator decisions now
+in place, with **165 tests passing**. Live decisions and simulator decisions now
 share the same rich `RunContext`, so both paths ask JEV against the full run
 digest and the game's own card/relic text.
 
@@ -70,7 +70,7 @@ python -m spirebrain.analysis.repeatability --backend openrouter --repeats 5
 python -m spirebrain.analysis.confidence           # what the confidence number means
 ```
 
-**Everything measured so far is in [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md)** —
+**Everything measured so far is in [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md)** 鈥?
 each run with its sample size, what it established, what it refuted, and the
 protocol the next one has to follow. Four claims have already been overturned by
 it, including two of our own. Read that file before quoting any number from this
@@ -90,9 +90,9 @@ Four details are easy to get wrong and are all handled, verified against the
 mod's README (2026-09-21):
 
 - **`Ready\n` first**, or the game waits ten seconds and kills the process;
-- **`PLAY` is 1-indexed** while `CHOOSE` is 0-indexed — the conversion happens in
+- **`PLAY` is 1-indexed** while `CHOOSE` is 0-indexed 鈥?the conversion happens in
   exactly one function;
-- **there is no `skip`, `purge`, or `smith` verb** — skipping a reward and leaving
+- **there is no `skip`, `purge`, or `smith` verb** 鈥?skipping a reward and leaving
   a shop are both `RETURN`;
 - **nothing prints to stdout except `Ready` and commands**, because stdout *is*
   the protocol.
@@ -103,9 +103,9 @@ ready, never send a verb the game did not advertise, and one command per state.
 ## Prerequisites
 
 - Steam copy of Slay the Spire
-- ModTheSpire + BaseMod (+ StSLib) + CommunicationMod — all free
+- ModTheSpire + BaseMod (+ StSLib) + CommunicationMod 鈥?all free
 - Python 3.10+
-- JEV access — **not required for development**: the mock client lets you build,
+- JEV access 鈥?**not required for development**: the mock client lets you build,
   run and test everything offline. Real JEV is reachable on OpenRouter's System
   One route (see [docs/JEV_API.md](docs/JEV_API.md)).
 
@@ -128,8 +128,8 @@ id under `WorkshopItemDetails` means Steam knows you subscribed; only
 `WorkshopItemsInstalled` means the files are on disk.
 
 `install_mod_config` exists because the config file is read as **ISO-8859-1**
-(`SpireConfig.load()` → `Properties.load(FileInputStream)`), so a path with
-non-ASCII characters written as raw UTF-8 is silently misread — and because the
+(`SpireConfig.load()` 鈫?`Properties.load(FileInputStream)`), so a path with
+non-ASCII characters written as raw UTF-8 is silently misread 鈥?and because the
 command is split on whitespace and passed to `ProcessBuilder`, so no path may
 contain a space. Both are hand-edit traps; the installer escapes, validates, and
 verifies by decoding the result back the way Java does.
@@ -155,4 +155,5 @@ still unverified are all written down in [docs/JEV_API.md](docs/JEV_API.md).
 
 - Architecture informed by [spirecomm](https://github.com/dweih/spirecomm) (MIT), [CommunicationMod](https://github.com/ForgottenArbiter/CommunicationMod), and the JEV ecosystem's `jev-drone` / `typesafe-mario` layered designs.
 - JEV is a model by [TypeSafe AI](https://typesafe.ai/). This project is independent and not affiliated.
-- MIT License — see [LICENSE](LICENSE).
+- MIT License 鈥?see [LICENSE](LICENSE).
+

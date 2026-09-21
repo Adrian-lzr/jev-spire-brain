@@ -136,18 +136,19 @@ def check_repo(rep: Report) -> None:
         rep.add(PASS, "Repository files", f"{len(needed)} key files present")
 
 
-def check_game(rep: Report) -> Path | None:
+def check_game(rep: Report) -> tuple[Path | None, list[Path]]:
+    """Returns the game directory and whatever jars are in its mods\\ folder."""
     try:
         from spirebrain import gamedata
 
         game = gamedata.find_game_dir()
     except Exception as exc:  # noqa: BLE001
         rep.add(FAIL, "Game install", f"gamedata could not load: {exc}", "")
-        return None
+        return None, []
     if game is None:
         rep.add(FAIL, "Game install", "desktop-1.0.jar not found",
                 "set STS_GAME_DIR to your SlayTheSpire folder")
-        return None
+        return None, []
     rep.add(PASS, "Game install", str(game))
     java = game / "jre" / "bin" / "java.exe"
     if java.exists():
@@ -156,18 +157,27 @@ def check_game(rep: Report) -> Path | None:
         rep.add(WARN, "Bundled Java", "jre\\bin\\java.exe not found",
                 "ModTheSpire needs a Java 8 runtime")
     mods_dir = game / "mods"
+    jars: list[Path] = []
     if mods_dir.exists():
-        jars = sorted(p.name for p in mods_dir.glob("*.jar"))
-        rep.add(PASS, "mods\\ folder", f"{len(jars)} jar(s): {', '.join(jars) or 'empty'}")
+        jars = sorted(mods_dir.glob("*.jar"))
+        rep.add(PASS, "mods\\ folder", f"{len(jars)} jar(s): "
+                                       f"{', '.join(p.name for p in jars) or 'empty'}")
     else:
         rep.add(WARN, "mods\\ folder", "does not exist",
                 "not required if the mods come from the Workshop, but needed for the"
                 " manual-jar fallback")
-    return game
+    return game, jars
 
 
-def check_workshop(rep: Report, appid: str = "646570") -> Path | None:
-    """The subscription-vs-download distinction, which is the whole point."""
+def check_workshop(rep: Report, appid: str = "646570",
+                   local_jar: bool = False) -> Path | None:
+    """The subscription-vs-download distinction, which is the whole point.
+
+    `local_jar` says a CommunicationMod jar is already installed by other means
+    (the game's `mods\\` folder). In that case the Workshop copy being absent is
+    not a blocker, and reporting it as one sends the user off to fix a
+    non-problem — which is what this check did until 2026-09-21.
+    """
     libraries = find_steam_libraries()
     if not libraries:
         rep.add(WARN, "Steam libraries", "no libraryfolders.vdf found",
@@ -189,11 +199,15 @@ def check_workshop(rep: Report, appid: str = "646570") -> Path | None:
                 jar = next(iter((content / item_id).glob("*.jar")), None)
                 rep.add(PASS, f"Workshop: {name}", f"downloaded ({jar.name if jar else 'no jar?'})")
             elif item_id in ledger["details"]:
-                rep.add(FAIL, f"Workshop: {name}",
-                        f"SUBSCRIBED BUT NOT DOWNLOADED (id {item_id}, {why})",
-                        "open the item in the Steam client and press Download, or"
-                        " restart the Steam client, or launch the game once — a"
-                        " subscription is not an install")
+                if item_id == "2131373661" and local_jar:
+                    rep.add(PASS, f"Workshop: {name}",
+                            "not from the Workshop, but installed in the game's mods\\ folder")
+                else:
+                    rep.add(FAIL, f"Workshop: {name}",
+                            f"SUBSCRIBED BUT NOT DOWNLOADED (id {item_id}, {why})",
+                            "open the item in the Steam client and press Download, or"
+                            " restart the Steam client, or launch the game once — a"
+                            " subscription is not an install")
             elif required:
                 rep.add(FAIL, f"Workshop: {name}", f"not subscribed (id {item_id}, {why})",
                         f"subscribe at steamcommunity.com/sharedfiles/filedetails/?id={item_id}")
@@ -210,7 +224,9 @@ def check_workshop(rep: Report, appid: str = "646570") -> Path | None:
             rep.add(WARN, "Workshop: unidentified subscription", f"id {other}",
                     "subscribed, not downloaded, not needed by this project")
 
-        if ledger["needs_download"] == "1":
+        missing_required = [i for i in WORKSHOP_EXPECTED
+                            if WORKSHOP_EXPECTED[i][1] and i not in on_disk]
+        if ledger["needs_download"] == "1" and missing_required:
             rep.add(WARN, "Steam download queue",
                     f"NeedsDownload=1 in {ledger['path'].name}",
                     "Steam still has workshop content pending")
@@ -218,33 +234,52 @@ def check_workshop(rep: Report, appid: str = "646570") -> Path | None:
     return found_dir
 
 
-def check_communicationmod_anywhere(rep: Report, content: Path | None) -> bool:
-    """Final authority: does a CommunicationMod jar exist on disk at all?"""
-    if content is not None and (content / "2131373661").exists():
-        jars = list((content / "2131373661").glob("*.jar"))
-        if jars:
-            rep.add(PASS, "CommunicationMod jar", str(jars[0]))
-            return True
-    hits: list[Path] = []
+def find_communicationmod(mods_jars: list[Path]) -> list[Path]:
+    """Every CommunicationMod jar we can find, best candidate first.
+
+    Order matters for what the report *says*: the game's own `mods\\` folder is the
+    installation we told the user to make, the Workshop folder is the alternative,
+    and a disk-wide search is the last resort (it is slow, and on this machine it
+    turned up a stray copy sitting in `D:\\` that the report had been presenting as
+    the installation).
+    """
+    found: list[Path] = [p for p in mods_jars if "CommunicationMod" in p.name]
+    for drive in ("C:", "D:", "E:", "F:"):
+        content = Path(drive + "\\") / "LeStoreDownload" / "steam" / "steamapps" / "workshop" \
+            / "content" / "646570" / "2131373661"
+        try:
+            found.extend(sorted(content.glob("CommunicationMod*.jar")))
+        except OSError:
+            pass
+    if found:
+        return found
     for drive in ("C:", "D:", "E:", "F:"):
         base = Path(drive + "\\")
         if not base.exists():
             continue
-        for name in ("CommunicationMod.jar", "CommunicationMod*.jar"):
-            try:
-                hits.extend(p for p in base.rglob(name) if len(p.parts) < 12)
-            except (OSError, PermissionError):
-                continue
-    # compare canonical paths so the two searches above do not double-report
-    uniq = {p.resolve() for p in hits}
-    if uniq:
-        rep.add(PASS, "CommunicationMod jar", str(sorted(uniq)[0]))
-        return True
-    rep.add(FAIL, "CommunicationMod jar", "no file found on any drive",
-            "open github.com/ForgottenArbiter/CommunicationMod/releases/tag/v1.2.1"
-            " and save CommunicationMod.jar (343,522 bytes) into the game's mods\\ folder"
-            " — create it if needed")
-    return False
+        try:
+            found.extend(p for p in base.rglob("CommunicationMod*.jar") if len(p.parts) < 12)
+        except (OSError, PermissionError):
+            continue
+    return sorted({p.resolve() for p in found})
+
+
+def check_communicationmod(rep: Report, found: list[Path]) -> bool:
+    """Report where the mod actually is, and where stray copies are."""
+    if not found:
+        rep.add(FAIL, "CommunicationMod jar", "no file found on any drive",
+                "open github.com/ForgottenArbiter/CommunicationMod/releases/tag/v1.2.1"
+                " and save CommunicationMod.jar (343,522 bytes) into the game's mods\\ folder"
+                " — create it if needed")
+        return False
+    primary = found[0]
+    rep.add(PASS, "CommunicationMod jar", str(primary))
+    if len(found) > 1:
+        rep.add(WARN, "CommunicationMod extra copies",
+                ", ".join(str(p) for p in found[1:]),
+                "harmless, but a jar outside the game's mods\\ folder and the Workshop"
+                " folder does nothing — delete it if you did not mean to keep it")
+    return True
 
 
 def check_mod_config(rep: Report) -> None:
@@ -373,9 +408,12 @@ def main(argv: list[str]) -> int:
     rep = Report()
     check_python(rep)
     check_repo(rep)
-    game = check_game(rep)
-    content = check_workshop(rep)
-    have_cm = check_communicationmod_anywhere(rep, content)
+    game, mods_jars = check_game(rep)
+    # Find the jar before judging the Workshop, so a locally installed mod is not
+    # reported as a missing mandatory download.
+    jars = find_communicationmod(mods_jars)
+    content = check_workshop(rep, local_jar=bool(jars))
+    have_cm = check_communicationmod(rep, jars)
     check_mod_config(rep)
     check_gamedata(rep)
     check_brain_config(rep)

@@ -215,6 +215,60 @@ def test_the_pipe_log_records_both_sides():
         assert "game_state" in rec["msg"]
 
 
+# --------------------------------------------------------------------------- #
+# Log hygiene
+# --------------------------------------------------------------------------- #
+# `logs/pipe.jsonl` is the record of what the REAL game sent us. It briefly got
+# 44 KB of synthetic states appended by this very test file, because `log_path=None`
+# meant "use the default path" instead of "do not log". Fake states that look like a
+# working pipe are worse than no log at all: they were nearly read as a successful
+# live smoke test. These tests exist so that cannot recur.
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_LOG = ROOT / "logs" / "pipe.jsonl"
+
+
+def _size(path: Path) -> int:
+    return path.stat().st_size if path.exists() else -1
+
+
+def test_log_path_none_means_no_logging_at_all():
+    before = _size(DEFAULT_LOG)
+    transport = StdioTransport(_StubAgent(), log_path=None)
+    assert transport.log_path is None
+    transport.run([_msg(), _msg()], io.StringIO())
+    assert _size(DEFAULT_LOG) == before, (
+        "a transport with logging disabled must not touch the live pipe log"
+    )
+
+
+def test_omitting_log_path_uses_the_default_file():
+    """Only an explicit omission chooses the default; that is what DEFAULT_LOG is for."""
+    from spirebrain.driver.stdio import DEFAULT_LOG as SENTINEL
+
+    transport = StdioTransport(_StubAgent())
+    assert transport.log_path == DEFAULT_LOG
+    assert SENTINEL is not None and SENTINEL is not None
+
+
+def test_replay_does_not_log_by_default():
+    with tempfile.TemporaryDirectory() as tmp:
+        p = Path(tmp) / "001.json"
+        p.write_text(_msg(), encoding="utf-8")
+        before = _size(DEFAULT_LOG)
+        transport = replay([p], _StubAgent(), outstream=io.StringIO())
+        assert transport.log_path is None
+        assert _size(DEFAULT_LOG) == before
+
+
+def test_this_test_file_does_not_write_to_the_repo_logs():
+    """Run the whole file's worth of transport activity and check the live log."""
+    before = _size(DEFAULT_LOG)
+    with tempfile.TemporaryDirectory() as tmp:
+        for i, msg in enumerate((_msg(), json.dumps({"error": "x"}), _msg())):
+            StdioTransport(_StubAgent(), log_path=None).run([msg], io.StringIO())
+    assert _size(DEFAULT_LOG) == before
+
+
 def test_replay_decides_recorded_states_offline():
     with tempfile.TemporaryDirectory() as tmp:
         files = []

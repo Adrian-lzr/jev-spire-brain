@@ -42,6 +42,15 @@ ROOT = Path(__file__).resolve().parents[2]
 
 READY = "Ready"
 
+# Sentinel for "use the default log path". Distinct from None, because None must
+# mean *no logging at all* — tests pass None, and when None silently meant "write
+# to the repo's default file" the test suite appended 44 KB of synthetic game
+# states to `logs/pipe.jsonl`. That file is the record of what the real game sent
+# us, so contaminating it makes a live smoke test unreadable: the fake states were
+# already being mistaken for a working pipe. Found 2026-09-21, before that
+# misinterpretation reached anyone else.
+DEFAULT_LOG = object()
+
 # The complete verb set from the CommunicationMod README. Our router is not
 # allowed to invent words: an unknown verb is ignored by the game, which from
 # this side is indistinguishable from the pipe having died.
@@ -145,11 +154,16 @@ def _verb_of(line: str) -> str:
 class StdioTransport:
     """Reads game messages, asks the agent, writes one command back."""
 
-    def __init__(self, agent, *, log_path: str | Path | None = None,
+    def __init__(self, agent, *, log_path: str | Path | None | object = DEFAULT_LOG,
                  auto_start: bool = False, player_class: str = "IRONCLAD",
                  ascension: int = 0, max_commands: int | None = None) -> None:
         self.agent = agent
-        self.log_path = Path(log_path) if log_path else ROOT / "logs" / "pipe.jsonl"
+        # None disables logging; omitting the argument uses the default path. See
+        # DEFAULT_LOG for why those cannot be the same thing.
+        if log_path is DEFAULT_LOG:
+            self.log_path: Path | None = ROOT / "logs" / "pipe.jsonl"
+        else:
+            self.log_path = Path(log_path) if log_path else None
         self.auto_start = auto_start
         self.player_class = player_class
         self.ascension = ascension
@@ -249,7 +263,13 @@ class StdioTransport:
         return self.commands
 
     def _log(self, raw: str, command: str | None) -> None:
-        """Every message and answer, for post-mortem. Never stdout."""
+        """Every message and answer, for post-mortem. Never stdout.
+
+        `log_path=None` means no logging: the pipe log is the record of what the
+        real game sent, and a test fixture must never land in it.
+        """
+        if self.log_path is None:
+            return
         try:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             with open(self.log_path, "a", encoding="utf-8") as f:
@@ -273,15 +293,20 @@ def _build_agent(strategy_path: str | None, backend: str | None, acceptance: str
                            strategy_path=strategy_path, acceptance=acceptance)
 
 
-def replay(paths: list[Path], agent, *, log_path: str | Path | None,
-           outstream) -> StdioTransport:
+def replay(paths: list[Path], agent, *, log_path: str | Path | None = None,
+           outstream=None) -> StdioTransport:
     """Feed recorded state files through the same code path as the live pipe.
 
     This is how the transport is tested, and how a recorded live session can be
     re-decided offline without touching the game.
+
+    Logging is **off by default** here, unlike live mode: `logs/pipe.jsonl` is the
+    record of what the real game sent us, so an offline replay must not append to
+    it unless a path is given explicitly.
     """
     transport = StdioTransport(agent, log_path=log_path)
-    transport.run((p.read_text(encoding="utf-8") for p in paths), outstream,
+    transport.run((p.read_text(encoding="utf-8") for p in paths),
+                  outstream if outstream is not None else sys.stdout,
                   send_ready=False)
     return transport
 
@@ -315,10 +340,14 @@ def main(argv: list[str]) -> int:
 
     # Live mode: this is what CommunicationMod launches.
     agent = _build_agent(strategy_path, backend, acceptance)
-    transport = StdioTransport(agent, log_path=log_path,
+    # No log_path argument: live mode wants the default file, and that is exactly
+    # what DEFAULT_LOG distinguishes from None.
+    transport = StdioTransport(agent,
                                auto_start="--auto-start" in argv,
                                player_class=value("class") or "IRONCLAD",
                                ascension=int(value("ascension") or 0))
+    if log_path:
+        transport.log_path = Path(log_path)
     print(f"[stdio] ready — backend={backend or 'mock'} "
           f"acceptance={acceptance or 'margin'}; waiting for state on stdin",
           file=sys.stderr)
