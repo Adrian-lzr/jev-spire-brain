@@ -214,6 +214,25 @@ def test_cloudflare_envelope_is_unwrapped():
     assert resp.answers["department"].value == "billing"
 
 
+def test_oversized_request_is_refused_before_calling():
+    """A state too big to send must fail loudly, never be silently truncated."""
+    client = _FakeClient([OFFICIAL_FIXTURE])
+    huge_state = {"deck": ["Strike"] * 20_000}     # comfortably over MAX_REQUEST_BYTES
+    try:
+        client.ask(huge_state, SPECS)
+    except JevApiError as e:
+        assert "over the" in str(e) and "truncated" in str(e)
+    else:
+        raise AssertionError("expected JevApiError for an oversized request")
+    assert client.attempts == 0   # the API was never called
+
+
+def test_request_under_the_cap_is_sent():
+    client = _FakeClient([OFFICIAL_FIXTURE])
+    client.ask({"state": "small"}, SPECS)
+    assert client.attempts == 1
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

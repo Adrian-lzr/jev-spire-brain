@@ -8,7 +8,14 @@ import time
 from pathlib import Path
 from typing import Any
 
-from spirebrain.jev_brain.client import JevClient, JevResponse, QuestionSpec, dump_state
+from spirebrain.jev_brain.client import (
+    PROMPT_VERSION,
+    JevClient,
+    JevResponse,
+    QuestionSpec,
+    build_questions_json,
+    dump_state,
+)
 
 
 class LoggingJevClient(JevClient):
@@ -28,9 +35,19 @@ class LoggingJevClient(JevClient):
         wall_ms = int((time.perf_counter() - t0) * 1000)
         self.calls += 1
         self.total_cost_usd += resp.cost_usd
+
+        # Prompt version + payload size travel with every record: a threshold is
+        # only meaningful next to the question set that produced it, and a state
+        # that grew silently is indistinguishable from a model that changed its mind.
+        request_bytes = len(
+            json.dumps({"state": state, "questions": build_questions_json(questions)},
+                       ensure_ascii=False).encode("utf-8")
+        )
         record = {
             "seq": self.calls,
             "ts": time.time(),
+            "prompt_version": PROMPT_VERSION,
+            "request_bytes": request_bytes,
             "backend": resp.backend,
             "model": resp.model,
             "state": dump_state(state)[:2000],

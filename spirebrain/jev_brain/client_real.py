@@ -45,6 +45,7 @@ from typing import Any
 from spirebrain.jev_brain.client import (
     DEFAULT_MODEL,
     ENDPOINT,
+    MAX_REQUEST_BYTES,
     ChoiceSpec,
     JevAnswer,
     JevClient,
@@ -211,6 +212,16 @@ class OfficialJevClient(JevClient):
     # -- public API -------------------------------------------------------- #
     def ask(self, state: str | dict | list, questions: dict[str, QuestionSpec]) -> JevResponse:
         payload = self._build_payload(state, questions)
+        size = len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+        if size > MAX_REQUEST_BYTES:
+            # Fail loudly rather than truncate. A silently trimmed state would make
+            # the model answer a question about a run it never saw, and we would
+            # have no way to tell that from a model that changed its mind.
+            raise JevApiError(
+                f"request is {size} bytes, over the {MAX_REQUEST_BYTES}-byte limit; "
+                "refusing to call — shrink the state (deck digest cap, fewer questions) "
+                "instead of letting it be silently truncated"
+            )
         last_err: Exception | None = None
         for attempt in range(self.max_retries + 1):
             t0 = time.perf_counter()

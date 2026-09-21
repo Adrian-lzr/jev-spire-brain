@@ -54,6 +54,18 @@ ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 # to a rule instead of acting on a coin flip. Mirrors strategy.json.
 NOUL_UNCERTAIN_BAND = (0.40, 0.60)
 
+# Bump when any question set, rubric or instruction changes. Question wording
+# changes the raw confidence numbers (documented externally), so a threshold is
+# only meaningful together with the prompt that produced it. Every log line
+# carries this so runs can be compared honestly.
+PROMPT_VERSION = 2
+
+# Hard ceiling on one serialised request. The reference implementation for this
+# class of project uses 24,000 bytes and *stops before calling the API* when a
+# request would exceed it, rather than silently truncating state — silent
+# truncation would make the model answer a question about a state it never saw.
+MAX_REQUEST_BYTES = 24_000
+
 
 # --------------------------------------------------------------------------- #
 # Question specs

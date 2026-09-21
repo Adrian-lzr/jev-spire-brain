@@ -44,9 +44,17 @@ from spirebrain.jev_brain.state import RunContext, card_effect_text, relic_effec
 
 CONFIDENCE_FLOOR = 0.60  # mirrored from config/strategy.json
 SCORE_ACTION_FLOOR = 0.55  # below this, "nothing here is worth taking"
-# When the model cannot tell whether to heal, heal below this HP ratio.
-# (Same number as CONFIDENCE_FLOOR by coincidence, not by meaning.)
-HEAL_WHEN_UNSURE_HP_RATIO = 0.60
+# When the model cannot tell, heal ONLY below this HP ratio — otherwise upgrade.
+#
+# 0.50 is not a guess. Five independent strategy guides converge on the same
+# number and the same reasoning, in both languages:
+#   "新手太容易选择回血——实际上强化更重要。除非生命<50%" (ntgame.com/sts/strategy)
+#   "半血以上敲牌比补血划算得多" (3h3.com 晋升心得)
+#   "upgrading whenever it's safe to do so can significantly strengthen your deck" (spire-codex)
+# A rest heals a flat 30 HP and is repeatable; an upgrade is permanent. So
+# upgrading is the default and healing is the exception. Our previous 0.60 floor
+# plus a fallback that ALWAYS healed had it exactly backwards.
+HEAL_WHEN_UNSURE_HP_RATIO = 0.50
 
 # Shared rubrics: ordered lowest -> highest.
 CARD_RUBRIC = [

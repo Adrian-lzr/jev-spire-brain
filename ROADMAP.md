@@ -108,6 +108,57 @@ written down as true:
    improved win rate has not been established." Anyone quoting JEV brain
    win-rates at this stage is quoting something nobody has measured.
 
+## Methodology debt (found by external research, 2026-09-21)
+
+> The measured record, the protocol and the pre-registered criteria for the next
+> run now live in **[docs/MEASUREMENTS.md](docs/MEASUREMENTS.md)**. Read that
+> before quoting any number in this file — every row there carries its sample size.
+
+External research turned up a defect in how this project has been drawing
+conclusions, and it takes priority over any feature work.
+
+1. **Our sample size cannot support the conclusions we have already published.**
+   An independent 108-claim study documents its own conclusion reversing twice:
+   *"at 22 claims it said Jev won calibration decisively, and at 72 it said the
+   field was tied."* Every threshold change in this repo — the confidence floor,
+   the distribution margin, `SCORE_ACTION_FLOOR`, the rest-site ratio — was decided
+   from **one 24-call run (63 answers)**. Those changes may be right, but they are
+   not yet evidence-backed.
+2. **We tune and evaluate on the same data.** The reference practice is a 60/40
+   split: a calibration set to pick thresholds, and an untouched test set run
+   once at the end.
+3. **We have never measured repeatability.** A LessWrong audit experiment repeats
+   the same input five times precisely because decision models drift between
+   calls; if ours does, then some of our fallbacks are random rather than
+   principled.
+4. **Question wording changes the raw confidence numbers** (anth.us), and we do
+   not version our prompts. JevSpire logs `prompt_version` / `request_bytes`; we
+   should.
+5. **A standard already exists for what we are trying to do:** `jevcal` measures a
+   typed decision model on your own data, picks the threshold that meets an
+   accuracy target, reports how much traffic still needs an LLM, and fails CI when
+   a model update silently breaks calibration. Our `analysis/calibration.py`
+   should grow in that direction rather than inventing its own conventions.
+
+Concretely, before the next "≥50 ascents" milestone:
+
+- [ ] Split seeds: a calibration set for tuning, a locked test set run once
+- [ ] `analysis/calibration.py`: add Brier alongside the ECE stub
+- [ ] Repeatability probe: same state × N calls → decision-flip rate per threshold
+- [ ] Log `prompt_version` and `request_bytes`; cap request size and fail loudly
+- [ ] Write the acceptance criteria for the 50-ascent run **before** running it
+
+## One conclusion that needs re-opening
+
+We announced that JEV's boss-relic ranking "became defensible" because it scored
+Runic Dome (cannot see enemy intents) worst and Coffee Dripper best. But strategy
+consensus holds that **energy relics are almost always correct**, and all three
+offered relics were energy relics; Runic Dome in particular is often rated
+*strong* by experienced players. So either JEV was ranking by "how much the
+drawback hurts a beginner" (right for a beginner) or it was restating the
+drawback text without valuing the +1 energy (shallow). **We asserted the first;
+the evidence supports either.** Re-test with pre-registered criteria.
+
 ## Definition of "worth showing"
 - Agent completes 10 consecutive runs unattended
 - Calibration curve published (independent evaluation angle the JEV community currently lacks)
