@@ -69,42 +69,77 @@ Optional but recommended for unattended runs:
 
 ## 2. Point CommunicationMod at the agent
 
-Config file (verified path; the folder does not exist until the mod first runs,
-so start the game once with the mod enabled, or create the file by hand):
+Config file — **the mod creates it on its first load**, so it may not exist yet:
 
 ```
 %LOCALAPPDATA%\ModTheSpire\CommunicationMod\config.properties
 ```
 
-Minimal working config:
+**Do not write it by hand.** Run this instead — it produces the format the mod
+actually parses, previews first, backs up any existing file, and verifies the result
+by decoding it back the way Java does:
 
-```properties
-command=C\:\\Users\\Lenovo\\.workbuddy\\binaries\\python\\versions\\3.13.12\\python.exe D\:\\ai生成视频\\jev模型\\jev-spire-brain\\run_agent.py --backend openrouter
-runAtGameStart=true
-verbose=true
+```bash
+python -m spirebrain.install_mod_config            # preview, writes nothing
+python -m spirebrain.install_mod_config --write     # apply
+python -m spirebrain.install_mod_config --show      # print the current file, decoded
 ```
 
-> If the non-ASCII path causes trouble in `config.properties`, move the repo to an
-> ASCII path (e.g. `D:\dev\jev-spire-brain`) — everything below is
-> path-independent, since the launcher resolves the repo root from `__file__`.
+What it writes on this machine:
 
-Four things that will bite you, all verified:
+```properties
+command=C\:\\Users\\Lenovo\\.workbuddy\\binaries\\python\\versions\\3.13.12\\python.exe D\:\\ai\u751F\u6210\u89C6\u9891\\jev\u6A21\u578B\\jev-spire-brain\\run_agent.py --backend openrouter
+runAtGameStart=true
+verbose=true
+maxInitializationTimeout=10
+```
+
+**Six details verified in the source on 2026-09-21, four of which the docs and forum
+posts get wrong** (`CommunicationMod.java`, `SpireConfig.java`, `ConfigUtils.java`):
+
+1. **Only four keys exist**: `command`, `runAtGameStart`, `verbose`,
+   `maxInitializationTimeout`. Anything else in the file is ignored.
+2. **It is read as ISO-8859-1.** `SpireConfig.load()` is
+   `properties.load(new FileInputStream(file))`, and `java.util.Properties` reads
+   bytes as ISO-8859-1 while decoding `\uXXXX` escapes. **So raw UTF-8 in a path is
+   read back as mojibake and the launch fails** — exactly the trap this repo's own
+   path would have hit (it contains 生成视频 and 模型). Escaping those characters is
+   what `Properties.store()` itself emits, so the escape form *is* the native
+   format. (An earlier version of this document told you to paste the raw path. It
+   was wrong; that is why the installer exists.)
+3. **The command is split on whitespace and handed straight to `ProcessBuilder`**:
+   `getString("command").trim().split("\\s+")`. There is no shell and no quoting, so
+   **no path may contain a space** and quotes would become part of an argument. The
+   installer prints the exact argv the mod will build so this is visible before you
+   start the game.
+4. **`maxInitializationTimeout=10` is the Ready window** — the game blocks for that
+   many seconds waiting for our first line, then kills the process. Our launcher
+   sends `Ready` immediately, so 10 is generous; raise it only if the interpreter is
+   slow to start.
+5. **`runAtGameStart=true` makes the mod spawn us when the game boots.** For the
+   smoke test that is what you want; set it to `false` to launch by hand.
+6. **Our stderr goes to `communication_mod_errors.log`** in the game folder
+   (`builder.redirectError(appendTo(...))`), and our stdout is the protocol. So if
+   nothing happens, that file is the first place to look.
+
+Do **not** point `command=` at `spirebrain/driver/stdio.py` — see point 1 of the
+trap list below.
+
+### The four traps
 
 1. **Point `command=` at `run_agent.py`, never at `spirebrain/driver/stdio.py`.**
    Running a script puts *that script's* directory first on `sys.path`, so the
    module file cannot `import spirebrain`. Tested: the module-file route raises
    `ModuleNotFoundError`; the launcher route works.
-2. **Windows paths must escape backslashes and colons**: `C\:\\...`.
-3. **Do not use a wrapper script.** `command=` may be a single program with
-   arguments. A `.bat` that echoes anything would put its own text into the
-   protocol stream. (The README's own FAQ explains the log-file alternative.)
-4. **The first line we send must be `Ready`.** Without it the mod waits ten
-   seconds and then kills the process — that is the mod's documented behaviour,
-   and `stdio.py` sends it before reading anything.
-
-`run_agent.py` also loads `.env` from the repo root, because a process spawned by
-the game inherits the *game's* environment rather than your shell's. Without that
-the agent would start keyless and silently fall back to the mock.
+2. **No wrapper scripts.** stdout *is* the protocol — a `.bat` that echoes anything
+   would inject its own text into the state stream. Diagnostics belong on stderr,
+   which the mod already redirects to `communication_mod_errors.log`.
+3. **The first line we send must be `Ready`.** The mod blocks waiting for it
+   (see `maxInitializationTimeout` above) and kills the process on timeout.
+   `stdio.py` sends it before reading anything.
+4. **The game spawns us with the game's environment, not your shell's.**
+   `run_agent.py` therefore loads `.env` from the repo root; without that the agent
+   would start keyless and silently fall back to the mock.
 
 ## 3. Point the agent at your game data
 
@@ -190,11 +225,16 @@ rejects it. Details and the measured numbers are in `docs/JEV_API.md`.
 | Symptom | Cause | Fix |
 |---|---|---|
 | Subscribed on the Workshop but no jar appears in `content\646570\` | a subscription is not an install; `NeedsDownload` stays `1` because Steam never processed the item (the other three arrived only when the client next ran) | open the item in the Steam client and use Download, restart the Steam client, or launch the game once |
-| Game hangs ~10 s, then the process exits | no `Ready` handshake, or the command line is wrong | check `command=`; the launcher sends `Ready` already |
+| `Could not start external process`, and the path in the config looks like `D:\aiæç...` | the config was written as raw UTF-8, but it is read as ISO-8859-1 | rewrite it with `python -m spirebrain.install_mod_config --write`; never hand-edit that file with a non-ASCII path |
+| Game hangs ~10 s, then the process exits | no `Ready` handshake, or the command line is wrong | check `command=`; the launcher sends `Ready` already. Look in `communication_mod_errors.log` in the game folder for our stderr |
 | `ModuleNotFoundError: spirebrain` | `command=` points at the module file | point it at `run_agent.py` |
-| Nothing at all in the log | `config.properties` path wrong, or escaping broken (`\` and `:`) | the folder only exists after the mod has run once |
+| Nothing at all in the log | `config.properties` path wrong, or the mod is not enabled in the ModTheSpire list | the folder only exists after the mod has loaded once |
 | Agent runs but never acts | every state answered with `state`/`wait` | check `logs/pipe.jsonl` for `substitutions`: an unoffered verb is a bug in our router, and the substitution log names it |
 | Agent exits on a screen we have not seen | unhandled screen type → `wait` → game waits | add the screen to `GRID_SCREENS` or a handler in `agent.py` |
 | Wrong card upgraded | grid index ordering assumption | **PHASE 1 VERIFY**: `_on_rest` assumes the upgrade grid follows the deck array; check on the live pipe |
 | Purchases pick the wrong item | shop shelf ordering assumption | **PHASE 1 VERIFY**: `_on_shop` assumes cards, then relics, then potions |
 | Steam overlay interferes | overlay steals input | disable the overlay for this game |
+
+Useful while testing: the mod's in-game settings panel (Mods → Communication Mod)
+has a **"(Re)start external process"** button, so a config or code change does not
+need a game restart — and a toggle for `runAtGameStart`.

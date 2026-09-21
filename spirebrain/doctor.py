@@ -241,9 +241,9 @@ def check_communicationmod_anywhere(rep: Report, content: Path | None) -> bool:
         rep.add(PASS, "CommunicationMod jar", str(sorted(uniq)[0]))
         return True
     rep.add(FAIL, "CommunicationMod jar", "no file found on any drive",
-            "download it in a browser from"
-            " github.com/ForgottenArbiter/CommunicationMod/releases/latest and put it"
-            " in the game's mods\\ folder")
+            "open github.com/ForgottenArbiter/CommunicationMod/releases/tag/v1.2.1"
+            " and save CommunicationMod.jar (343,522 bytes) into the game's mods\\ folder"
+            " — create it if needed")
     return False
 
 
@@ -255,31 +255,40 @@ def check_mod_config(rep: Report) -> None:
     cfg = Path(local) / "ModTheSpire" / "CommunicationMod" / "config.properties"
     if not cfg.exists():
         rep.add(WARN, "CommunicationMod config", f"not created yet ({cfg})",
-                "the mod writes it on first run — start the game once with the mod"
-                " enabled, then set command= to run_agent.py")
+                "the mod creates it on its first load. Either start the game once with"
+                " the mod enabled, or let us write it now:"
+                " `python -m spirebrain.install_mod_config --write`")
         return
-    text = cfg.read_text(encoding="utf-8", errors="replace")
+    text = cfg.read_text(encoding="latin-1")   # the encoding the mod itself uses
     rep.add(PASS, "CommunicationMod config", str(cfg))
-    m = re.search(r"(?m)^\s*command\s*=\s*(.+)$", text)
-    if not m:
-        rep.add(FAIL, "Config: command=", "no command line set",
-                "point it at run_agent.py — see docs/SETUP.md step 2")
+
+    # Decode the way the mod does before judging the paths, or every \uXXXX escape
+    # looks like a broken path. One implementation of the escaping lives in
+    # install_mod_config, so doctor can never disagree with the writer.
+    from spirebrain.install_mod_config import check_argv, parse_config
+
+    parsed = parse_config(text)
+    command = parsed.get("command", "")
+    if not command.strip():
+        rep.add(FAIL, "Config: command=",
+                "missing or empty",
+                "run `python -m spirebrain.install_mod_config --write`")
         return
-    command = m.group(1).strip()
     if "run_agent.py" in command:
-        rep.add(PASS, "Config: command=", command[:110])
+        rep.add(PASS, "Config: command=", command[:120])
     elif "stdio.py" in command:
         rep.add(FAIL, "Config: command=", "points at the module file",
                 "point it at run_agent.py: running a module file cannot import the"
                 " package")
     else:
-        rep.add(WARN, "Config: command=", command[:110],
+        rep.add(WARN, "Config: command=", command[:120],
                 "expected run_agent.py; anything else needs a reason")
-    for path in re.findall(r"[A-Za-z]:\\\\[^\s]+|(?<![\\\w])[A-Za-z]:\\[^\s]+", command):
-        cleaned = Path(path.replace("\\\\", "\\"))
-        if cleaned.suffix.lower() in (".exe", ".py") and not cleaned.exists():
-            rep.add(FAIL, "Config: path exists?", f"{cleaned} — not found",
-                    "fix the path or its escaping (backslashes and colons need \\\\)")
+
+    argv = check_argv(command)
+    print(f"          argv ({argv['argv_count']}): " + " | ".join(argv["argv"]))
+    for problem in argv["problems"]:
+        rep.add(FAIL, "Config: command line", problem,
+                "fix it with `python -m spirebrain.install_mod_config --write`")
 
 
 def check_gamedata(rep: Report) -> None:

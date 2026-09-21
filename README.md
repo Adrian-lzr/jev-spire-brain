@@ -42,7 +42,7 @@ Both come straight from the official docs ([docs/JEV_API.md](docs/JEV_API.md)):
 🚧 **Both halves of Phase 1 exist now, and the brain has run against real JEV.**
 All 7 decision modules + HP budget + greedy combat + logging + simulation harness
 + agent router + the real JEV client + the **CommunicationMod stdio transport** are
-in place, with **145 tests passing**. Live decisions and simulator decisions now
+in place, with **161 tests passing**. Live decisions and simulator decisions now
 share the same rich `RunContext`, so both paths ask JEV against the full run
 digest and the game's own card/relic text.
 
@@ -116,8 +116,9 @@ git clone https://github.com/Adrian-lzr/jev-spire-brain.git
 cd jev-spire-brain
 pip install -r requirements.txt          # optional: the brain is stdlib-only
 python -m spirebrain.doctor               # names every missing piece and its fix
+python -m spirebrain.install_mod_config    # preview the mod config it will write
+python -m spirebrain.install_mod_config --write   # apply (backs up any existing file)
 python tests\test_stdio.py               # prove the pipe logic offline
-# then point CommunicationMod's `command=` at run_agent.py — docs/SETUP.md
 ```
 
 `doctor` exists because "is the mod installed?" turned out to need six manual
@@ -125,6 +126,13 @@ checks, and one of them is genuinely non-obvious: a Steam Workshop **subscriptio
 and a Workshop **download** are different states in `appworkshop_<appid>.acf`. The
 id under `WorkshopItemDetails` means Steam knows you subscribed; only
 `WorkshopItemsInstalled` means the files are on disk.
+
+`install_mod_config` exists because the config file is read as **ISO-8859-1**
+(`SpireConfig.load()` → `Properties.load(FileInputStream)`), so a path with
+non-ASCII characters written as raw UTF-8 is silently misread — and because the
+command is split on whitespace and passed to `ProcessBuilder`, so no path may
+contain a space. Both are hand-edit traps; the installer escapes, validates, and
+verifies by decoding the result back the way Java does.
 
 ## Switching the brain on
 
