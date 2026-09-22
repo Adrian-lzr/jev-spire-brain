@@ -125,6 +125,56 @@ def test_handle_line_accepts_the_escaped_form_the_game_actually_sends():
     assert reply is not None                         # parsed, scrubbed, answered
 
 
+
+def test_a_poisoned_line_cannot_kill_the_log_write_either():
+    """The 21:31 death: the poison survived message handling and killed the
+    agent inside _log, OUTSIDE every guard, after the advice had already
+    published — the panel froze on one screen while the player kept playing.
+
+    A log write must never be fatal, whatever it is asked to encode.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        log = Path(tmp) / "pipe.jsonl"
+        t = StdioTransport(_Stub(), log_path=log, mode="advise",
+                           advice_path=None, warn_stream=io.StringIO())
+        poisoned_raw = '{"game_state":{"relics":["' + chr(0xD841) + '"]}}'
+        # direct hit on the layer that died
+        t._log(poisoned_raw, "wait 20")
+        text = log.read_text(encoding="utf-8", errors="replace")
+        assert '"sent": "wait 20"' in text          # the record EXISTS
+        assert chr(0xD841) not in text              # and carries no poison
+
+
+def test_the_run_loop_survives_a_poisoned_end_to_end_line():
+    """run() itself may not exit on a bad line — a coach that dies mid-run is
+    worse than one that skips a turn."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        log = Path(tmp) / "pipe.jsonl"
+        esc = chr(92) + "ud841"
+        lines = [
+            '{"available_commands":["start","state"],"ready_for_command":true,"in_game":false}',
+            '{"available_commands":["state","wait"],"ready_for_command":true,"in_game":true,'
+            '"game_state":{"screen_type":"COMBAT","act":1,"floor":3,"deck":[{"id":"X' + esc + '"}]}}',
+            '{"available_commands":["state","wait"],"ready_for_command":true,"in_game":true,'
+            '"game_state":{"screen_type":"COMBAT","act":1,"floor":4,"deck":[{"id":"Y"}]}}',
+        ]
+        t = StdioTransport(_Stub(), log_path=log, mode="advise",
+                           advice_path=None, warn_stream=io.StringIO())
+        out = io.StringIO()
+        n = t.run(iter(lines), out)
+        replies = [l for l in out.getvalue().splitlines() if l]
+        # Ready + one reply per IN-GAME state. The menu state stays silent by
+        # design (an advisor never starts a run), so 1 + (len-1) lines.
+        assert replies[0] == "Ready"
+        assert len(replies) == len(lines)
+        assert replies[1:] == ["wait 20"] * (len(lines) - 1)
+        assert n >= 0                                   # and returned normally
+
+
 if __name__ == "__main__":
     for name, fn in sorted({k: v for k, v in globals().items()
                             if k.startswith("test_") and callable(v)}.items()):

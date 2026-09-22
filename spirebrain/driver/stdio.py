@@ -907,11 +907,26 @@ class StdioTransport:
             outstream.write(READY + "\n")
             outstream.flush()
         for raw in instream:
-            command = self.handle_line(raw)
-            self._log(raw, command)
+            # The 21:31 death: the poison survived message handling (scrubbed
+            # there) and killed the agent inside _log, OUTSIDE every guard. No
+            # line of input may end this loop — a coach that dies mid-run is
+            # worse than one that skips a turn. Degrade, log, keep breathing.
+            try:
+                command = self.handle_line(raw)
+                self._log(raw, command)
+            except Exception:
+                import traceback
+                traceback.print_exc(file=self.warn_stream)
+                self.errors += 1
+                command = None
             if command:
-                outstream.write(command + "\n")
-                outstream.flush()
+                try:
+                    outstream.write(command + "\n")
+                    outstream.flush()
+                except (OSError, ValueError):
+                    # A dead pipe cannot be written to; keep reading anyway so a
+                    # log record still exists for every state the game sent.
+                    pass
             if self.max_commands is not None and self.max_commands > 0 \
                     and self.commands >= self.max_commands:
                 if not self.action_limit_hit:
@@ -941,18 +956,25 @@ class StdioTransport:
 
         `log_path=None` means no logging: the pipe log is the record of what the
         real game sent, and a test fixture must never land in it.
+
+        The raw line is scrubbed before encoding: a lone surrogate that reached
+        this far (the CJK fork's escapes) raised UnicodeEncodeError inside this
+        very write on 2026-09-22 21:31 and killed the agent MID-RUN — after the
+        advice had already published, so the panel froze on one screen while
+        the player kept playing. A log write must never be fatal, whatever it
+        is asked to encode.
         """
         if self.log_path is None:
             return
         try:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.log_path, "a", encoding="utf-8") as f:
+            with open(self.log_path, "a", encoding="utf-8", errors="replace") as f:
                 f.write(json.dumps({
                     "ts": time.time(),
-                    "msg": raw.strip()[:4000],
+                    "msg": _scrub_surrogates(raw.strip()[:4000]),
                     "sent": command,
                 }, ensure_ascii=False) + "\n")
-        except OSError as exc:  # a full disk must not kill the run
+        except (OSError, UnicodeError) as exc:  # a full disk must not kill the run
             print(f"[stdio] could not log: {exc}", file=sys.stderr)
 
 
@@ -1079,6 +1101,20 @@ def main(argv: list[str]) -> int:
           f"acceptance={acceptance or 'margin'} mode={transport.mode}; "
           f"waiting for state on stdin",
           file=sys.stderr)
+    # stdin is the protocol stream and MUST be decoded as UTF-8, whatever the
+    # console's locale is: the game (Java) writes UTF-8 bytes, and Windows
+    # Python would otherwise read them as the ANSI codepage (cp936 here) — the
+    # 21:15 session logged relic names as mojibake (`鐕冪儳涔嬭` for 燃烧之血)
+    # and a CJK character misread that way decodes into lone surrogates, which
+    # is exactly the poison that kept killing the agent. Reading with
+    # errors="replace" makes a malformed byte a '?' in our copy of the log —
+    # the JSON parser sees the game's own \uXXXX escapes either way, so the
+    # decision layer is untouched; only the log copy degrades.
+    if hasattr(sys.stdin, "reconfigure"):
+        try:
+            sys.stdin.reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
     transport.run(sys.stdin, sys.stdout)
     print(f"[stdio] stdin closed after {transport.messages} messages, "
           f"{transport.commands} commands, {transport.errors} errors, "

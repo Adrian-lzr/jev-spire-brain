@@ -338,15 +338,20 @@ python java/build.py --check       # run the mod's own poller against a live /st
   在运行*. This exists because the first version drew a dim grey line at the
   top-left in that state, and a player reasonably reported "the panel never
   appears" while the real cause was an empty `command=` in a config file.
-* **A poisoned state cannot kill the agent (the 20:49 death).** The CJK fork can
-  emit a state whose JSON escapes contain a lone surrogate (`\uD8xx`), which
+* **A poisoned state cannot kill the agent (the 20:49 and 21:31 deaths).** The CJK
+  fork can emit a state whose JSON escapes contain a lone surrogate (`\uD8xx`), which
   `json.loads` materializes into a lone surrogate character; the first
-  `.encode("utf-8")` raised `UnicodeEncodeError` and BOTH agents died 11 seconds
-  into a live session — the panel then said "agent not online" forever. The
-  transport now scrubs lone surrogates at the one boundary every consumer reads
-  (`_scrub_surrogates`), no single message can end the loop (a failure degrades
-  to a `state` reply with the traceback on stderr), and the fingerprint encodes
-  with `errors="replace"` as the deep backstop. Pinned in `tests/test_poison.py`.
+  `.encode("utf-8")` raised `UnicodeEncodeError` and killed BOTH agents 11 seconds
+  into a live session — the panel then said "agent not online" forever. The 21:31
+  variant was nastier: the poison survived message handling (already scrubbed
+  there) and killed the agent inside the pipe-log write, AFTER the advice had
+  published — so the panel froze mid-run showing one screen's advice while the
+  player kept playing. Now: the transport scrubs lone surrogates at the message
+  boundary AND inside `_log`, no single line can end the run loop (a failure
+  degrades with the traceback on stderr), stdin is read as UTF-8 (a CJK byte read
+  through the ANSI codepage was ALSO the source of the relic-name mojibake and of
+  misdecoded half-characters), and the fingerprint encodes with
+  `errors="replace"` as the deep backstop. Pinned in `tests/test_poison.py`.
 * **A hand-written config can launch a deaf agent.** The `command=` must carry
   `--dashboard-url http://127.0.0.1:8787/publish`; without it an advisor runs
   fine and publishes nowhere (exactly the 20:49 gap). `default_command()` takes
