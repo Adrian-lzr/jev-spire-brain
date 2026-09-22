@@ -24,8 +24,23 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from spirebrain.driver.agent import SpireBrainAgent
-from spirebrain.driver.stdio import StdioTransport
+from spirebrain.driver.stdio import StdioTransport as _StdioTransport
 from spirebrain.overlay.feed import DecisionFeed
+
+
+def _play(agent, **kwargs) -> "_StdioTransport":
+    """An AUTO-PLAY transport — what every test in this file is about.
+
+    The transport's default mode is `advise` (recommendation only, polls the
+    game instead of acting on it), because that is the project's purpose. These
+    guards exist for the mode that *acts*, so each construction says `play`
+    explicitly: a guard test that silently changed meaning with a default would
+    be worse than one that fails. `advice_path=None` keeps the advice journal
+    out of the repo, the same reason `log_path=None` is passed everywhere here.
+    """
+    kwargs.setdefault("mode", "play")
+    kwargs.setdefault("advice_path", None)
+    return _StdioTransport(agent, **kwargs)
 
 
 class _StubAgent:
@@ -62,7 +77,7 @@ def _state(**over) -> dict:
 def test_stall_guard_stops_after_repeated_identical_state():
     with tempfile.TemporaryDirectory() as tmp:
         agent = _StubAgent()
-        transport = StdioTransport(agent, log_path=None, stall_limit=2)
+        transport = _play(agent, log_path=None, stall_limit=2)
         same = _msg(_state())
 
         assert transport.handle_message(json.loads(same)) == "choose 0"   # acted
@@ -78,7 +93,7 @@ def test_stall_guard_stops_after_repeated_identical_state():
 def test_stall_guard_resumes_on_a_new_state():
     with tempfile.TemporaryDirectory() as tmp:
         agent = _StubAgent()
-        transport = StdioTransport(agent, log_path=None, stall_limit=2)
+        transport = _play(agent, log_path=None, stall_limit=2)
         same = _msg(_state())
         for _ in range(3):  # act, repeat, latch
             transport.handle_message(json.loads(same))
@@ -94,7 +109,7 @@ def test_state_and_wait_commands_never_arm_the_stall_guard():
     coming back unchanged is what they are for, not a sign of a stuck run."""
     with tempfile.TemporaryDirectory() as tmp:
         agent = _StubAgent(command={"command": "wait"})
-        transport = StdioTransport(agent, log_path=None, stall_limit=2)
+        transport = _play(agent, log_path=None, stall_limit=2)
         same = _msg(_state())
         for _ in range(5):
             assert transport.handle_message(json.loads(same)) == "wait 20"
@@ -102,7 +117,7 @@ def test_state_and_wait_commands_never_arm_the_stall_guard():
 
 
 def test_fingerprint_changes_when_state_changes():
-    fp = StdioTransport._fingerprint
+    fp = _StdioTransport._fingerprint
     assert fp(_state()) != fp(_state(current_hp=70))
     assert fp(_state()) == fp(_state())  # stable across calls, key order included
     assert fp({"a": 1, "b": 2}) == fp({"b": 2, "a": 1})
@@ -112,7 +127,7 @@ def test_stall_guard_tells_the_feed():
     with tempfile.TemporaryDirectory() as tmp:
         feed = DecisionFeed()
         agent = _StubAgent(feed=feed)
-        transport = StdioTransport(agent, log_path=None, stall_limit=2)
+        transport = _play(agent, log_path=None, stall_limit=2)
         same = _msg(_state())
         for _ in range(3):
             transport.handle_message(json.loads(same))
@@ -138,7 +153,7 @@ def test_default_action_limit_is_5000():
     saved = _clean_env()
     try:
         with tempfile.TemporaryDirectory() as tmp:
-            transport = StdioTransport(_StubAgent(), log_path=None)
+            transport = _play(_StubAgent(), log_path=None)
             assert transport.max_commands == 5000
     finally:
         if saved is not None:
@@ -150,7 +165,7 @@ def test_env_var_overrides_action_limit():
     os.environ["JEVBRAIN_MAX_ACTIONS"] = "5"
     try:
         with tempfile.TemporaryDirectory() as tmp:
-            transport = StdioTransport(_StubAgent(), log_path=None)
+            transport = _play(_StubAgent(), log_path=None)
             assert transport.max_commands == 5
     finally:
         if saved is not None:
@@ -162,7 +177,7 @@ def test_env_var_overrides_action_limit():
 def test_action_limit_stops_the_run_loop_with_a_warning():
     with tempfile.TemporaryDirectory() as tmp:
         err = io.StringIO()
-        transport = StdioTransport(_StubAgent(), log_path=None, max_commands=3,
+        transport = _play(_StubAgent(), log_path=None, max_commands=3,
                                    warn_stream=err)
         lines = [_msg(_state(floor=i)) for i in range(10)]  # fresh states: stall guard stays quiet
         sent = transport.run(iter(lines), _NoopStream(), send_ready=False)
@@ -175,7 +190,7 @@ def test_zero_action_limit_means_unlimited():
     os.environ["JEVBRAIN_MAX_ACTIONS"] = "0"
     try:
         with tempfile.TemporaryDirectory() as tmp:
-            transport = StdioTransport(_StubAgent(), log_path=None)
+            transport = _play(_StubAgent(), log_path=None)
             assert transport.max_commands == 0
             lines = [_msg(_state(floor=i)) for i in range(10)]
             sent = transport.run(iter(lines), _NoopStream(), send_ready=False)
@@ -267,7 +282,7 @@ def test_unmodeled_screen_gets_waits_then_keys_then_click():
     cycle repeats. Every rung must be a well-formed line the game accepts."""
     with tempfile.TemporaryDirectory() as tmp:
         agent = _StubAgent()
-        transport = StdioTransport(agent, log_path=None)
+        transport = _play(agent, log_path=None)
         same = _unmodeled_msg()
         sequence = [transport.handle_message(json.loads(same)) for _ in range(10)]
         assert sequence[0] == "wait 20"
@@ -283,7 +298,7 @@ def test_unmodeled_screen_stops_loudly_after_three_cycles():
         err = io.StringIO()
         feed = DecisionFeed()
         agent = _StubAgent(feed=feed)
-        transport = StdioTransport(agent, log_path=None, warn_stream=err)
+        transport = _play(agent, log_path=None, warn_stream=err)
         same = _unmodeled_msg()
         # 3 cycles x 5 rungs = 15 rungs; the 16th message stops loudly.
         for _ in range(15):
@@ -307,7 +322,7 @@ def test_unmodeled_screen_auto_resumes_when_a_modeled_screen_returns():
     with tempfile.TemporaryDirectory() as tmp:
         err = io.StringIO()
         agent = _StubAgent()
-        transport = StdioTransport(agent, log_path=None, warn_stream=err)
+        transport = _play(agent, log_path=None, warn_stream=err)
         stuck = _unmodeled_msg()
         for _ in range(15):
             assert transport.handle_message(json.loads(stuck)) is not None
@@ -329,7 +344,7 @@ def test_unmodeled_ladder_never_asks_the_agent():
     for a screen nobody can act on."""
     with tempfile.TemporaryDirectory() as tmp:
         agent = _StubAgent()
-        transport = StdioTransport(agent, log_path=None)
+        transport = _play(agent, log_path=None)
         same = _unmodeled_msg()
         for _ in range(14):
             transport.handle_message(json.loads(same))
@@ -342,7 +357,7 @@ def test_run_budget_resets_on_a_new_run():
     the counter carried its predecessors' debt."""
     with tempfile.TemporaryDirectory() as tmp:
         err = io.StringIO()
-        transport = StdioTransport(_StubAgent(), log_path=None, max_commands=5,
+        transport = _play(_StubAgent(), log_path=None, max_commands=5,
                                    warn_stream=err)
         # Run 1: hit the cap.
         lines = [_msg(_state(floor=i)) for i in range(10)]
@@ -363,12 +378,30 @@ def test_unmodeled_screen_waits_cost_far_under_the_cap():
     burned 991 waits on ONE screen. The ladder must spend an order less."""
     with tempfile.TemporaryDirectory() as tmp:
         agent = _StubAgent()
-        transport = StdioTransport(agent, log_path=None)
+        transport = _play(agent, log_path=None)
         same = _unmodeled_msg()
         for _ in range(60):  # six times the cycles the ladder allows
             transport.handle_message(json.loads(same))
         assert transport.commands <= 20
         assert transport.ladder_stopped is True
+
+
+def test_ladder_survives_a_churning_state():
+    """The 18:54 death, part 2: the unmodeled screen's state mutates every few
+    messages (uuids, animation counters). A ladder keyed on the full state
+    hash restarts mid-climb forever and never reaches its own stop. The rung
+    count must key on the SCREEN, not the state."""
+    with tempfile.TemporaryDirectory() as tmp:
+        err = io.StringIO()
+        agent = _StubAgent()
+        transport = _play(agent, log_path=None, warn_stream=err)
+        for i in range(16):
+            # Same screen, same verbs, churning internals - like the live pipe.
+            msg = _msg({"screen_type": "NONE", "screen_state": {}, "tick": i},
+                       available_commands=["key", "click", "wait", "state"])
+            transport.handle_message(json.loads(msg))
+        assert transport.ladder_stopped is True, "churning state must not reset the ladder"
+        assert "UNMODELED SCREEN" in err.getvalue()
 
 
 # --------------------------------------------------------------------------- #

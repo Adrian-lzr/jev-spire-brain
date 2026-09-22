@@ -1,16 +1,22 @@
 """Root launcher for the decision dashboard.
 
 Phase 1.5 — the interaction layer. `run_agent.py` is the brain the game
-launches; this is the window you watch it through. Two ways in:
+launches; this is the window you watch it through. Three ways in:
 
     python run_dashboard.py --demo            # simulated run, mock JEV, no key
     python run_dashboard.py --demo --optimistic   # confident mock: JEV steers
     python run_dashboard.py --demo --backend openrouter   # REAL JEV answers
+    python run_dashboard.py --advise-demo     # ADVISOR panel: script plays, brain advises
     python run_dashboard.py --port 8788       # just the server, watch a live agent
 
 The demo path reuses the real offline harness end to end — same decision
 modules, same mock client, same fallbacks — so what you see is the architecture
 behaving, not a canned animation.
+
+`--advise-demo` exists so the advisor panel can be judged before any wiring: it
+runs the real transport in advise mode against a scripted ascent, so the
+recommendations, the verdicts on what the scripted player did, and the agreement
+rate are all produced by the real code path.
 
 Nothing here touches stdout as a protocol: this process is not the game's
 child, so printing is fine.
@@ -38,11 +44,16 @@ def main(argv: list[str] | None = None) -> int:
 
     port = int(value("port") or 8787)
 
-    if "--demo" in argv:
-        from spirebrain.overlay.demo import run_demo
-        run_demo(optimistic="--optimistic" in argv, backend=value("backend"),
-                 seed=int(value("seed") or 42), port=port,
-                 open_browser=True if "--open" in argv else None)
+    if "--demo" in argv or "--advise-demo" in argv:
+        from spirebrain.overlay.demo import run_advise_demo, run_demo
+        if "--advise-demo" in argv:
+            run_advise_demo(backend=value("backend"), port=port,
+                            pace=float(value("pace") or 1.6),
+                            open_browser=True if "--open" in argv else None)
+        else:
+            run_demo(optimistic="--optimistic" in argv, backend=value("backend"),
+                     seed=int(value("seed") or 42), port=port,
+                     open_browser=True if "--open" in argv else None)
         return 0
 
     # Server-only mode: watch a live agent that publishes into it, or just

@@ -20,7 +20,9 @@ from spirebrain.install_mod_config import (
     check_argv,
     config_path,
     decode_value,
+    default_command,
     escape_value,
+    main,
     parse_config,
 )
 
@@ -147,6 +149,51 @@ def test_config_path_follows_modthespires_layout():
     assert path.parent.name == "CommunicationMod"
     assert path.parent.parent.name == "ModTheSpire"
     assert "AppData" in str(path) or "Local" in str(path)
+
+
+def test_default_command_carries_the_mode():
+    """The mode goes IN the command, not into a default somewhere else.
+
+    The installed config is the only record of what a launched agent will do; a
+    behaviour that changed because a default changed in a commit is a behaviour
+    nobody agreed to.
+    """
+    assert "--mode" not in default_command("mock")
+    assert "--mode advise" in default_command("mock", mode="advise")
+    play = default_command("mock", mode="play", auto_start=True)
+    assert "--mode play" in play and "--auto-start" in play
+
+
+def test_advising_never_auto_starts_a_run():
+    """Starting a run is the player's decision; an advisor must not take it.
+
+    Dropped rather than honoured, so passing `--auto-start` can never produce a
+    config that contradicts its own mode.
+    """
+    assert "--auto-start" not in default_command("mock", mode="advise", auto_start=True)
+
+
+def test_cli_flags_build_the_command_it_documents():
+    """`--auto-start`, `--class` and `--ascension` were documented but never read.
+
+    Found while adding `--mode` (2026-09-22): the usage block advertised them and
+    `--auto-start --write` wrote a config without it. A documented flag that
+    silently does nothing costs a user their debugging session, so the builder
+    path is pinned. No `--write`, so this only previews.
+    """
+    import contextlib
+    import io
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        code = main(["--mode", "play", "--auto-start", "--class", "SILENT",
+                     "--ascension", "3"])
+    out = buf.getvalue()
+    assert code == 0, out
+    assert "--mode play" in out
+    assert "--auto-start" in out
+    assert "--class SILENT" in out
+    assert "--ascension 3" in out
 
 
 if __name__ == "__main__":

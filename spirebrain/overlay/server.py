@@ -70,12 +70,20 @@ def _state_snapshot(feed: DecisionFeed) -> dict:
     SSE is for the browser; a Java 8 HttpURLConnection has no event-source
     support and an infinite stream would hold a game thread hostage. One GET,
     one small JSON body, done.
+
+    Advisor mode added `last_advice` and `last_outcome` to this payload: the
+    in-game overlay is the one surface that reaches a player *without* a second
+    window, so a recommendation that never left the browser tab would be advice
+    nobody reads.
     """
     events = feed.history()
     run_state = None
     last_decision = None
+    last_advice = None
+    last_outcome = None
     for event in reversed(events):
-        if last_decision is None and event["kind"] == "decision":
+        kind = event.get("kind")
+        if last_decision is None and kind == "decision":
             detail = event.get("detail") or {}
             gate = detail.get("gate") or {}
             last_decision = {
@@ -86,12 +94,41 @@ def _state_snapshot(feed: DecisionFeed) -> dict:
                 "reason": detail.get("reason") or gate.get("reason") or "",
                 "gate": gate or None,
             }
-        if run_state is None and event["kind"] == "run_state":
+        if last_advice is None and kind == "advice":
+            last_advice = {
+                "point": event.get("point"),
+                "label": event.get("label"),
+                "reason": event.get("reason") or "",
+                "confidence": event.get("confidence"),
+                "fallback": event.get("fallback"),
+                "act": event.get("act"),
+                "floor": event.get("floor"),
+                "agreement": event.get("agreement"),
+                "tally": event.get("tally"),
+            }
+        if last_outcome is None and kind == "outcome":
+            last_outcome = {
+                "point": event.get("point"),
+                "verdict": event.get("verdict"),
+                "advice_label": event.get("advice_label"),
+                "acted_label": event.get("acted_label"),
+                "agreement": event.get("agreement"),
+                "tally": event.get("tally"),
+            }
+        if run_state is None and kind == "run_state":
             run_state = {k: v for k, v in event.items()
                          if k not in ("seq", "ts", "kind")}
-        if last_decision and run_state:
+        # All four, not three. Stopping at "decision + advice + run_state" was a
+        # real bug, found by reading /state against a live advisor session
+        # (2026-09-22): the agent's own observe() publishes a run_state BETWEEN
+        # the verdict and the recommendation, so the scan hit that third field
+        # and stopped one event short of the outcome — the panel showed a verdict
+        # while /state reported none. The bound still holds: a feed keeps 2000
+        # events and this is a dict lookup each.
+        if run_state and last_decision and last_advice and last_outcome:
             break
-    return {"last_decision": last_decision, "run_state": run_state}
+    return {"last_decision": last_decision, "last_advice": last_advice,
+            "last_outcome": last_outcome, "run_state": run_state}
 
 
 class DashboardServer:

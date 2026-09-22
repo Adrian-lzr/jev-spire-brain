@@ -29,6 +29,65 @@ Legend: `[x]` done · `[~]` done but unverifiable until an external condition is
 - [ ] Confirm on the live pipe: grid index order, shop shelf order, and that the
   `screen_state` field name holds (all flagged `PHASE 1 VERIFY` in code)
 
+## Phase 1.6 — Advisor mode: the agent recommends, the player plays (2026-09-22 evening)
+
+**The repositioning that reordered the roadmap.** The project's purpose is to help
+a human play better, not to play for them, so `advise` is now the transport's
+default mode and the auto-player is one flag away (`--mode play`). The agent runs
+the *same* pipeline — JEV call, score gate, tactical layer — and only the
+destination of the answer changed: a recommendation for the player instead of a
+command for the game.
+
+- [x] `driver/stdio.py` — `mode="advise"`: the ONLY verbs that ever reach the game
+  are `wait` and `state` (asserted on every screen type in
+  `test_advise_never_sends_an_advancing_verb_on_any_screen`). The
+  unmodeled-screen ladder is disabled (pressing keys is acting) and the stall
+  guard cannot arm. `--auto-start` is ignored: class/ascension/seed are the
+  player's decisions
+- [x] Cost discipline for a polling loop — the brain is asked **once per distinct
+  game state**, not once per poll. Polling re-transmits the same state every ~1/3s;
+  re-asking JEV each time would turn a $0.001 decision into a per-second bill while
+  the player is simply thinking. The action limit is unlimited by default in
+  advise mode, where "commands sent" is a clock rather than a budget
+- [x] `driver/witness.py` — **player-choice inference**, the half auto-play never
+  needed. Two consecutive states are diffed into the action that happened between
+  them: the card that left the hand and the monster that lost HP (combat), the
+  turn boundary, the card that joined the deck, the gold that went down and the
+  shelf slot that emptied, the relic that appeared, HP or an upgrade at the rest
+  site, a shrinking option list at an event. Matching is one idea used twice: both
+  sides reduce to an **action key** and `None` inside a key means *unknown*, so
+  unknown evidence can never manufacture a mismatch
+- [x] Honest verdicts — `match` / `mismatch` / `unobserved`, with the **evidence
+  for every verdict** carried into the event. `unobserved` is a first-class
+  outcome: potions and text-event choices leave no trace in the state, and advice
+  lag (the player acted before the recommendation landed) is reported as
+  unobserved rather than scored as a disagreement. `agreement` is `None` — not
+  `0.0` — until something is judgeable
+- [x] `overlay/feed.py` + `server.py` + `dashboard.html` — new `advice` and
+  `outcome` events; the `军师建议` panel (recommendation at 19px, the reason, the
+  verdict on your last move, and the running agreement rate); `GET /state` now
+  carries `last_advice` / `last_outcome` for the in-game overlay, so advice does
+  not require a second window. Evidence: `docs/dashboard_advise_panel.png`
+- [x] `run_dashboard.py --advise-demo` — the advisor panel with no game and no API
+  key: a scripted ascent through the real transport, including a scripted player
+  who sometimes follows the advice and sometimes does not (a demo where every
+  verdict read "match" would demo a rigged measurement)
+- [x] 15 tests in `tests/test_advise.py` + 3 in `tests/test_overlay.py` +
+  mode/auto-start coverage in `tests/test_start.py` and
+  `tests/test_install_mod_config.py`; 17/17 files green
+
+Two bugs this work found, both pinned by tests afterwards:
+
+- The auto-play guard tests were silently testing adviser behaviour once the
+  default flipped. They now ask for `mode="play"` explicitly — a test that changed
+  meaning with a default would be worse than one that failed.
+- `GET /state` reported `last_outcome: null` while the browser panel showed a
+  verdict. Cause: the agent's own `observe()` publishes a `run_state` *between* the
+  verdict and the recommendation, and the snapshot's early-exit condition
+  (`decision` + `advice` + `run_state`) was satisfied one event too early. Found by
+  reading `/state` of a live demo, not by a unit test — which is the argument for
+  the visual check.
+
 ## Phase 1.5 — The interaction layer (2026-09-22)
 - [x] `overlay/feed.py` — `DecisionFeed`: thread-safe event stream
   (`run_state` / `decision` / `run_end`), backlog replay for late subscribers,
@@ -227,7 +286,13 @@ Dome (0.58–0.65) while ranking the other two at essentially zero confidence, w
 leans toward the first reading — but a lean is not a resolution.
 
 ## Definition of "worth showing"
-- Agent completes 10 consecutive runs unattended
+- Agent completes 10 consecutive runs unattended (`play` mode)
+- **Advisor mode: an agreement rate measured on real play.** The two numbers that
+  matter are `judged` (how many recommendations the state could even adjudicate)
+  and `agreement` over those. Both are already produced live
+  (`logs/advice.jsonl`); what is missing is volume and a recording of the
+  player's *outcome* — advice that gets followed is not automatically advice that
+  was right, and the difference is the whole question
 - A calibration curve on data nobody else has (the independent-evaluation angle the
   JEV community currently lacks)
 - Demo GIF in README
@@ -240,3 +305,4 @@ leans toward the first reading — but a lean is not a resolution.
 | No ground truth for card quality | any claim that the deck *improved*, and a Brier score for our own calls | needs recorded live runs; partly me |
 | OpenRouter key permits only the `typesafe` provider | the structured-LLM baseline arm | user (add a provider) or a second key |
 | No ground-truth labels anywhere in the simulator | "calibration" meaning correctness rather than consistency | me: record outcomes, not just decisions |
+| Advisor mode has no live data yet | any statement about its agreement rate — the code path is tested (15 cases) but has never seen a real player | user: one real run in advise mode; the panel and `logs/advice.jsonl` collect everything |

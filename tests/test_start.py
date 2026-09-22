@@ -32,11 +32,32 @@ def test_mod_config_command_passes_the_argv_check():
 
     url = f"http://127.0.0.1:{start_mod.DEFAULT_PORT}"
     for backend in ("mock", "openrouter"):
-        command = start_mod.mod_config_command(url, backend, auto_start=True)
+        command = start_mod.mod_config_command(url, backend, auto_start=True,
+                                               mode="play")
         result = check_argv(command)
         assert result["problems"] == [], (backend, result["problems"])
         assert "--dashboard-url" in command
         assert command.strip().endswith("/publish")
+
+
+def test_mod_config_command_names_the_mode_and_drops_auto_start_when_advising():
+    """The installed config must say what the agent will do — and advising means
+    the agent does not even start the run.
+
+    `--auto-start` in an advisor config would hand the most personal decision in
+    the game (class, ascension, seed) to the agent, which is exactly what advice
+    mode exists to prevent. The flag is dropped rather than honoured, so passing
+    it can never produce a config that contradicts itself.
+    """
+    url = f"http://127.0.0.1:{start_mod.DEFAULT_PORT}"
+    advising = start_mod.mod_config_command(url, "mock", auto_start=True,
+                                            mode="advise")
+    assert "--mode advise" in advising
+    assert "--auto-start" not in advising
+
+    playing = start_mod.mod_config_command(url, "mock", auto_start=True, mode="play")
+    assert "--mode play" in playing
+    assert "--auto-start" in playing
 
 
 def test_detect_backend_never_raises_and_picks_mock_without_key(monkeypatch=None):

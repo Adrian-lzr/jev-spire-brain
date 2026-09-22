@@ -19,10 +19,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from spirebrain.driver.agent import PROTOCOL_VERBS
 from spirebrain.driver.stdio import (
-    StdioTransport,
+    StdioTransport as _StdioTransport,
     replay,
     to_command_line,
 )
+
+
+def _play(agent, **kwargs) -> "_StdioTransport":
+    """An AUTO-PLAY transport — the mode every protocol test here exercises.
+
+    The default mode is `advise` (the agent recommends and never acts, because
+    the project exists to help a human play), so the tests that pin *what the
+    transport sends to the game* ask for `play` explicitly. `advice_path=None`
+    keeps the advice journal out of the repo, exactly as `log_path=None` does
+    for `logs/pipe.jsonl`.
+    """
+    kwargs.setdefault("mode", "play")
+    kwargs.setdefault("advice_path", None)
+    return _StdioTransport(agent, **kwargs)
 
 
 class _StubAgent:
@@ -119,7 +133,7 @@ def test_malformed_commands_fail_loudly():
 def test_ready_is_sent_before_anything_else():
     agent = _StubAgent()
     out = io.StringIO()
-    transport = StdioTransport(agent, log_path=None)
+    transport = _play(agent, log_path=None)
     transport.run([_msg()], out)
     assert out.getvalue().startswith("Ready\n"), "the game hangs 10s without this"
 
@@ -136,7 +150,7 @@ def test_replay_mode_does_not_send_ready():
 def test_non_json_lines_are_ignored_not_fatal():
     agent = _StubAgent()
     out = io.StringIO()
-    transport = StdioTransport(agent, log_path=None)
+    transport = _play(agent, log_path=None)
     transport.run(["ModTheSpire booting...\n", "\n", "not json\n", _msg()], out)
     assert agent.seen, "the JSON line after the noise must still be handled"
     assert out.getvalue().count("\n") == 2  # Ready + one command
@@ -145,7 +159,7 @@ def test_non_json_lines_are_ignored_not_fatal():
 def test_one_command_per_message_never_two():
     agent = _StubAgent()
     out = io.StringIO()
-    transport = StdioTransport(agent, log_path=None)
+    transport = _play(agent, log_path=None)
     transport.run([_msg(), _msg()], out)
     lines = [ln for ln in out.getvalue().splitlines() if ln]
     assert lines[0] == "Ready"
@@ -155,7 +169,7 @@ def test_one_command_per_message_never_two():
 def test_not_ready_is_met_with_silence():
     agent = _StubAgent()
     out = io.StringIO()
-    transport = StdioTransport(agent, log_path=None)
+    transport = _play(agent, log_path=None)
     transport.run([_msg(ready_for_command=False)], out)
     assert out.getvalue() == "Ready\n"
     assert transport.skipped_not_ready == 1
@@ -166,7 +180,7 @@ def test_an_error_message_asks_for_state_instead_of_stalling():
     # The game waits for input after an error; silence would hang the run.
     agent = _StubAgent()
     out = io.StringIO()
-    transport = StdioTransport(agent, log_path=None)
+    transport = _play(agent, log_path=None)
     transport.run([json.dumps({"error": "invalid command", "ready_for_command": True})], out)
     assert out.getvalue() == "Ready\nstate\n"
     assert transport.errors == 1
@@ -177,18 +191,18 @@ def test_out_of_run_is_silent_unless_auto_start():
     agent = _StubAgent()
     game = {"screen_type": "NONE"}
     with tempfile.TemporaryDirectory() as tmp:
-        silent = StdioTransport(agent, log_path=Path(tmp) / "a.jsonl")
+        silent = _play(agent, log_path=Path(tmp) / "a.jsonl")
         assert silent.handle_message({"in_game": False}) is None
         assert not agent.seen
 
-        starter = StdioTransport(_StubAgent(), log_path=Path(tmp) / "b.jsonl",
+        starter = _play(_StubAgent(), log_path=Path(tmp) / "b.jsonl",
                                  auto_start=True, player_class="SILENT", ascension=5)
         assert starter.handle_message({"in_game": False}) == "start SILENT 5"
 
 
 def test_a_command_outside_available_commands_is_substituted_and_recorded():
     agent = _StubAgent({"command": "end"})  # END is not offered in this message
-    transport = StdioTransport(agent, log_path=None)
+    transport = _play(agent, log_path=None)
     line = transport.handle_message(json.loads(
         _msg(available_commands=["choose", "proceed"])))
     assert line == "proceed"
@@ -200,7 +214,7 @@ def test_wait_substitution_carries_its_frame_argument():
     navigation Proceed was substituted to the bare verb `wait`, which the game
     rejects (`Argument missing in command "wait".`). The substitution path
     must not echo verb names - it builds a command line."""
-    transport = StdioTransport(_StubAgent({"command": "choose", "choice": 0}),
+    transport = _play(_StubAgent({"command": "choose", "choice": 0}),
                                log_path=None)
     line = transport.handle_message(json.loads(
         _msg(available_commands=["play", "end", "key", "click", "wait", "state"])))
@@ -209,21 +223,21 @@ def test_wait_substitution_carries_its_frame_argument():
 
 
 def test_no_safe_substitute_means_no_command_at_all():
-    transport = StdioTransport(_StubAgent({"command": "end"}), log_path=None)
+    transport = _play(_StubAgent({"command": "end"}), log_path=None)
     line = transport.handle_message(json.loads(_msg(available_commands=["play"])))
     assert line == ""
     assert transport.substitutions[-1]["sent"] == ""
 
 
 def test_a_ready_message_without_state_asks_for_state():
-    transport = StdioTransport(_StubAgent(), log_path=None)
+    transport = _play(_StubAgent(), log_path=None)
     assert transport.handle_message({"ready_for_command": True, "in_game": True}) == "state"
 
 
 def test_the_pipe_log_records_both_sides():
     with tempfile.TemporaryDirectory() as tmp:
         log = Path(tmp) / "pipe.jsonl"
-        transport = StdioTransport(_StubAgent(), log_path=log)
+        transport = _play(_StubAgent(), log_path=log)
         transport.run([_msg()], io.StringIO())
         rec = json.loads(log.read_text(encoding="utf-8").splitlines()[0])
         assert rec["sent"] == "choose 0"
@@ -248,7 +262,7 @@ def _size(path: Path) -> int:
 
 def test_log_path_none_means_no_logging_at_all():
     before = _size(DEFAULT_LOG)
-    transport = StdioTransport(_StubAgent(), log_path=None)
+    transport = _play(_StubAgent(), log_path=None)
     assert transport.log_path is None
     transport.run([_msg(), _msg()], io.StringIO())
     assert _size(DEFAULT_LOG) == before, (
@@ -260,7 +274,7 @@ def test_omitting_log_path_uses_the_default_file():
     """Only an explicit omission chooses the default; that is what DEFAULT_LOG is for."""
     from spirebrain.driver.stdio import DEFAULT_LOG as SENTINEL
 
-    transport = StdioTransport(_StubAgent())
+    transport = _play(_StubAgent())
     assert transport.log_path == DEFAULT_LOG
     assert SENTINEL is not None and SENTINEL is not None
 
@@ -280,7 +294,7 @@ def test_this_test_file_does_not_write_to_the_repo_logs():
     before = _size(DEFAULT_LOG)
     with tempfile.TemporaryDirectory() as tmp:
         for i, msg in enumerate((_msg(), json.dumps({"error": "x"}), _msg())):
-            StdioTransport(_StubAgent(), log_path=None).run([msg], io.StringIO())
+            _play(_StubAgent(), log_path=None).run([msg], io.StringIO())
     assert _size(DEFAULT_LOG) == before
 
 
@@ -312,7 +326,7 @@ def test_menu_without_auto_start_stays_silent_but_says_so():
     """
     menu = json.dumps({"available_commands": ["start", "state"],
                        "ready_for_command": True, "in_game": False})
-    transport = StdioTransport(_StubAgent(), log_path=None)
+    transport = _play(_StubAgent(), log_path=None)
     err = io.StringIO()
     real, sys.stderr = sys.stderr, err
     try:
@@ -326,7 +340,7 @@ def test_menu_without_auto_start_stays_silent_but_says_so():
 def test_menu_with_auto_start_starts_the_run():
     menu = {"available_commands": ["start", "state"], "ready_for_command": True,
             "in_game": False}
-    transport = StdioTransport(_StubAgent(), log_path=None, auto_start=True,
+    transport = _play(_StubAgent(), log_path=None, auto_start=True,
                                player_class="IRONCLAD", ascension=0)
     assert transport.handle_message(menu) == "start IRONCLAD 0"
 
@@ -334,7 +348,7 @@ def test_menu_with_auto_start_starts_the_run():
 def test_menu_start_is_dropped_when_the_game_does_not_offer_it():
     """Every emitted verb must be advertised, including on the menu path."""
     menu = {"available_commands": ["state"], "ready_for_command": True, "in_game": False}
-    transport = StdioTransport(_StubAgent(), log_path=None, auto_start=True)
+    transport = _play(_StubAgent(), log_path=None, auto_start=True)
     line = transport.handle_message(menu)
     assert line == "state"
     assert transport.substitutions[0]["wanted"] == "start IRONCLAD 0"
@@ -369,7 +383,7 @@ def test_grid_confirm_phase_survives_the_transport_end_to_end():
     from spirebrain.driver.agent import SpireBrainAgent
     with tempfile.TemporaryDirectory() as tmp:
         agent = SpireBrainAgent(jev_backend="mock", log_dir=tmp)
-        transport = StdioTransport(agent, log_path=None)
+        transport = _play(agent, log_path=None)
         deck = [{"cost": 1, "name": "Strike", "id": "Strike_R", "type": "ATTACK"},
                 {"cost": 1, "name": "Defend", "id": "Defend_R", "type": "SKILL"},
                 {"cost": 2, "name": "Bash", "id": "Bash", "type": "ATTACK"}]

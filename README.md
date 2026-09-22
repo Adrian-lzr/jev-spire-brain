@@ -16,6 +16,47 @@ Jev Spire Brain is a three-layer agent architecture for Slay the Spire:
 
 The agent observes the full game state via [CommunicationMod](https://github.com/ForgottenArbiter/CommunicationMod) (JSON state stream), decides with calibrated probabilistic judgments, and sends actions back through the same pipe.
 
+## Two modes, and the default is the one that helps you play
+
+The project exists to make the player better, not to replace them, so the agent
+has two jobs and **`advise` is the default**:
+
+| Mode | What it does | How to get it |
+|---|---|---|
+| **`advise`** (default) | Recommends. Sends the game nothing but polls (`wait`/`state`) — no play, no choose, no proceed, no auto-start. You keep the mouse and the keyboard. | `python start.py` (or just double-click `日常启动.bat`) |
+| `play` | Auto-plays the run itself. This is what the offline measurements needed. | `python start.py --play` |
+
+In advice mode the same pipeline runs — the JEV call, the score gate, the
+tactical layer — and only the destination of the answer changes: a
+**recommendation for you** instead of a command for the game. Then the other half
+runs, and it is the reason this project can say anything honest about its own
+advice: every state change is diffed against the recommendation to infer **what
+you actually did**, and the result is scored.
+
+| Term | Meaning |
+|---|---|
+| `match` | You did what was recommended |
+| `mismatch` | You did something identifiable, and it was different |
+| `unobserved` | The state does not single out an action (a potion, a text event) — reported honestly instead of guessed |
+
+Where to watch it: the dashboard's left panel (`军师建议` / `你刚才的选择` /
+`建议命中率`), the in-game overlay (which polls `/state` for `last_advice`), and
+`logs/advice.jsonl` (one line per recommendation and per verdict, with the
+*evidence* for every inference — a verdict nobody can audit is not a
+measurement).
+
+Two honest limitations, measured rather than assumed: **advice lag** (if you act
+before a recommendation lands, that pair scores as `unobserved` rather than as a
+false mismatch) and **concealed actions** (potions and text-event choices leave no
+trace in the state). Both show up as `unobserved`, never as an invented verdict.
+
+See what the advisor looks like before wiring anything up:
+
+```bash
+python run_dashboard.py --advise-demo          # scripted ascent, mock brain, no key
+python run_dashboard.py --advise-demo --backend openrouter   # real JEV advice
+```
+
 ## Decision points owned by JEV
 
 All seven are implemented in `spirebrain/jev_brain/decisions.py` and covered by tests.
@@ -26,7 +67,7 @@ All seven are implemented in `spirebrain/jev_brain/decisions.py` and covered by 
 - **Rest sites** — `Noul` (heal?) + `Choice` (which upgrade) in one call (`RestSiteDecider`)
 - **Shops** — one parallel `Noul` per affordable item, "worth the gold for this goal?" (`ShopDecider`)
 - **Boss relics** — `Score` × 3; the pick is mandatory, so an unsure pick is flagged rather than skipped (`BossRelicJudge`)
-- **Combat risk** — `Noul` (will predicted damage exceed the HP budget?) 鈫?tactical posture (`CombatRiskGate`)
+- **Combat risk** — `Noul` (will predicted damage exceed the HP budget?) →tactical posture (`CombatRiskGate`)
 
 Combat card play itself stays in code (search/greedy), per the drone-rule: *JEV cannot be the perception layer and cannot run at control rate.*
 
@@ -39,28 +80,37 @@ Both come straight from the official docs ([docs/JEV_API.md](docs/JEV_API.md)):
 
 ## Status
 
-🚧 **Both halves of Phase 1 exist now, and the brain has run against real JEV.**
+**Both halves of Phase 1 exist now, and the brain has run against real JEV.**
 All 7 decision modules + HP budget + greedy combat + logging + simulation harness
 + agent router + the real JEV client + the **CommunicationMod stdio transport** are
-in place, with **182 tests passing**. Live decisions and simulator decisions now
-share the same rich `RunContext`, so both paths ask JEV against the full run
-digest and the game's own card/relic text.
+in place, with **250 tests in 17 files, all green**. Live decisions and simulator
+decisions share the same rich `RunContext`, so both paths ask JEV against the full
+run digest and the game's own card/relic text.
+
+**Advisor mode is in (2026-09-22 evening), and it is the default.** The agent can
+now do the job the project was actually for: recommend to a human who is playing,
+then measure whether the recommendation was taken (`driver/witness.py`, 15 tests
+in `tests/test_advise.py`). The hard rule is asserted on every screen: in advice
+mode the only verbs that ever reach the game are `wait` and `state`.
 
 ✅ **Phase 1.5 — the interaction layer — is in.** The brain now has a window:
 `spirebrain/overlay/` streams every decision (value, confidence, probabilities,
 Score distributions, fallback reasons) to a local web dashboard over SSE, live
-while the run happens. Zero game invasion: the feed is an optional constructor
-argument, and a dead dashboard can never break a run (proven by
+while the run happens, plus a `军师建议` panel for advisor mode. Zero game
+invasion: the feed is an optional constructor argument, and a dead dashboard can
+never break a run (proven by
 `tests/test_overlay.py::test_agent_survives_a_hostile_feed`).
 
-GUARDS **Three runaway guards, ported from [Ethics03/jevspire](https://github.com/Ethics03/jevspire)**
-(the only other CommunicationMod+JEV project), plus a fourth of our own, all
-"stop spending, keep the game alive": a **stall guard** that latches
-auto-decisions off when the identical game state returns after our command (it
-did not take effect — retrying is how an agent burns money in a loop); an
-**action limit** (default 5000 commands, **per run** — refilled on every
-menu→in-game edge, `JEVBRAIN_MAX_ACTIONS` to change, <=0 unlimited) that stops
-a confused run loudly instead of quietly; **navigation without the model** —
+**The guards** are three runaway guards ported from
+[Ethics03/jevspire](https://github.com/Ethics03/jevspire) (the only other
+CommunicationMod+JEV project), plus a fourth of our own, all "stop spending, keep
+the game alive": a **stall guard** that latches auto-decisions off when the
+identical game state returns after our command (it did not take effect —
+retrying is how an agent burns money in a loop); an **action limit** (default 5000
+commands, **per run** — refilled on every menu→in-game edge,
+`JEVBRAIN_MAX_ACTIONS` to change, <=0 unlimited; unlimited by default in advise
+mode, where every command is a poll and the count is a clock, not a budget) that
+stops a confused run loudly instead of quietly; **navigation without the model** —
 non-decision screens get Proceed and a shop is asked once per floor, so no JEV
 call is ever spent re-deriving "leave"; and the **unmodeled-screen ladder**
 (own design, 2026-09-22 evening): a screen whose `available_commands` offer no
@@ -70,7 +120,11 @@ screen returns. Born from a real death: after Neow's reward the game showed a
 screen the mod cannot act on, and the old code answered with 991 `wait 20` in
 66 seconds, hit the cap, and exited — the player saw "agent not reachable".
 Replayed through the fixed transport: 15 commands, one announcement, alive.
-Covered in `tests/test_guards.py`.
+The next death that night was a GRID screen offering `[confirm, cancel, ...]`:
+two real protocol verbs our alias table was silently rewriting to `proceed` and
+`return`, which the screen had not offered, so the line degraded to a `wait` on a
+screen that had already been answered. Both nights' failures are pinned in
+`tests/test_guards.py` and `tests/test_stdio.py`.
 
 ## Quick start — one command
 
@@ -81,22 +135,39 @@ python start.py --demo      # no game, no API key: watch a simulated run right n
 A dashboard opens in your browser and a simulated ascent plays out on it —
 every route preview, card score, confidence bar and fallback reason, live.
 
-To play with **real JEV** put `OPENROUTER_API_KEY=...` in a `.env` file, then:
+To have the brain **advise you while you play** (the default mode):
 
 ```bash
-python start.py --setup     # checks the environment, starts the dashboard,
-                            # and writes the game's mod config (backs up the old one)
+python start.py             # environment check + dashboard + the mod config line
 ```
 
-Start Slay the Spire through ModTheSpire with the mods enabled. The brain
-plays; the dashboard shows it thinking. `--setup` is remembered — after the
-first time, plain `python start.py` is the whole routine.
+Then launch Slay the Spire through ModTheSpire with the mods enabled and **play
+normally**. The panel on the left tells you what the brain would do and why; after
+each of your moves it shows what you did and whether it matched. The agent sends
+the game nothing but polls, and it will not even start a run for you — picking
+class, ascension and seed stays yours.
+
+To have it **play the run itself** instead: `python start.py --play`.
+
+On Windows the two double-clickable launchers cover both:
+`日常启动.bat` (advise) and `首次启动（含环境配置）.bat` (first run: environment
+check + mod config).
+
+With **real JEV** put `OPENROUTER_API_KEY=...` in a `.env` file, then:
+
+```bash
+python start.py --setup     # also writes the game's mod config (backs up the old one)
+```
+
+`--setup` is remembered — after the first time, plain `python start.py` is the
+whole routine.
 
 Everything start.py does, done manually:
 
 ```bash
 python -m spirebrain.doctor                              # what is missing, and how to fix it
 python run_dashboard.py --demo        # simulated run, mock JEV, no key needed
+python run_dashboard.py --advise-demo # the advisor panel: scripted player, real chain
 python run_dashboard.py --demo --optimistic          # JEV steers the run
 python run_dashboard.py --demo --backend openrouter  # REAL JEV answers live
 python run_dashboard.py               # server only; watch a live agent
@@ -197,7 +268,7 @@ id under `WorkshopItemDetails` means Steam knows you subscribed; only
 `WorkshopItemsInstalled` means the files are on disk.
 
 `install_mod_config` exists because the config file is read as **ISO-8859-1**
-(`SpireConfig.load()` 鈫?`Properties.load(FileInputStream)`), so a path with
+(`SpireConfig.load()` →`Properties.load(FileInputStream)`), so a path with
 non-ASCII characters written as raw UTF-8 is silently misread — and because the
 command is split on whitespace and passed to `ProcessBuilder`, so no path may
 contain a space. Both are hand-edit traps; the installer escapes, validates, and

@@ -39,6 +39,13 @@ Usage
     python -m spirebrain.install_mod_config --auto-start --write
     python -m spirebrain.install_mod_config --auto-start --ascension 0 --write
 
+    # which mode the launched agent runs in. `advise` (the default) recommends
+    # and never acts - it will not even start a run for you; `play` is the
+    # auto-player. The mode is written into the config on purpose: the installed
+    # file is the record of what a launched agent will do.
+    python -m spirebrain.install_mod_config --mode advise --write
+    python -m spirebrain.install_mod_config --mode play --auto-start --write
+
 Preview is the default because this writes outside the repository, into the user's
 own mod settings directory.
 """
@@ -222,7 +229,8 @@ def parse_config(text: str) -> dict:
 
 
 def default_command(backend: str = DEFAULT_BACKEND, *, auto_start: bool = False,
-                   klass: str | None = None, ascension: int | None = None) -> str:
+                   klass: str | None = None, ascension: int | None = None,
+                   mode: str | None = None) -> str:
     """`<python> <repo>/run_agent.py --backend <backend> [agent flags]`.
 
     Never the module file: running a script puts *that script's* directory first
@@ -234,14 +242,29 @@ def default_command(backend: str = DEFAULT_BACKEND, *, auto_start: bool = False,
     silently at the menu — measured 2026-09-21, and from the outside it is
     indistinguishable from a dead process — so the flag is offered here instead of
     being left to a hand edit of the config file.
+
+    `mode` is written into the config **explicitly** rather than left to the
+    agent's default, and for a reason a player can feel: this file is the only
+    record of what a launched agent will do, and a behaviour that changed because
+    a default changed elsewhere is a behaviour nobody agreed to. The installed
+    config says which mode it is, in the file itself.
     """
     agent = f"{sys.executable} {ROOT / 'run_agent.py'} --backend {backend}"
     if klass:
         agent += f" --class {klass}"
     if ascension is not None:
         agent += f" --ascension {int(ascension)}"
+    if mode:
+        agent += f" --mode {mode}"
     if auto_start:
-        agent += " --auto-start"
+        # Never in advisor mode: starting a run is a decision (which class, which
+        # ascension, which seed) and the advisor's whole rule is that decisions
+        # belong to the player. Silently dropping it here means the flag can be
+        # passed harmlessly instead of producing a config that contradicts itself.
+        if str(mode).lower() == "advise":
+            pass
+        else:
+            agent += " --auto-start"
     return agent
 
 
@@ -276,12 +299,26 @@ def main(argv: list[str]) -> int:
         return 0
 
     backend = value("backend") or DEFAULT_BACKEND
-    command = value("command") or default_command(backend)
+    mode = value("mode")
+    # These three were documented in the usage block but never actually read, so
+    # `--auto-start --write` silently wrote a config without it. Found while
+    # adding `--mode` (2026-09-22): a documented flag that does nothing is worse
+    # than a missing one, because it costs a user their debugging session.
+    command = value("command") or default_command(
+        backend, mode=mode,
+        auto_start="--auto-start" in argv,
+        klass=value("class"),
+        ascension=int(value("ascension")) if value("ascension") else None)
     argv_check = check_argv(command)
 
     print(f"repo            : {ROOT}")
     print(f"config file     : {path}")
     print(f"exists yet      : {path.exists()}")
+    if mode:
+        print(f"agent mode      : {mode}"
+              + ("  (recommends only - you keep the mouse and the keyboard;"
+                 " starting a run included)" if mode == "advise"
+                 else "  (auto-play: the agent plays the run itself)"))
     print()
     print(f"command (raw)   : {command}")
     print(f"argv the mod will build ({argv_check['argv_count']} elements):")

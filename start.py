@@ -1,4 +1,5 @@
-"""One command to watch the brain play. Built for people who skip READMEs.
+"""One command to watch the brain play — or to have it coach you. Built for people
+who skip READMEs.
 
     python start.py
 
@@ -10,9 +11,22 @@ That is the whole interface. It:
      with --setup), so the game spawns the agent with the dashboard already
      wired — every decision streams to the page with no further steps.
 
+**Two ways to use it, and the default is the one that helps you play:**
+
+    python start.py                 # 军师模式 / advice: it recommends, YOU play
+    python start.py --play          # auto-play: the agent plays the run itself
+
+The advice mode is the default because this project exists to make the player
+better, not to replace them: an agent that quietly plays the game for you is the
+wrong default for a coach. In advice mode the agent sends the game nothing but
+polls — no play, no choose, no proceed — and it will not even start a run for
+you. Advice appears on the dashboard and the in-game overlay; what you actually
+did, and whether you followed it, lands in `logs/advice.jsonl`.
+
 Everything is optional:
 
     python start.py --setup            # also write the mod config (backs up)
+    python start.py --play             # auto-play instead of advising
     python start.py --backend mock     # force the offline brain (default auto)
     python start.py --port 9000        # move the dashboard
     python start.py --no-browser       # do not open a browser tab
@@ -73,11 +87,17 @@ def start_dashboard(port: int, open_browser: bool) -> tuple[object, str]:
     return server, url
 
 
-def mod_config_command(url: str, backend: str, auto_start: bool) -> str:
-    """The exact command line CommunicationMod should launch, with the dashboard wired."""
+def mod_config_command(url: str, backend: str, auto_start: bool, mode: str) -> str:
+    """The exact command line CommunicationMod should launch, with the dashboard wired.
+
+    The mode is part of the command, never left implicit: this string is the only
+    record of what a launched agent will do, and a player who later wonders why
+    the game is (or is not) playing itself should find the answer in their own mod
+    config rather than in a default that changed in a commit.
+    """
     from spirebrain.install_mod_config import default_command
 
-    command = default_command(backend, auto_start=auto_start)
+    command = default_command(backend, auto_start=auto_start, mode=mode)
     return f"{command} --dashboard-url {url}/publish"
 
 
@@ -113,8 +133,24 @@ def main(argv: list[str] | None = None) -> int:
     open_browser = "--no-browser" not in argv
     port = int(_value(argv, "port") or DEFAULT_PORT)
     backend = _value(argv, "backend") or detect_backend()
+    mode = ("play" if "--play" in argv else
+            "advise" if "--advise" in argv else (_value(argv, "mode") or "advise"))
+    if mode not in ("advise", "play"):
+        print(f"unknown mode {mode!r}; using 'advise' (have: advise, play)")
+        mode = "advise"
+    # Advisor mode never auto-starts a run: picking class/ascension/seed is the
+    # player's call. Kept as a local so the printed command and the written config
+    # cannot disagree with what the agent then does.
+    auto_start = mode == "play"
 
     print("Jev Spire Brain — start\n")
+    if mode == "advise":
+        print("mode: ADVISE (军师模式) - the agent will recommend, never play:")
+        print("      it sends the game only polls, and it will not start a run for you.")
+        print("      Your advice appears on the dashboard; what you did lands in")
+        print("      logs/advice.jsonl. Use --play for the auto-player.\n")
+    else:
+        print("mode: PLAY (代打模式) - the agent plays the run itself.\n")
 
     # [1/3] environment ------------------------------------------------------- #
     print("[1/3] checking the environment (details: python -m spirebrain.doctor)")
@@ -171,9 +207,11 @@ def main(argv: list[str] | None = None) -> int:
             server.shutdown()
         return 0
 
-    command = mod_config_command(url, backend, auto_start=True)
+    command = mod_config_command(url, backend, auto_start, mode)
     print("\n[3/3] tell the game to launch the brain:")
     print(f"      {command}")
+    if mode == "advise":
+        print("      (advisor mode: no --auto-start - starting a run stays yours)")
     if do_setup:
         print("      --setup: writing this into CommunicationMod's config (backs up the old one)…")
         if write_mod_config(command):
@@ -185,8 +223,13 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print("      or let us write it for you:  python start.py --setup")
 
-    print("\nLeave this window open. Every decision the brain makes appears on the "
-          "dashboard as it happens.")
+    if mode == "advise":
+        print("\nLeave this window open and keep the dashboard in view. In the game you")
+        print("play exactly as you normally would; the panel on the left tells you what")
+        print("the brain would do and why, and then shows what you actually did.")
+    else:
+        print("\nLeave this window open. Every decision the brain makes appears on the "
+              "dashboard as it happens.")
     print("Press Ctrl+C here to stop the dashboard.")
     try:
         while True:

@@ -216,12 +216,16 @@ python -m spirebrain.sim.run_offline
    (our stderr — the ready banner, the menu notice, the shutdown summary) and
    `logs/pipe.jsonl` in the repo (every message the game sent, every command we
    answered).
-3. **What you see at the main menu depends on auto-start.** Without it, the agent
-   prints one line to stderr and waits — you start the run by hand. With
-   `--auto-start` (recommended for unattended sessions:
-   `python -m spirebrain.install_mod_config --auto-start --write`), it sends
-   `start IRONCLAD 0` itself when the game offers `start`.
-4. Each stable in-game state gets exactly one command.
+3. **What you see at the main menu depends on the mode and auto-start.** In
+   **advise** mode (the default) the agent prints one line and waits — you start
+   the run by hand, because class/ascension/seed are your decisions, and
+   `--auto-start` is ignored on purpose. In `play` mode without `--auto-start` it
+   also waits; with `--auto-start` (recommended for unattended sessions:
+   `python -m spirebrain.install_mod_config --auto-start --mode play --write`) it
+   sends `start IRONCLAD 0` itself when the game offers `start`.
+4. Each stable in-game state gets exactly one command. In advise mode that command
+   is always a poll (`wait`/`state`), and the recommendation goes to the
+   dashboard and `logs/advice.jsonl` instead of to the game.
 
 Success criteria — the goal is **pipe integrity**, not intelligence:
 
@@ -271,6 +275,34 @@ JEV_BACKEND=openrouter
 `JEV_BACKEND=mock` needs no key and no network. Real JEV is reached through
 `POST /api/v1/systemone` with model `jev-1.13` — the chat-completions endpoint
 rejects it. Details and the measured numbers are in `docs/JEV_API.md`.
+
+### Which mode the game-spawned agent runs in
+
+| Mode | Behaviour | Flag |
+|---|---|---|
+| `advise` (default) | Recommends. Sends only `wait`/`state`. Ignores `--auto-start`. | (nothing) or `--mode advise` |
+| `play` | Auto-plays; the mode the offline measurements needed. | `--mode play` |
+
+The mode is written into the mod config rather than left implicit, so the file on
+disk is the record of what the launched agent will do:
+
+```bash
+python -m spirebrain.install_mod_config --mode advise --write   # coach (default)
+python -m spirebrain.install_mod_config --mode play --auto-start --write  # bot
+```
+
+Two logs, two jobs, both in the repo:
+
+| File | What is in it |
+|---|---|
+| `logs/pipe.jsonl` | every message the game sent and every command we answered (in advise mode: all polls) |
+| `logs/advice.jsonl` | every recommendation, and every verdict on what you did — with the evidence for the inference (`hand_lost`, `energy_spent`, `gold`, `deck_gained`, …) |
+
+If the advice panel never fills in, check in this order: is the dashboard running
+(the agent publishes over HTTP and is silent by design when nothing is listening);
+does `logs/advice.jsonl` have lines (then the chain worked and the page is the
+problem); is the screen one the router models (an unmodeled screen gets no advice
+by design — there is nothing to recommend on a screen we cannot read).
 
 ## 7. Troubleshooting
 

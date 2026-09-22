@@ -23,6 +23,12 @@ Three event kinds, chosen to be exactly what a spectator needs:
     decision    — one Decision: value, confidence, probabilities, fallback, why
     run_end     — summary line when a transport finishes or a sim run ends
 
+Advisor mode adds two more, because "I suggest X" and "you did Y" are two facts
+and a player needs both:
+
+    advice      — a recommendation: what to play, why, how sure, in Chinese
+    outcome     — what the player actually did, and whether it matched
+
 Nothing here knows about HTTP or the game; `overlay/server.py` and
 `driver/agent.py` are the two ends.
 """
@@ -36,7 +42,7 @@ from pathlib import Path
 
 # Event kinds the dashboard understands. Kept as a tuple so tests can assert
 # the vocabulary the same way PROTOCOL_VERBS pins the game's verb set.
-EVENT_KINDS = ("run_state", "decision", "run_end")
+EVENT_KINDS = ("run_state", "decision", "advice", "outcome", "run_end")
 
 
 class DecisionFeed:
@@ -173,6 +179,52 @@ def decision_event(decision, command: dict) -> dict:
         "fallback": bool(decision.used_fallback),
         "detail": _jsonable(decision.detail),
         "command": command,
+    }
+
+
+def advice_event(advice, tally: dict | None = None,
+                 agreement: float | None = None) -> dict:
+    """One recommendation, as the player sees it.
+
+    `label` is the sentence the panel shows large ("出「痛击」→ 咔咔"); `reason`
+    is the why, straight from the decision that produced it. `confidence` is 0.0
+    for screens answered by navigation rules rather than the model, which is why
+    the dashboard renders 0 as "规则" and not as a 0% certainty.
+    """
+    return {
+        "point": advice.point,
+        "screen": advice.screen,
+        "label": advice.label,
+        "verb": str((advice.command or {}).get("command", "")),
+        "command": advice.command,
+        "key": list(advice.key) if advice.key else None,
+        "reason": advice.reason,
+        "confidence": round(float(advice.confidence or 0.0), 4),
+        "fallback": bool(advice.fallback),
+        "act": advice.act,
+        "floor": advice.floor,
+        "tally": dict(tally or {}),
+        "agreement": agreement,
+    }
+
+
+def outcome_event(outcome, tally: dict | None = None,
+                  agreement: float | None = None) -> dict:
+    """What the player did with the advice, and the running agreement rate.
+
+    `evidence` travels verbatim: it is the proof of the inference, and the only
+    defence against a verdict nobody can audit. `acted` is None when no single
+    action could be identified — the honest case, rendered as "没看出来".
+    """
+    return {
+        "point": outcome.advice.point,
+        "verdict": outcome.verdict,
+        "advice_label": outcome.advice.label,
+        "acted_label": outcome.acted_label,
+        "acted": list(outcome.acted_key) if outcome.acted_key else None,
+        "evidence": _jsonable(outcome.evidence),
+        "tally": dict(tally or {}),
+        "agreement": agreement,
     }
 
 

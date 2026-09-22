@@ -381,6 +381,81 @@ def test_end_to_end_bridge_agent_to_server_to_subscriber():
             server.shutdown()
 
 
+def test_state_snapshot_carries_the_advice_for_pollers():
+    """The in-game overlay reads /state, not SSE.
+
+    A recommendation that only ever reached the browser tab would be advice
+    nobody reads while playing, so the snapshot has to carry it — including the
+    verdict on the player's last choice and the running agreement rate.
+    """
+    from spirebrain.overlay.feed import DecisionFeed
+    from spirebrain.overlay.server import _state_snapshot
+
+    feed = DecisionFeed()
+    feed.publish("run_state", {"act": 1, "floor": 3, "hp": 70, "max_hp": 80,
+                               "gold": 99, "relics": []})
+    feed.publish("advice", {"point": "combat", "label": "出「痛击」 → 咔咔",
+                            "reason": "对手在下回合打 12", "confidence": 0.82,
+                            "fallback": False, "act": 1, "floor": 3,
+                            "tally": {"match": 0, "mismatch": 0, "unobserved": 0},
+                            "agreement": None})
+    feed.publish("outcome", {"point": "combat", "verdict": "match",
+                             "advice_label": "出「痛击」 → 咔咔",
+                             "acted_label": "出「痛击」 → 咔咔",
+                             "tally": {"match": 1, "mismatch": 0, "unobserved": 0},
+                             "agreement": 1.0})
+
+    snap = _state_snapshot(feed)
+    assert snap["last_advice"]["label"] == "出「痛击」 → 咔咔"
+    assert snap["last_advice"]["confidence"] == 0.82
+    assert snap["last_outcome"]["verdict"] == "match"
+    assert snap["last_outcome"]["agreement"] == 1.0
+    assert snap["run_state"]["floor"] == 3
+
+
+def test_state_snapshot_is_empty_but_shaped_before_anything_happens():
+    from spirebrain.overlay.feed import DecisionFeed
+    from spirebrain.overlay.server import _state_snapshot
+
+    snap = _state_snapshot(DecisionFeed())
+    assert snap == {"last_decision": None, "last_advice": None,
+                    "last_outcome": None, "run_state": None}
+
+
+def test_state_snapshot_finds_the_outcome_past_the_agents_own_run_state():
+    """The live ordering, pinned — this is where the first version broke.
+
+    In a real advisor session the agent's `observe()` publishes a `run_state`
+    *between* the verdict and the recommendation (verdict -> observe -> decision
+    -> advice). A scan that stopped as soon as it had decision+advice+run_state
+    therefore stopped one event short of the outcome: the browser panel showed a
+    verdict while /state — the surface the in-game overlay reads — reported none.
+    Found 2026-09-22 by reading /state of a running demo, not by a unit test.
+    """
+    from spirebrain.overlay.feed import DecisionFeed
+    from spirebrain.overlay.server import _state_snapshot
+
+    feed = DecisionFeed()
+    feed.publish("run_state", {"act": 1, "floor": 3})            # step 1
+    feed.publish("advice", {"point": "combat", "label": "出「打击」",
+                            "confidence": 0.7, "tally": {}, "agreement": None})
+    feed.publish("run_state", {"act": 1, "floor": 3})            # demo's own
+    feed.publish("outcome", {"point": "combat", "verdict": "match",
+                             "advice_label": "出「打击」", "acted_label": "出「打击」",
+                             "tally": {"match": 1}, "agreement": 1.0})
+    feed.publish("run_state", {"act": 1, "floor": 3})            # agent's observe()
+    feed.publish("decision", {"point": "combat", "value": "end",
+                              "confidence": 0.4, "detail": {}})
+    feed.publish("advice", {"point": "combat", "label": "结束回合",
+                            "confidence": 0.4, "tally": {"match": 1},
+                            "agreement": 1.0})                   # newest
+
+    snap = _state_snapshot(feed)
+    assert snap["last_advice"]["label"] == "结束回合"   # newest advice wins
+    assert snap["last_outcome"] is not None, "scan stopped before the verdict"
+    assert snap["last_outcome"]["verdict"] == "match"
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
