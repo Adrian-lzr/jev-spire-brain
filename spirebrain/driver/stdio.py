@@ -269,6 +269,31 @@ def to_command_line(command: dict) -> str:
     return verb  # end / proceed / return / state / click
 
 
+def _scrub_surrogates(obj):
+    """Drop the lone surrogates the CJK fork's JSON escapes can carry.
+
+    `json.loads` happily turns a `\\uD8xx` escape into a LONE surrogate
+    character (pairs are combined; anything left is alone), and the first
+    `.encode("utf-8")` on it raises UnicodeEncodeError - surrogates not
+    allowed. That is how one in-game state killed both agents 11 seconds into
+    the 2026-09-22 20:49 session: no advice, no error anywhere the player
+    could see, and the panel left saying "agent not online". Scrubbing at this
+    one boundary fixes every consumer (fingerprint, witness, agent, logging)
+    at once.
+    """
+    if isinstance(obj, str):
+        try:
+            obj.encode("utf-8")
+            return obj
+        except UnicodeEncodeError:
+            return obj.encode("utf-8", "ignore").decode("utf-8")
+    if isinstance(obj, dict):
+        return {_scrub_surrogates(k): _scrub_surrogates(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_scrub_surrogates(v) for v in obj]
+    return obj
+
+
 def _verb_of(line: str) -> str:
     return line.split(" ", 1)[0].strip().lower()
 
@@ -456,7 +481,10 @@ class StdioTransport:
             blob = json.dumps(game, sort_keys=True, default=str, ensure_ascii=False)
         except (TypeError, ValueError):
             blob = repr(game)
-        return hashlib.sha1(blob.encode("utf-8")).hexdigest()
+        # "replace", not strict: a lone surrogate reaching this deep (scrub
+        # missed it, or a replay fed the transport directly) degrades to a
+        # stable hash instead of killing the agent - measured 2026-09-22 20:49.
+        return hashlib.sha1(blob.encode("utf-8", "replace")).hexdigest()
 
     @staticmethod
     def _screen_signature(game: dict) -> str:
@@ -478,6 +506,23 @@ class StdioTransport:
     def handle_message(self, message: dict) -> str | None:
         """Return the command line to send, or None to stay silent."""
         self.messages += 1
+        # One poisoned message (lone surrogates from the CJK fork's escapes)
+        # must not take the whole agent down: every downstream .encode() is
+        # guarded by this scrub, and any OTHER unexpected error inside one
+        # message degrades to "answer state and keep breathing" rather than
+        # killing the loop (the 20:49 death printed a traceback and exited).
+        message = _scrub_surrogates(message)
+        try:
+            return self._handle_message_inner(message)
+        except Exception:
+            import traceback
+            traceback.print_exc(file=self.warn_stream)
+            self.errors += 1
+            # STATE is documented as always available; asking for a fresh one
+            # is the one reply that can never make things worse.
+            return "state"
+
+    def _handle_message_inner(self, message: dict) -> str | None:
 
         if message.get("error"):
             # The game is waiting for input after an error; silence would stall
@@ -836,6 +881,8 @@ class StdioTransport:
             return None
         if not isinstance(message, dict):
             return None
+        # handle_message scrubs lone surrogates (CJK fork escapes) before any
+        # consumer encodes the state; that one boundary covers live and replay.
         return self.handle_message(message)
 
     def run(self, instream: Iterable[str], outstream, *, send_ready: bool = True) -> int:

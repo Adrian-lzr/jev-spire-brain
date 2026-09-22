@@ -263,7 +263,7 @@ def parse_config(text: str) -> dict:
 
 def default_command(backend: str = DEFAULT_BACKEND, *, auto_start: bool = False,
                    klass: str | None = None, ascension: int | None = None,
-                   mode: str | None = None) -> str:
+                   mode: str | None = None, dashboard_url: str | None = None) -> str:
     """`<python> <repo>/run_agent.py --backend <backend> [agent flags]`.
 
     Never the module file: running a script puts *that script's* directory first
@@ -281,6 +281,11 @@ def default_command(backend: str = DEFAULT_BACKEND, *, auto_start: bool = False,
     record of what a launched agent will do, and a behaviour that changed because
     a default changed elsewhere is a behaviour nobody agreed to. The installed
     config says which mode it is, in the file itself.
+
+    `dashboard_url` wires the agent to the in-game panel: without it an advisor
+    runs deaf — it advises into a log nobody reads while the overlay waits for
+    events that never arrive. That exact gap (config written without the URL,
+    2026-09-22 20:49) is why this parameter exists; `start.py` always passes it.
     """
     agent = f"{sys.executable} {ROOT / 'run_agent.py'} --backend {backend}"
     if klass:
@@ -298,6 +303,12 @@ def default_command(backend: str = DEFAULT_BACKEND, *, auto_start: bool = False,
             pass
         else:
             agent += " --auto-start"
+    if dashboard_url:
+        # The publish endpoint, not the page: the agent POSTs events to it.
+        # Last on the line, matching the contract test_start pins.
+        if not dashboard_url.rstrip("/").endswith("/publish"):
+            dashboard_url = dashboard_url.rstrip("/") + "/publish"
+        agent += f" --dashboard-url {dashboard_url}"
     return agent
 
 

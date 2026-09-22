@@ -338,6 +338,21 @@ python java/build.py --check       # run the mod's own poller against a live /st
   在运行*. This exists because the first version drew a dim grey line at the
   top-left in that state, and a player reasonably reported "the panel never
   appears" while the real cause was an empty `command=` in a config file.
+* **A poisoned state cannot kill the agent (the 20:49 death).** The CJK fork can
+  emit a state whose JSON escapes contain a lone surrogate (`\uD8xx`), which
+  `json.loads` materializes into a lone surrogate character; the first
+  `.encode("utf-8")` raised `UnicodeEncodeError` and BOTH agents died 11 seconds
+  into a live session — the panel then said "agent not online" forever. The
+  transport now scrubs lone surrogates at the one boundary every consumer reads
+  (`_scrub_surrogates`), no single message can end the loop (a failure degrades
+  to a `state` reply with the traceback on stderr), and the fingerprint encodes
+  with `errors="replace"` as the deep backstop. Pinned in `tests/test_poison.py`.
+* **A hand-written config can launch a deaf agent.** The `command=` must carry
+  `--dashboard-url http://127.0.0.1:8787/publish`; without it an advisor runs
+  fine and publishes nowhere (exactly the 20:49 gap). `default_command()` takes
+  a `dashboard_url` parameter and `start.py` always passes it; both family
+  configs are written complete. Verify with
+  `python -m spirebrain.install_mod_config --show`.
 * **One dashboard per port.** Python's `HTTPServer` sets `SO_REUSEADDR`, which on
   Windows lets several processes bind the same port; three stale demo servers once
   shared 8787 and answered `/state` with `404` from old code. The server now

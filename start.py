@@ -109,8 +109,11 @@ def mod_config_command(url: str, backend: str, auto_start: bool, mode: str) -> s
     """
     from spirebrain.install_mod_config import default_command
 
-    command = default_command(backend, auto_start=auto_start, mode=mode)
-    return f"{command} --dashboard-url {url}/publish"
+    # The /publish endpoint, not the page: the agent POSTs events to it, and
+    # default_command appends it when given the bare base URL.
+    command = default_command(backend, auto_start=auto_start, mode=mode,
+                              dashboard_url=url)
+    return command
 
 
 def write_mod_config(command: str) -> bool:
