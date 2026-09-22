@@ -37,6 +37,7 @@ from spirebrain.jev_brain.state import (
     RunContext,
     card_line,
     deck_digest,
+    deck_keys,
     english_name,
     lookup_keys,
     map_choices,
@@ -289,6 +290,12 @@ class SpireBrainAgent:
             self.jev, len(deck), self.strategy["deck_policy"]["max_cards"],
             deck_digest=deck_digest(deck), goal=self.goal, run=self.run,
             acceptance=self.acceptance,
+            # The deck itself, not just its size: the local grader needs to know
+            # what the deck already does (and which act we are in) to say whether
+            # an offered card fills a real gap. See spirebrain/cards/deck.py.
+            # `deck_keys`, not `deck`: the live deck is raw game entries and the
+            # knowledge base speaks card ids (the `id`-before-`name` rule).
+            deck_cards=deck_keys(deck), act=self._budget().act,
         ).decide(descriptions)
         if d.value == "skip":
             # There is no `skip` verb in the protocol: RETURN *is* skip

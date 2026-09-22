@@ -178,6 +178,26 @@ def relic_effect_text(name: str) -> str | None:
         return None
 
 
+def deck_keys(cards: Iterable[dict]) -> list[str]:
+    """The game-data lookup key for each card in a deck, `id` before `name`.
+
+    Exists because the live deck arrives as raw game entries (`{"id": "Inflame",
+    "cost": 1, ...}`) while everything keyed on card identity — the card
+    knowledge base, the metadata table — speaks ids. Converting in one place
+    keeps the `id`-before-`name` rule (see `lookup_keys`) from being re-derived,
+    and re-broken, at every call site.
+    """
+    out: list[str] = []
+    for card in cards or []:
+        if isinstance(card, str):
+            out.append(card)
+            continue
+        keys = lookup_keys(card) if isinstance(card, dict) else []
+        if keys:
+            out.append(keys[0])
+    return out
+
+
 def deck_digest(cards: Iterable[dict], max_lines: int = 40,
                 character: str | None = None) -> str:
     """Flat, countable digest of the deck, with real effect text per card.

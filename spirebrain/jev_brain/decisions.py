@@ -357,11 +357,36 @@ class MapRouter:
 # 2. Card rewards
 # --------------------------------------------------------------------------- #
 class CardRewardJudge:
-    """Card rewards: Score x candidates against the deck, with a skip path."""
+    """Card rewards: Score x candidates against the deck, with a skip path.
+
+    Two-sided since 2026-09-22 evening. The model's Score answers "how much
+    would this card improve the deck" from a prompt; the local grader
+    (`spirebrain.cards`) answers the same question from the deck the player
+    actually has — size, the capabilities it is short of, the archetype it has
+    already committed to, and the act it is in (`docs/CARD_STRATEGY.md` has the
+    sources for every rule). Neither is trusted alone:
+
+    * the model decides, as before, and its gate still owns accept/skip;
+    * when two candidates are within `TIE_MARGIN` of each other the model has
+      effectively abstained, so the deck decides;
+    * if the model is unavailable, a confident local grade advises instead of a
+      blind skip — the player losing their coach because a request failed is
+      worse than a rule-based recommendation that shows its working.
+
+    Every local grade carries its reasons, and those go into `detail["reason"]`,
+    which is what the in-game panel shows.
+    """
+
+    #: Model scores this close to each other are a coin flip, not a ranking.
+    TIE_MARGIN = 0.06
+    #: A local grade this good is decisive enough to carry a decision the model
+    #: could not make (a "strong" grade; see `cards.deck.PickGrade.verdict`).
+    LOCAL_RESCUE = 0.70
 
     def __init__(self, jev: JevClient, deck_size: int, max_cards: int = 25,
                  deck_digest: str = "", goal: str = "", run: RunContext | None = None,
-                 acceptance: str | None = None) -> None:
+                 acceptance: str | None = None, deck_cards: list[str] | None = None,
+                 act: int = 1, effects: dict[str, str] | None = None) -> None:
         self.jev = jev
         self.deck_size = deck_size
         self.max_cards = max_cards
@@ -369,6 +394,63 @@ class CardRewardJudge:
         self.goal = goal
         self.run = run
         self.acceptance = acceptance
+        self.deck_cards = deck_cards
+        self.act = act
+        self.effects = effects
+
+    # -- local evaluation --------------------------------------------------- #
+    def _local_grades(self, candidates: dict[str, str]) -> dict:
+        """Grade each candidate against the real deck, or {} when we cannot.
+
+        Abstains in two cases, and both are about evidence rather than caution:
+
+        * no deck was supplied — with nothing to profile, every axis reads as
+          starved and every candidate looks like a 1.0 pick, which is an artefact
+          of the missing input, not a judgement about the cards;
+        * most of the deck is unrecognised — a profile built from three known
+          cards and twelve unknown ones describes the three, and speaking from
+          it would be inventing the rest.
+
+        The rule the whole module follows: no evidence, no local claim.
+        """
+        if not self.deck_cards:
+            return {}
+        try:
+            from spirebrain.cards import grade, profile
+        except Exception:  # noqa: BLE001 - knowledge is optional, never fatal
+            return {}
+        prof = profile(list(self.deck_cards), self.effects)
+        if len(prof.unknown) > max(1, len(prof.cards) // 2):
+            return {}
+        return {name: grade(prof, name, self.act, self.effects) for name in candidates}
+
+    def _local_note(self, grades: dict, chosen: str | None) -> str:
+        """The one-line, player-facing justification for the local layer."""
+        if not grades:
+            return ""
+        if chosen and chosen in grades:
+            return grades[chosen].reason_text()
+        return "候选都不算强"
+
+    def _rescued(self, grades: dict) -> object | None:
+        """The local pick when it is decisive, else None.
+
+        This is the fix for the thing the player actually reported: a model that
+        answers with a flat distribution (or hedges) rejected *every* card
+        reward, so the advisor had nothing to say on the one screen where the
+        whole archetype is decided. When the deck-side evidence is strong, it
+        carries the decision and says so.
+
+        No lead requirement on purpose. An earlier version demanded the best
+        grade also beat the runner-up by 0.10, and then a strength deck offered
+        Limit Break and Demon Form — two excellent cards — answered "skip",
+        which is the one outcome strictly worse than picking either. Ties among
+        strong cards take the better one; only "nothing here is strong" skips.
+        """
+        if not grades:
+            return None
+        best = max(grades.values(), key=lambda g: g.score)
+        return best if best.score >= self.LOCAL_RESCUE else None
 
     def decide(self, candidates: dict[str, str]) -> Decision:
         """candidates: {card_name: description}. Returns a card name or 'skip'."""
@@ -377,6 +459,7 @@ class CardRewardJudge:
                             {"reason": f"deck at {self.deck_size}/{self.max_cards} cards"})
         if not candidates:
             return Decision("card_reward", "skip", 1.0, True, {"reason": "empty reward"})
+        grades = self._local_grades(candidates)
         try:
             questions = {
                 name: ScoreSpec(
@@ -393,14 +476,57 @@ class CardRewardJudge:
             scores = {k: round(v.value, 4) for k, v in resp.answers.items()}
             gate = evaluate_score(best, mode=self.acceptance)
             gate["ranking"] = sorted(scores, key=scores.get, reverse=True)
+            local_text = {n: g.reason_text() for n, g in grades.items()}
             if not gate["accepted"]:
+                rescued = self._rescued(grades)
+                if rescued is not None:
+                    # Honest bookkeeping: the model did not carry this one.
+                    return Decision(
+                        "card_reward", rescued.card_id, 0.0, True,
+                        {"scores": scores, "gate": gate, "best": best_name,
+                         "local": {n: g.score for n, g in grades.items()},
+                         "rescued": True,
+                         "reason": (f"模型判分不明确（{gate['reason']}），"
+                                    f"按卡组评估拿：{rescued.reason_text()}")})
+                note = self._local_note(grades, None)
                 return Decision("card_reward", "skip", best.confidence, True,
                                 {"scores": scores, "best": best_name, "gate": gate,
-                                 "reason": f"best card rejected: {gate['reason']}"})
-            return Decision("card_reward", best_name, best.confidence, False,
-                            {"scores": scores, "gate": gate})
+                                 "local": {n: g.score for n, g in grades.items()},
+                                 "reason": (f"best card rejected: {gate['reason']}"
+                                            + (f"；本地评估：{note}" if note else ""))})
+            chosen = self._tie_break(scores, grades, best_name)
+            detail = {"scores": scores, "gate": gate, "best": best_name,
+                      "local": {n: g.score for n, g in grades.items()}}
+            reason = local_text.get(chosen) or ""
+            if chosen != best_name:
+                detail["tie_break"] = {"model": best_name, "local": chosen,
+                                       "margin": self.TIE_MARGIN}
+                reason = (f"模型对 {best_name} 与 {chosen} 判分接近，按卡组适配选："
+                          f"{reason}")
+            if reason:
+                detail["reason"] = reason
+            return Decision("card_reward", chosen, best.confidence, False, detail)
         except Exception:  # noqa: BLE001
+            # The model is unavailable. A deck-aware rule beats no advice at all,
+            # and it is auditable: the reason names the cards it weighed.
+            best_local = max(grades.values(), key=lambda g: g.score, default=None)
+            if best_local is not None and best_local.score >= self.LOCAL_STANDALONE:
+                return Decision(
+                    "card_reward", best_local.card_id, 0.0, True,
+                    {"scores": {}, "local": {n: g.score for n, g in grades.items()},
+                     "reason": f"模型不可用，按卡组评估：{best_local.reason_text()}"})
             return Decision("card_reward", "skip", 0.0, True, {"reason": "jev error"})
+
+    def _tie_break(self, scores: dict[str, float], grades: dict[str, object],
+                   best_name: str) -> str:
+        """When the model's top scores are indistinguishable, the deck decides."""
+        if not grades:
+            return best_name
+        top = scores.get(best_name, 0.0)
+        tied = [n for n, v in scores.items() if n in grades and top - v <= self.TIE_MARGIN]
+        if len(tied) < 2:
+            return best_name
+        return max(tied, key=lambda n: grades[n].score)  # type: ignore[attr-defined]
 
     def _state(self, candidates: dict) -> dict:
         thin: dict = {"deck": {"size": self.deck_size, "contents": self.deck_digest}}
