@@ -29,6 +29,67 @@ Legend: `[x]` done · `[~]` done but unverifiable until an external condition is
 - [ ] Confirm on the live pipe: grid index order, shop shelf order, and that the
   `screen_state` field name holds (all flagged `PHASE 1 VERIFY` in code)
 
+## Phase 1.5 — The interaction layer (2026-09-22)
+- [x] `overlay/feed.py` — `DecisionFeed`: thread-safe event stream
+  (`run_state` / `decision` / `run_end`), backlog replay for late subscribers,
+  dead-subscriber reaping, optional JSONL journal. A throwing feed can never
+  break a run (`test_agent_survives_a_hostile_feed`)
+- [x] `driver/agent.py` — optional `feed=` argument: `observe()` publishes the
+  run snapshot, `_record()` publishes every decision. `None` (default) changes
+  nothing about the existing behaviour
+- [x] `sim/run_offline.py` — the harness accepts `feed=` too, so a simulated
+  ascent streams exactly like a live one; map decisions carry the full probe
+  table (per-node over-budget confidence) for the route preview
+- [x] `overlay/server.py` — stdlib SSE server (`GET /` page, `GET /events`
+  stream, `POST /publish` for cross-process agents, `GET /health`); bound to
+  127.0.0.1 only. Found and fixed here: `feed or DecisionFeed()` silently
+  swapped in a second feed because an *empty* feed is falsy (`__len__`)
+- [x] `overlay/dashboard.html` — the dashboard: HP + budget bars, decision
+  cards with confidence bars, Score rankings, Noul probe chips, posture and
+  fallback reasons, SSE auto-reconnect
+- [x] `run_dashboard.py` + `overlay/demo.py` — one command to watch a full
+  simulated run (`--demo`, `--optimistic`, or `--backend openrouter` for real
+  JEV answers)
+- [x] 13 new tests in `tests/test_overlay.py` (all 14 test files green)
+- [x] **Live-pipe wiring (2026-09-22)** — `BridgeFeed` + `stdio --dashboard-url`:
+  the game-spawned agent forwards every decision to a running dashboard over
+  HTTP, silently and by design when no dashboard is up (no port binding inside
+  the game's process tree; spectator absence is never an error). Proven end to
+  end: agent -> bridge -> server -> SSE subscriber
+  (`test_end_to_end_bridge_agent_to_server_to_subscriber`)
+- [x] **Route preview on the map screen (2026-09-22)** — map decisions now
+  carry `detail.choices` (labelled nodes) and `detail.probes[].damage`; the
+  dashboard renders each reachable path with its predicted damage and
+  over-budget verdict, the chosen route highlighted, and the actual spend
+  beneath the probe upper bound. Into the Breach's telegraphing, applied to
+  routing
+
+- [x] **One-command launcher (2026-09-22)** — `start.py`: doctor → dashboard →
+  browser, in three labelled steps, every failure naming its fix. `--demo`
+  plays a simulated run with no game and no key; `--setup` writes the mod
+  config with the dashboard pre-wired and is remembered
+  (`config/.setup-done`), so the whole routine afterwards is
+  `python start.py` + start the game. Backend auto-detects (openrouter with a
+  key, mock without) — the demo never depends on a key. Found by testing:
+  `install_mod_config.check_argv` flagged URLs as missing files; fixed there
+- [x] 18 overlay tests + 5 launcher tests (`tests/test_start.py`); 15/15 test
+  files green
+
+- [x] **Runaway guards, ported from Ethics03/jevspire (2026-09-22)** — the only
+  other CommunicationMod+JEV project, and the only three of its mechanisms we
+  lacked, all "stop spending, keep the game alive":
+  1. **Stall guard** (`stdio.py`): the same game state coming back playable
+     after we sent a command for it means the command did not take effect;
+     after 2 repeats auto-decisions latch off (stderr + a `run_end` feed event)
+     until a genuinely new state arrives. `state`/`wait` never arm the guard.
+  2. **Action limit** (`stdio.py`): process-level cap, default 200, env
+     `JEVBRAIN_MAX_ACTIONS` (<=0 unlimited), with a loud warning and a feed
+     event when it trips — a cap that trips silently looks like a crash.
+  3. **Navigation without the model** (`agent.py`): non-decision screens get
+     Proceed (not a JEV call, not a pipe-stalling `wait`), and a shop is asked
+     once per floor — the post-purchase state is the room wanting an exit.
+- [x] 11 guard tests (`tests/test_guards.py`); 16/16 test files green
+
 ## Phase 2 — The brain (offline-first)
 - [x] `jev_brain/client.py` — three primitives, specs, answers, confidence conventions
 - [x] `jev_brain/client_real.py` — real HTTP client (TypeSafe direct + Cloudflare

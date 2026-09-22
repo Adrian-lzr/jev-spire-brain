@@ -148,7 +148,8 @@ def load_seeds(which: str) -> list[int]:
 
 def run_one_simulation(seed: int = 0, confidence: float | None = None,
                        backend: str | None = None,
-                       acceptance: str | None = None) -> dict:
+                       acceptance: str | None = None,
+                       feed=None) -> dict:
     """One ascent.
 
     `backend=None` uses the mock (pessimistic by default, or `confidence=` for the
@@ -157,6 +158,10 @@ def run_one_simulation(seed: int = 0, confidence: float | None = None,
 
     `acceptance` selects the Score gate: "margin" (default, demands a peaked
     distribution) or "argmax" (value floor only). See decisions.evaluate_score.
+
+    `feed` is the optional live DecisionFeed (spirebrain.overlay.feed): when
+    given, every decision is published as it happens and the run's HP/budget
+    updates flow to any watching dashboard. None (default) changes nothing.
     """
     strategy = json.loads((ROOT / "config" / "strategy.json").read_text(encoding="utf-8"))
     goal = strategy["goal"]
@@ -201,7 +206,25 @@ def run_one_simulation(seed: int = 0, confidence: float | None = None,
             run.potions = potions
             run.gold = gold
             run.floor = fl
-            return run.with_budget(hp_budget)
+            run.with_budget(hp_budget)
+            if feed is not None:
+                try:
+                    feed.publish("run_state", {
+                        "act": hp_budget.act, "floor": fl,
+                        "character": run.character,
+                        "hp": hp_budget.current_hp, "max_hp": hp_budget.max_hp,
+                        "reserved": hp_budget.reserved_hp,
+                        "budget_remaining": hp_budget.remaining_budget,
+                        "gold": gold, "deck_size": len(deck),
+                        "relics": list(relics),
+                    })
+                except Exception:  # noqa: BLE001 - dashboard must not break the run
+                    pass
+            return run
+
+        def _publish_state_now() -> None:
+            """Re-publish after an in-place mutation (heal, spend, buy)."""
+            _sync()
 
         router = MapRouter(jev, hp, run=run)
         risk = CombatRiskGate(jev, hp, run=run)
@@ -222,6 +245,16 @@ def run_one_simulation(seed: int = 0, confidence: float | None = None,
                     outcome["score_rejections"].append(
                         {"act": act, "reason": gate["reason"], "value": gate["value"]})
             act_log["steps"].append(rec)
+            if feed is not None and kind != "map":  # map publishes its own richer event
+                try:
+                    feed.publish("decision", {
+                        "point": kind, "value": d.value,
+                        "confidence": round(d.confidence, 4),
+                        "fallback": bool(d.used_fallback),
+                        "detail": d.detail, "command": {"command": kind},
+                    })
+                except Exception:  # noqa: BLE001
+                    pass
 
         # -- routing -------------------------------------------------------- #
         for nodes in act_map:
@@ -245,6 +278,31 @@ def run_one_simulation(seed: int = 0, confidence: float | None = None,
             # tests/test_sim_harness.py checks it stays honest.
             act_log["steps"][-1]["probe"] = int(probes.get(str(d.value), 0))
             act_log["steps"][-1]["spent"] = spent
+            if feed is not None:
+                # The route's own probe + every rival's, so the dashboard can
+                # render the full "Into the Breach" style preview of the choice.
+                detail = dict(d.detail)
+                detail["probes"] = {
+                    node: {"value": 1 if p > hp.remaining_budget else 0,
+                           "confidence": 0.5 + min(0.4, p / (hp.max_hp or 80) / 2),
+                           "damage": int(p)}
+                    for node, p in probes.items()
+                }
+                detail["choices"] = dict(choices)
+                try:
+                    feed.publish("decision", {
+                        "point": "map", "value": d.value,
+                        "confidence": round(d.confidence, 4),
+                        "fallback": bool(d.used_fallback),
+                        "detail": detail,
+                        "command": {"command": "choose",
+                                    "choice": next((i for i, n in enumerate(nodes)
+                                                    if str(n["id"]) == str(d.value)), 0)},
+                        "probe": int(probes.get(str(d.value), 0)),
+                        "spent": spent,
+                    })
+                except Exception:  # noqa: BLE001
+                    pass
 
         # -- card reward ---------------------------------------------------- #
         _sync()

@@ -19,3 +19,7 @@ runs/
 Thumbs.db
 .idea/
 .vscode/
+
+# Java mod build artifacts (java/target is produced by scripts/build_overlay.py;
+# the sources in java/src are the real deliverable)
+java/target/

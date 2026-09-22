@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JEV Spire Brain · 决策仪表盘</title>
+<style>
+  :root {
+    --bg: #0f1420; --panel: #171e2e; --panel2: #1d2538; --line: #2a3450;
+    --text: #dbe4f5; --muted: #8b97b5; --dim: #5d6a8a;
+    --teal: #2dd4a7; --blue: #4d9fff; --amber: #f0b34e; --red: #f06a6a;
+    --purple: #a78bfa; --green: #7ac95c;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif; font-size: 13px;
+    display: grid; grid-template-columns: 300px 1fr; grid-template-rows: 56px 1fr;
+    height: 100vh;
+  }
+  header {
+    grid-column: 1 / 3; display: flex; align-items: center; gap: 14px;
+    padding: 0 18px; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  header h1 { font-size: 15px; font-weight: 500; }
+  header .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--red); }
+  header .dot.live { background: var(--teal); }
+  header .sub { color: var(--muted); font-size: 12px; }
+  header .spacer { flex: 1; }
+
+  /* left: run state */
+  aside { border-right: 1px solid var(--line); background: var(--panel); padding: 16px; overflow-y: auto; }
+  aside h2 { font-size: 12px; color: var(--muted); font-weight: 500; margin: 14px 0 8px; text-transform: uppercase; letter-spacing: .08em; }
+  aside h2:first-child { margin-top: 0; }
+  .kv { display: flex; justify-content: space-between; padding: 3px 0; color: var(--muted); }
+  .kv b { color: var(--text); font-weight: 500; }
+  .hpwrap { margin-top: 4px; }
+  .barlabel { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  .bar { height: 10px; border-radius: 5px; background: #0b0f19; overflow: hidden; position: relative; }
+  .bar .fill { height: 100%; border-radius: 5px; background: var(--teal); transition: width .5s; }
+  .bar .reserve { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--amber); }
+  .bar.hp .fill { background: var(--red); }
+  .relics { display: flex; flex-wrap: wrap; gap: 6px; }
+  .relic { background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; font-size: 12px; color: var(--text); }
+  .connbox { margin-top: 18px; padding: 10px; border: 1px dashed var(--line); border-radius: 8px; color: var(--dim); font-size: 12px; line-height: 1.6; }
+
+  /* right: decision stream */
+  main { overflow-y: auto; padding: 16px 20px; display: flex; flex-direction: column; gap: 10px; }
+  .empty { color: var(--dim); text-align: center; margin-top: 80px; line-height: 2; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--blue); border-radius: 10px; padding: 12px 14px; animation: slidein .25s ease-out; }
+  @keyframes slidein { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+  .card.fb { border-left-color: var(--amber); }
+  .card .top { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .point { font-weight: 500; font-size: 13px; }
+  .point .ic { display: inline-block; width: 20px; text-align: center; margin-right: 4px; }
+  .value { color: var(--teal); font-weight: 500; }
+  .card.fb .value { color: var(--amber); }
+  .badge { font-size: 11px; border-radius: 5px; padding: 2px 7px; background: var(--panel2); color: var(--muted); border: 1px solid var(--line); }
+  .badge.fb { color: var(--amber); border-color: var(--amber); }
+  .badge.cmd { color: var(--blue); border-color: var(--blue); }
+  .top .spacer { flex: 1; }
+  .confbar { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+  .confbar .bar { flex: 1; height: 6px; }
+  .confbar .bar .fill { background: var(--purple); }
+  .confbar span { font-size: 11px; color: var(--muted); min-width: 130px; text-align: right; }
+  .why { color: var(--muted); font-size: 12px; margin-top: 6px; line-height: 1.55; }
+  .why b { color: var(--amber); font-weight: 500; }
+  .probes { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .probe { background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font-size: 11px; color: var(--muted); }
+  .probe .p { font-weight: 500; }
+  .probe.over .p { color: var(--red); }
+  .probe.clear .p { color: var(--teal); }
+  .scores { margin-top: 8px; display: flex; flex-direction: column; gap: 5px; }
+  .srow { display: grid; grid-template-columns: 150px 1fr 52px; gap: 10px; align-items: center; }
+  .srow .name { color: var(--text); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .srow .name.win { color: var(--teal); font-weight: 500; }
+  .srow .bar { height: 7px; }
+  .srow .bar .fill { background: var(--blue); }
+  .srow.win .bar .fill { background: var(--teal); }
+  .srow .num { color: var(--muted); font-size: 11px; text-align: right; }
+  .cmdline { margin-top: 8px; font-family: Consolas, monospace; font-size: 12px; color: var(--blue); background: #0b0f19; border-radius: 6px; padding: 5px 9px; display: inline-block; }
+  .routes { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+  .route { display: grid; grid-template-columns: 1fr 96px 84px; gap: 8px; align-items: center; background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 5px 9px; font-size: 12px; }
+  .route .rname { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .route .rdmg { color: var(--muted); text-align: right; }
+  .route .rverdict { text-align: right; color: var(--teal); }
+  .route.over .rname, .route.over .rdmg { color: var(--red); }
+  .route.over .rverdict { color: var(--red); }
+  .route.over { border-color: var(--red); }
+  .route.chosen { border-color: var(--blue); background: #14203a; }
+  .route.chosen .rname { color: var(--text); font-weight: 500; }
+  .staterow { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip { background: var(--panel2); border: 1px solid var(--line); border-radius: 7px; padding: 5px 10px; font-size: 12px; color: var(--muted); }
+  .chip b { color: var(--text); font-weight: 500; }
+  .floatchip { position: fixed; right: 16px; bottom: 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; font-size: 12px; color: var(--dim); }
+</style>
+</head>
+<body>
+<h2 style="position:absolute;left:-9999px">JEV 决策实时仪表盘：左侧为运行状态，右侧为七个决策点的实时判断流</h2>
+<header>
+  <div class="dot" id="dot"></div>
+  <h1>JEV Spire Brain</h1>
+  <span class="sub" id="status">未连接</span>
+  <span class="spacer"></span>
+  <span class="sub" id="counter"></span>
+</header>
+
+<aside>
+  <h2>运行状态</h2>
+  <div id="runstate"><div class="kv"><span>等待事件…</span></div></div>
+  <h2>血量</h2>
+  <div class="hpwrap">
+    <div class="barlabel"><span id="hptext">— / —</span><span id="budgettext">预算 —</span></div>
+    <div class="bar hp"><div class="fill" id="hpfill" style="width:0%"></div><div class="reserve" id="reserve" style="left:0%"></div></div>
+  </div>
+  <h2>预算（本幕可损失）</h2>
+  <div class="hpwrap">
+    <div class="barlabel"><span id="budgetbar-text">—</span></div>
+    <div class="bar"><div class="fill" id="budgetfill" style="width:0%"></div></div>
+  </div>
+  <h2>遗物</h2>
+  <div class="relics" id="relics"><span class="kv" style="color:var(--dim)">—</span></div>
+  <div class="connbox" id="connbox">
+    连接 <b>http://127.0.0.1:8787</b><br>
+    先启动：<code>python run_dashboard.py --demo</code><br>
+    本页通过 SSE 实时接收大脑的每个判断：概率、置信度、以及规则接管的原因。
+  </div>
+</aside>
+
+<main id="stream">
+  <div class="empty" id="empty">大脑还没有说话。<br>运行 <code>python run_dashboard.py --demo</code> 看一场完整演示，或在游戏内启动 agent。</div>
+</main>
+<div class="floatchip" id="fchip"></div>
+
+<script>
+"use strict";
+const POINT_META = {
+  map:        { name: "地图选路", icon: "🗺" },
+  card_reward:{ name: "卡牌奖励", icon: "🃏" },
+  event:      { name: "事件",     icon: "❓" },
+  rest:       { name: "篝火",     icon: "🔥" },
+  shop:       { name: "商店",     icon: "💰" },
+  boss_relic: { name: "Boss遗物", icon: "💎" },
+  combat_risk:{ name: "战斗风险", icon: "⚔" },
+};
+const stream = document.getElementById("stream");
+const empty = document.getElementById("empty");
+const dot = document.getElementById("dot");
+const statusEl = document.getElementById("status");
+const counter = document.getElementById("counter");
+const fchip = document.getElementById("fchip");
+let n = 0;
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function fmtCommand(cmd) {
+  if (!cmd) return "";
+  const v = cmd.command || "";
+  if (v === "choose") return "choose " + cmd.choice;
+  if (v === "play") return "play " + (cmd.card + 1) + (cmd.target !== undefined ? " → 目标 " + (cmd.target + 1) : "");
+  return v;
+}
+
+/* ---- run state ---- */
+function renderState(s) {
+  const box = document.getElementById("runstate");
+  box.innerHTML = "";
+  const rows = [["角色", s.character], ["幕", s.act], ["层", s.floor], ["金块", s.gold], ["卡组", s.deck_size + " 张"]];
+  for (const [k, v] of rows) {
+    if (v === undefined || v === null || v === "") continue;
+    const kv = el("div", "kv");
+    kv.append(el("span", "", k), el("b", "", String(v)));
+    box.append(kv);
+  }
+  if (s.max_hp) {
+    document.getElementById("hptext").textContent = s.hp + " / " + s.max_hp;
+    document.getElementById("hpfill").style.width = (100 * s.hp / s.max_hp) + "%";
+    const resPct = 100 * (s.reserved || 0) / s.max_hp;
+    document.getElementById("reserve").style.left = (100 - resPct) + "%";
+    const budgetMax = s.max_hp - (s.reserved || 0);
+    document.getElementById("budgettext").textContent = "保留 " + (s.reserved || 0);
+    document.getElementById("budgetbar-text").textContent = (s.budget_remaining ?? "—") + " / " + budgetMax;
+    document.getElementById("budgetfill").style.width = budgetMax ? (100 * s.budget_remaining / budgetMax) + "%" : "0%";
+  }
+  if (s.relics && s.relics.length) {
+    const r = document.getElementById("relics");
+    r.innerHTML = "";
+    for (const name of s.relics) r.append(el("span", "relic", name));
+  }
+}
+
+/* ---- decision cards ---- */
+function probeChips(detail) {
+  const probes = detail && detail.probes;
+  if (!probes) return null;
+  const wrap = el("div", "probes");
+  for (const [node, p] of Object.entries(probes)) {
+    const v = Number(p.confidence);
+    const chip = el("div", "probe " + (v >= 0.6 ? "over" : v <= 0.4 ? "clear" : ""));
+    chip.append("超预算 ");
+    chip.append(el("span", "p", (v >= 0.5 ? v : (1 - v)).toFixed(2) + (v >= 0.6 ? " ⚠" : v <= 0.4 ? " ✓" : " ?")));
+    chip.title = node + " → " + JSON.stringify(p);
+    wrap.append(chip);
+  }
+  return wrap;
+}
+
+function scoreRows(detail) {
+  const scores = detail && detail.scores;
+  if (!scores || !Object.keys(scores).length) return null;
+  const wrap = el("div", "scores");
+  const ranked = Object.entries(scores).sort((a, b) => b[1] - a[1]);
+  const floor = (detail.gate && detail.gate.action_floor) || 0.55;
+  for (const [name, val] of ranked) {
+    const row = el("div", "srow" + (val === ranked[0][1] ? " win" : ""));
+    row.append(el("div", "name" + (val === ranked[0][1] ? " win" : ""), name));
+    const bar = el("div", "bar");
+    const fill = el("div", "fill");
+    fill.style.width = Math.min(100, val * 100) + "%";
+    bar.append(fill);
+    row.append(bar);
+    row.append(el("div", "num", val.toFixed(2) + (val < floor ? " ↓" : "")));
+    row.title = "行动线 " + floor.toFixed(2);
+    wrap.append(row);
+  }
+  return wrap;
+}
+
+function probChips(detail) {
+  const probs = detail && (detail.probabilities || (detail.gate && detail.gate.probabilities));
+  if (!probs || !Object.keys(probs).length) return null;
+  const wrap = el("div", "probes");
+  for (const [k, v] of Object.entries(probs)) {
+    const chip = el("div", "probe");
+    chip.append(k + " ");
+    chip.append(el("span", "p", Number(v).toFixed(2)));
+    wrap.append(chip);
+  }
+  return wrap;
+}
+
+/* Route preview — the "Into the Breach" panel: every reachable path, its
+   predicted damage and its over-budget verdict, before the choice is shown. */
+function routePreview(d) {
+  if (d.point !== "map") return null;
+  const probes = (d.detail && d.detail.probes) || {};
+  const choices = (d.detail && d.detail.choices) || {};
+  const nodeIds = Object.keys(probes);
+  if (!nodeIds.length) return null;
+  const wrap = el("div", "routes");
+  for (const id of nodeIds) {
+    const p = probes[id] || {};
+    const dmg = p.damage !== undefined ? p.damage : Number(p.confidence || 0) * 20;
+    const over = Number(p.value) === 1 || Number(p.confidence) >= 0.6;
+    const chosen = String(d.value) === String(id);
+    const row = el("div", "route" + (over ? " over" : "") + (chosen ? " chosen" : ""));
+    const desc = (choices[id] || id).replace(/\s*\(floor \d+\)\s*/, "");
+    row.append(el("div", "rname", (chosen ? "▶ " : "") + desc));
+    row.append(el("div", "rdmg", "预计损血 " + dmg));
+    row.append(el("div", "rverdict", over ? "超预算 ✕" : Number(p.confidence) <= 0.4 ? "预算内 ✓" : "拿不准 ?"));
+    wrap.append(row);
+  }
+  if (d.spent !== undefined) {
+    const note = el("div", "why");
+    note.append("实际花费 ");
+    note.append(el("b", "", String(d.spent)) + " HP（探针是上界，实际低于它）");
+    wrap.append(note);
+  }
+  return wrap;
+}
+
+function renderDecision(d) {
+  const meta = POINT_META[d.point] || { name: d.point, icon: "•" };
+  const card = el("div", "card" + (d.fallback ? " fb" : ""));
+  const top = el("div", "top");
+  const pt = el("div", "point");
+  pt.append(el("span", "ic", meta.icon), document.createTextNode(meta.name));
+  top.append(pt);
+  top.append(el("div", "value", "→ " + String(d.value)));
+  top.append(el("div", "badge" + (d.fallback ? " fb" : ""), d.fallback ? "规则接管" : "JEV 决定"));
+  top.append(el("div", "spacer"));
+  top.append(el("div", "badge cmd", fmtCommand(d.command)));
+  card.append(top);
+
+  const cb = el("div", "confbar");
+  const bar = el("div", "bar"); const fill = el("div", "fill");
+  fill.style.width = (d.confidence * 100) + "%";
+  bar.append(fill);
+  cb.append(bar);
+  cb.append(el("span", "", "置信度 " + d.confidence.toFixed(3) + (d.confidence === 0 ? "（回退无置信）" : d.confidence < 0.6 ? "（低于 0.60 地板）" : "")));
+  card.append(cb);
+
+  const probes = probeChips(d.detail);
+  if (probes) card.append(probes);
+  const routes = routePreview(d);
+  if (routes) card.append(routes);
+  const rows = scoreRows(d.detail);
+  if (rows) card.append(rows);
+  const chips = probChips(d.detail);
+  if (chips) card.append(chips);
+
+  const why = d.detail && (d.detail.reason || (d.detail.gate && d.detail.gate.reason));
+  if (why) {
+    const w = el("div", "why");
+    if (d.fallback) w.append(el("b", "", "回退："));
+    w.append(document.createTextNode(why));
+    card.append(w);
+  }
+  if (d.detail && d.detail.posture) {
+    const p = el("div", "why");
+    p.append("战斗姿态：");
+    p.append(el("b", "", d.detail.posture === "defensive" ? "防御（保血量预算）" : "贪心（正常输出）"));
+    card.append(p);
+  }
+  return card;
+}
+
+function renderRunEnd(d) {
+  const card = el("div", "card");
+  card.style.borderLeftColor = "var(--green)";
+  const top = el("div", "top");
+  top.append(el("div", "point", "🏁 一局结束"));
+  top.append(el("div", "spacer"));
+  card.append(top);
+  const summary = el("div", "why");
+  summary.textContent = d.summary || "";
+  card.append(summary);
+  return card;
+}
+
+function appendEvent(ev) {
+  n++;
+  counter.textContent = "已接收 " + n + " 个事件";
+  if (empty.style.display !== "none") { empty.style.display = "none"; }
+  let node;
+  if (ev.kind === "run_state") { renderState(ev); return; }
+  else if (ev.kind === "decision") node = renderDecision(ev);
+  else if (ev.kind === "run_end") node = renderRunEnd(ev);
+  if (node) {
+    stream.prepend(node);
+    fchip.textContent = ev.kind === "decision"
+      ? (POINT_META[ev.point] || {}).name + " → " + ev.value
+      : "run_end";
+  }
+}
+
+/* ---- SSE ---- */
+function connect() {
+  const es = new EventSource("/events");
+  es.onopen = () => {
+    dot.classList.add("live");
+    statusEl.textContent = "已连接 · 实时接收大脑决策";
+    document.getElementById("connbox").style.display = "none";
+  };
+  es.onerror = () => {
+    dot.classList.remove("live");
+    statusEl.textContent = "连接断开，重试中…";
+  };
+  es.onmessage = (m) => {
+    try { appendEvent(JSON.parse(m.data)); } catch (e) { /* 跳过坏帧 */ }
+  };
+}
+connect();
+</script>
+</body>
+</html>

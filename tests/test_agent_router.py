@@ -256,14 +256,19 @@ def test_combat_consults_jev_when_damage_threatens_the_budget():
 # --------------------------------------------------------------------------- #
 # Dispatch / logging
 # --------------------------------------------------------------------------- #
-def test_unknown_screen_waits():
+def test_unknown_screen_navigates_without_a_jev_call():
+    """Guard #3 (jespire): a screen that is not a decision point gets a
+    navigation Proceed, not a model question and not a wait. GRID is handled
+    now (see _on_grid); MODDED_UNKNOWN_SCREEN stands for one added by a mod.
+    (This used to be `wait` — the jespire port changed that on purpose: a wait
+    on a screen the game expects an answer for just stalls the pipe.)"""
     with tempfile.TemporaryDirectory() as tmp:
         agent = _agent(tmp)
-        # GRID is handled now (see _on_grid); this is a screen we genuinely have
-        # no rule for, e.g. one added by another mod.
+        before = agent.jev.calls
         cmd = agent.choose_action(_base(screen_type="MODDED_UNKNOWN_SCREEN"))
-        assert cmd["command"] == "wait"
-        assert "no handler" in cmd["reason"]
+        assert cmd["command"] == "proceed"
+        assert cmd["reason_source"] == "navigation"
+        assert agent.jev.calls == before  # navigation never consults the model
 
 
 def test_full_screen_sweep_produces_valid_commands():

@@ -367,6 +367,15 @@ def check_backend(rep: Report, live: bool) -> None:
     key_in_env = bool(os.environ.get("OPENROUTER_API_KEY"))
     key_in_file = env_file.exists() and "OPENROUTER_API_KEY" in env_file.read_text(
         encoding="utf-8", errors="replace")
+    # The .env file is what a real launch reads (run_agent.py loads it), so the
+    # probe must read it too — checking for its existence is not the same as
+    # having the key in this process. Mirrors run_agent._load_dotenv, minimal.
+    if key_in_file and not key_in_env:
+        for raw in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw.strip()
+            if line.startswith("OPENROUTER_API_KEY=") and not key_in_env:
+                os.environ["OPENROUTER_API_KEY"] = line.split("=", 1)[1].strip().strip('"').strip("'")
+                key_in_env = True
     backend = os.environ.get("JEV_BACKEND") or "mock"
     if key_in_env or key_in_file:
         where = "process environment" if key_in_env else ".env"
@@ -382,7 +391,10 @@ def check_backend(rep: Report, live: bool) -> None:
         rep.add(WARN, "Live JEV probe", "skipped — no key")
         return
     try:
-        from spirebrain.jev_brain.openrouter_client import OpenRouterJevClient
+        # The class lives in client_real.py; openrouter_client holds the
+        # LLM-structured stand-in. Wrong module here made the probe fail with
+        # an ImportError that looked like a key problem (found 2026-09-22).
+        from spirebrain.jev_brain.client_real import OpenRouterJevClient
 
         client = OpenRouterJevClient()
         resp = client.ask("A test message.", {"ok": __import__(

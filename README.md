@@ -46,8 +46,62 @@ in place, with **182 tests passing**. Live decisions and simulator decisions now
 share the same rich `RunContext`, so both paths ask JEV against the full run
 digest and the game's own card/relic text.
 
-What is left is hardware, not code: install CommunicationMod (see
-[docs/SETUP.md](docs/SETUP.md)), which is a jar download and one config line.
+馃憥 **Phase 1.5 — the interaction layer — is in.** The brain now has a window:
+`spirebrain/overlay/` streams every decision (value, confidence, probabilities,
+Score distributions, fallback reasons) to a local web dashboard over SSE, live
+while the run happens. Zero game invasion: the feed is an optional constructor
+argument, and a dead dashboard can never break a run (proven by
+`tests/test_overlay.py::test_agent_survives_a_hostile_feed`).
+
+GUARDS **Three runaway guards, ported from [Ethics03/jevspire](https://github.com/Ethics03/jevspire)**
+(the only other CommunicationMod+JEV project), all "stop spending, keep the game
+alive": a **stall guard** that latches auto-decisions off when the identical
+game state returns after our command (it did not take effect — retrying is how
+an agent burns money in a loop); an **action limit** (default 200 commands per
+process, `JEVBRAIN_MAX_ACTIONS` to change, <=0 unlimited) that stops a confused
+run loudly instead of quietly; and **navigation without the model** —
+non-decision screens get Proceed and a shop is asked once per floor, so no JEV
+call is ever spent re-deriving "leave". Covered in `tests/test_guards.py`.
+
+## Quick start — one command
+
+```bash
+python start.py --demo      # no game, no API key: watch a simulated run right now
+```
+
+A dashboard opens in your browser and a simulated ascent plays out on it —
+every route preview, card score, confidence bar and fallback reason, live.
+
+To play with **real JEV** put `OPENROUTER_API_KEY=...` in a `.env` file, then:
+
+```bash
+python start.py --setup     # checks the environment, starts the dashboard,
+                            # and writes the game's mod config (backs up the old one)
+```
+
+Start Slay the Spire through ModTheSpire with the mods enabled. The brain
+plays; the dashboard shows it thinking. `--setup` is remembered — after the
+first time, plain `python start.py` is the whole routine.
+
+Everything start.py does, done manually:
+
+```bash
+python -m spirebrain.doctor                              # what is missing, and how to fix it
+python run_dashboard.py --demo        # simulated run, mock JEV, no key needed
+python run_dashboard.py --demo --optimistic          # JEV steers the run
+python run_dashboard.py --demo --backend openrouter  # REAL JEV answers live
+python run_dashboard.py               # server only; watch a live agent
+```
+
+The game-spawned agent joins with one flag — decisions stream to the
+dashboard over HTTP, and stay silent when no dashboard is running:
+
+```bash
+python run_agent.py --backend openrouter --dashboard-url http://127.0.0.1:8787/publish
+```
+
+CommunicationMod installation itself (a one-time jar download) is documented
+in [docs/SETUP.md](docs/SETUP.md).
 
 ```bash
 # run everything offline right now (no game, no API key):
@@ -114,6 +168,12 @@ ready, never send a verb the game did not advertise, and one command per state.
 ```bash
 git clone https://github.com/Adrian-lzr/jev-spire-brain.git
 cd jev-spire-brain
+python start.py --demo                    # the one-command path (see Quick start)
+```
+
+Or step by step:
+
+```bash
 pip install -r requirements.txt          # optional: the brain is stdlib-only
 python -m spirebrain.doctor               # names every missing piece and its fix
 python -m spirebrain.install_mod_config    # preview the mod config it will write

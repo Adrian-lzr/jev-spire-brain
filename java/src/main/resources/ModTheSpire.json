@@ -1,0 +1,11 @@
+{
+  "modid": "spirebrain-overlay",
+  "name": "SpireBrain Overlay",
+  "author_list": ["Adrian-lzr"],
+  "description": "In-game window into the JEV brain: shows the decision the external SpireBrain agent just made, its confidence, and the HP-budget state. Requires the SpireBrain agent to be running (python start.py).",
+  "version": "0.1.0",
+  "sts_version": "12-22-2020",
+  "mts_version": "3.30.0",
+  "dependencies": ["basemod"],
+  "target_version": "^12-22-2020"
+}

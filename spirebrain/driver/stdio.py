@@ -32,7 +32,9 @@ Anything that still cannot be confirmed offline is flagged `PHASE 1 VERIFY`.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -41,6 +43,29 @@ from typing import Any, Iterable
 ROOT = Path(__file__).resolve().parents[2]
 
 READY = "Ready"
+
+# Three runaway guards, ported from Ethics03/jevspire (2026-09-22) — the only
+# other CommunicationMod+JEV project, and all three of its protections exist
+# because the author was burned by the same failure modes we would have been:
+#
+# 1. STALL GUARD (fingerprint stop): if the *same* game state comes back
+#    playable after we already sent a command for it, our command did not take
+#    effect. Retry-asking JEV against an unchanged state burns API money in a
+#    loop; jespire latches after 2 repeats and waits for a human or a new state.
+# 2. ACTION LIMIT: a process-level cap on commands (default 200, env
+#    JEVBRAIN_MAX_ACTIONS). A confused agent that "plays" 5000 cards is a
+#    runaway, and the cap is what turns that into a visible stop.
+# 3. NAVIGATION WITHOUT THE MODEL lives in agent.py (non-decision screens get
+#    Proceed, shops are asked once per floor) — listed here so all three guard
+#    names are documented in one place.
+DEFAULT_MAX_ACTIONS = 200
+DEFAULT_STALL_LIMIT = 2
+
+# Verbs that cannot advance a run by themselves. Sending one is not "acting on
+# a state", so it must not arm the stall guard: `state` re-transmits on purpose
+# and `wait` waits on purpose — the state coming back unchanged is what they
+# are *for*.
+NON_ADVANCING_VERBS = frozenset({"state", "wait"})
 
 # Sentinel for "use the default log path". Distinct from None, because None must
 # mean *no logging at all* — tests pass None, and when None silently meant "write
@@ -156,7 +181,9 @@ class StdioTransport:
 
     def __init__(self, agent, *, log_path: str | Path | None | object = DEFAULT_LOG,
                  auto_start: bool = False, player_class: str = "IRONCLAD",
-                 ascension: int = 0, max_commands: int | None = None) -> None:
+                 ascension: int = 0, max_commands: int | None = None,
+                 stall_limit: int = DEFAULT_STALL_LIMIT,
+                 warn_stream=None) -> None:
         self.agent = agent
         # None disables logging; omitting the argument uses the default path. See
         # DEFAULT_LOG for why those cannot be the same thing.
@@ -167,13 +194,41 @@ class StdioTransport:
         self.auto_start = auto_start
         self.player_class = player_class
         self.ascension = ascension
+        # Action limit (guard #2). An explicit argument wins; otherwise the env
+        # var, then the default. 0 or a negative value means unlimited — for a
+        # long soak test, not for a stranger's first run.
+        if max_commands is None:
+            env = os.environ.get("JEVBRAIN_MAX_ACTIONS", "").strip()
+            max_commands = int(env) if env.lstrip("-").isdigit() else DEFAULT_MAX_ACTIONS
         self.max_commands = max_commands
+        self.stall_limit = max(1, stall_limit)
         self.messages = 0
         self.commands = 0
         self.errors = 0
         self.skipped_not_ready = 0
         self.menu_idle = 0
+        self.stalled = False          # latched by the stall guard, cleared on a new state
+        self.stuck_events = 0         # how many times the stall guard fired
+        self.action_limit_hit = False
         self.substitutions: list[dict] = []
+        # Guard warnings go here (default stderr). Injectable because stderr is
+        # how the tests check that a guard *said something* when it fired.
+        self.warn_stream = warn_stream if warn_stream is not None else sys.stderr
+        self._acted_fingerprint: str | None = None
+        self._stuck_seen = 0
+
+    @staticmethod
+    def _fingerprint(game: dict) -> str:
+        """Stable hash of exactly the state decide() will see.
+
+        sort_keys so dict ordering cannot fake a change; default=str so one odd
+        value degrades to its repr instead of raising inside the hot loop.
+        """
+        try:
+            blob = json.dumps(game, sort_keys=True, default=str, ensure_ascii=False)
+        except (TypeError, ValueError):
+            blob = repr(game)
+        return hashlib.sha1(blob.encode("utf-8")).hexdigest()
 
     # -- one message ------------------------------------------------------- #
     def handle_message(self, message: dict) -> str | None:
@@ -222,10 +277,62 @@ class StdioTransport:
             # guess. PHASE 1 VERIFY: check whether this occurs in practice.
             return "state"
 
+        fp = self._fingerprint(game)
+        if self.stalled:
+            if fp != self._acted_fingerprint:
+                # A state we have never acted on: whatever stuck us is gone
+                # (a human pressed on, or an animation resolved). Resume.
+                self.stalled = False
+                self._stuck_seen = 0
+            else:
+                return None  # keep the seat warm; spend nothing on retries
+
+        if fp == self._acted_fingerprint:
+            # Guard #1 (jespire): we already sent an advancing command for
+            # exactly this state and it came back playable, byte-identical.
+            # Once is animation noise; stall_limit times is a command the game
+            # ignored, and retrying is how an agent burns money in a loop.
+            self._stuck_seen += 1
+            if self._stuck_seen >= self.stall_limit:
+                self.stalled = True
+                self.stuck_events += 1
+                self._announce_stall(fp)
+                return None
+        else:
+            self._stuck_seen = 0
+
         line = to_command_line(self.agent.choose_action(game))
         line = self._ensure_offered(line, message.get("available_commands"))
         self.commands += 1
+        if line and _verb_of(line) not in NON_ADVANCING_VERBS:
+            # Only an advancing command counts as "acted on this state".
+            # state/wait cannot change anything, so arming the guard with them
+            # would fire on the first legitimate re-transmission. Note what is
+            # deliberately NOT here: resetting _stuck_seen. The repeat counter
+            # spans successive commands against the same state — two commands
+            # that both failed to move the game are exactly the runaway this
+            # guard exists to stop. Only a genuinely new state clears it.
+            self._acted_fingerprint = fp
         return line
+
+    def _announce_stall(self, fp: str) -> None:
+        print(
+            f"[stdio] STALL GUARD: the same game state came back {self._stuck_seen}x "
+            f"after we acted on it — the last command did not take effect. "
+            f"Auto-decisions are paused for this state; play on manually or let a "
+            f"new state arrive to resume. (fingerprint {fp[:12]})",
+            file=self.warn_stream, flush=True)
+        feed = getattr(self.agent, "feed", None)
+        if feed is not None:
+            try:
+                feed.publish("run_end", {
+                    "summary": f"STALL GUARD: state repeated {self._stuck_seen}x "
+                               "after our command; auto-decisions paused until the state changes.",
+                    "reason": "stall_guard",
+                    "fingerprint": fp,
+                })
+            except Exception:  # noqa: BLE001 - a dead dashboard must not break the pipe
+                pass
 
     def _ensure_offered(self, line: str, available: Any) -> str:
         """Never send a verb the game did not advertise."""
@@ -273,7 +380,26 @@ class StdioTransport:
             if command:
                 outstream.write(command + "\n")
                 outstream.flush()
-            if self.max_commands is not None and self.commands >= self.max_commands:
+            if self.max_commands is not None and self.max_commands > 0 \
+                    and self.commands >= self.max_commands:
+                if not self.action_limit_hit:
+                    # Guard #2 (jespire): say *why* the agent went quiet. A cap
+                    # that trips silently looks exactly like a crashed process.
+                    self.action_limit_hit = True
+                    print(f"[stdio] ACTION LIMIT: {self.max_commands} commands sent "
+                          f"this process — stopping auto-decisions (runaway guard). "
+                          f"Set JEVBRAIN_MAX_ACTIONS to change or 0 for unlimited.",
+                          file=self.warn_stream, flush=True)
+                    feed = getattr(self.agent, "feed", None)
+                    if feed is not None:
+                        try:
+                            feed.publish("run_end", {
+                                "summary": f"action limit ({self.max_commands}) reached; "
+                                           "auto-decisions stopped.",
+                                "reason": "action_limit",
+                            })
+                        except Exception:  # noqa: BLE001
+                            pass
                 break
         return self.commands
 
@@ -300,12 +426,25 @@ class StdioTransport:
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
-def _build_agent(strategy_path: str | None, backend: str | None, acceptance: str | None):
-    """Construct the router lazily so imports stay cheap for --replay."""
+def _build_agent(strategy_path: str | None, backend: str | None, acceptance: str | None,
+                 dashboard_url: str | None = None):
+    """Construct the router lazily so imports stay cheap for --replay.
+
+    With `dashboard_url`, the agent gets a BridgeFeed: every decision is
+    forwarded to a running dashboard server (run_dashboard.py) over HTTP. The
+    bridge fails silently when no dashboard is up, so `--dashboard-url` can
+    stay in a launch config permanently — it is observability, never a
+    dependency.
+    """
     from spirebrain.driver.agent import SpireBrainAgent
 
+    feed = None
+    if dashboard_url:
+        from spirebrain.overlay.server import BridgeFeed
+        feed = BridgeFeed(url=dashboard_url)
     return SpireBrainAgent(jev_backend=backend or "mock",
-                           strategy_path=strategy_path, acceptance=acceptance)
+                           strategy_path=strategy_path, acceptance=acceptance,
+                           feed=feed)
 
 
 def replay(paths: list[Path], agent, *, log_path: str | Path | None = None,
@@ -350,9 +489,10 @@ def main(argv: list[str]) -> int:
     strategy_path = value("strategy")
     log_path = value("log")
     replay_dir = value("replay")
+    dashboard_url = value("dashboard-url") or value("dashboard")
 
     if replay_dir:
-        agent = _build_agent(strategy_path, backend, acceptance)
+        agent = _build_agent(strategy_path, backend, acceptance, dashboard_url)
         files = sorted(Path(replay_dir).glob("*.json"))
         if not files:
             print(f"[stdio] no .json messages in {replay_dir}", file=sys.stderr)
@@ -365,7 +505,11 @@ def main(argv: list[str]) -> int:
         return 0
 
     # Live mode: this is what CommunicationMod launches.
-    agent = _build_agent(strategy_path, backend, acceptance)
+    agent = _build_agent(strategy_path, backend, acceptance, dashboard_url)
+    if dashboard_url:
+        print(f"[stdio] decisions stream to {dashboard_url} "
+              f"(start run_dashboard.py to watch; silent when it is not up)",
+              file=sys.stderr)
     # No log_path argument: live mode wants the default file, and that is exactly
     # what DEFAULT_LOG distinguishes from None.
     transport = StdioTransport(agent,
@@ -381,7 +525,9 @@ def main(argv: list[str]) -> int:
     print(f"[stdio] stdin closed after {transport.messages} messages, "
           f"{transport.commands} commands, {transport.errors} errors, "
           f"{transport.menu_idle} menu states, "
-          f"{len(transport.substitutions)} substitutions",
+          f"{len(transport.substitutions)} substitutions, "
+          f"{transport.stuck_events} stall-guard trips"
+          + (" (action limit hit)" if transport.action_limit_hit else ""),
           file=sys.stderr)
     return 0
 

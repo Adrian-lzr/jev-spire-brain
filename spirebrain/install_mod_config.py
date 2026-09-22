@@ -164,6 +164,12 @@ def check_argv(command: str) -> dict:
     for arg in argv:
         looks_like_path = ("\\" in arg or "/" in arg)
         if looks_like_path and not Path(arg).exists():
+            # A URL is an argument value, not a file the mod opens — the
+            # splitter just hands it to our agent, which parses it itself.
+            # (Found by start.py's tests: --dashboard-url .../publish tripped
+            # the naive path check, 2026-09-22.)
+            if arg.startswith(("http://", "https://")):
+                continue
             problems.append(f"no such file: {arg}")
     return {"argv": argv, "argv_count": len(argv), "problems": problems}
 

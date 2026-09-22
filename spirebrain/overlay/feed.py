@@ -1,0 +1,189 @@
+"""Decision feed — the brain's inner monologue, as an event stream.
+
+Phase 1.5, the interaction layer. Until now every decision (probability,
+confidence, fallback reason) landed in `logs/*.jsonl` for *after* the run; this
+module publishes the same facts *while* the run happens, to anyone watching —
+which is the difference between a black box and a demonstrable one.
+
+Design rules, inherited from the rest of the project:
+
+* **The feed can never break the run.** Publishing is wrapped so any subscriber
+  failure is swallowed after being reported once. A dashboard that dies must
+  not take the agent with it — the same reasoning that puts `try/except` around
+  every JEV call in `decisions.py`.
+* **Stdlib only.** The brain is stdlib-only by policy (`README.md`); the feed
+  and its server keep that true, so the game can spawn us with no venv.
+* **Append-only history + live subscribers.** A dashboard connecting mid-run
+  replays the whole history first (so it can render HP and deck context), then
+  receives events live. Both come from the same lock-guarded list.
+
+Three event kinds, chosen to be exactly what a spectator needs:
+
+    run_state   — act / floor / HP / budget / gold / deck size (from observe())
+    decision    — one Decision: value, confidence, probabilities, fallback, why
+    run_end     — summary line when a transport finishes or a sim run ends
+
+Nothing here knows about HTTP or the game; `overlay/server.py` and
+`driver/agent.py` are the two ends.
+"""
+
+from __future__ import annotations
+
+import json
+import threading
+import time
+from pathlib import Path
+
+# Event kinds the dashboard understands. Kept as a tuple so tests can assert
+# the vocabulary the same way PROTOCOL_VERBS pins the game's verb set.
+EVENT_KINDS = ("run_state", "decision", "run_end")
+
+
+class DecisionFeed:
+    """Thread-safe append-only event log with live subscriber fan-out.
+
+    `subscribe()` returns a queue-like object (any object with `.put()`); a
+    failed subscriber is dropped after one strike rather than retried forever —
+    a dead browser tab must not accumulate unbounded memory in a live run.
+    """
+
+    def __init__(self, max_history: int = 2000,
+                 journal_path: str | Path | None = None) -> None:
+        self._events: list[dict] = []
+        self._subs: list[tuple[object, bool]] = []  # (sink, warned)
+        self._lock = threading.Lock()
+        self._max_history = max_history
+        self.journal_path = Path(journal_path) if journal_path else None
+        self.seq = 0
+
+    # -- publishing -------------------------------------------------------- #
+    def publish(self, kind: str, payload: dict) -> dict:
+        """Add one event and fan it out. Returns the stored event (with seq/ts)."""
+        if kind not in EVENT_KINDS:
+            raise ValueError(f"unknown event kind: {kind!r} (have {EVENT_KINDS})")
+        with self._lock:
+            self.seq += 1
+            event = {"seq": self.seq, "ts": time.time(), "kind": kind, **payload}
+            self._events.append(event)
+            if len(self._events) > self._max_history:
+                # Drop the oldest half, not one: amortised O(1), and a dashboard
+                # reconnecting still gets plenty of context.
+                del self._events[: len(self._events) // 2]
+            subs = list(self._subs)
+        for sink, warned in subs:
+            try:
+                sink.put(event, block=False)
+            except Exception:  # noqa: BLE001 - a dead subscriber is not our problem
+                self._strike(sink, warned)
+        self._journal(event)
+        return event
+
+    def _strike(self, sink, warned: bool) -> None:
+        """Drop a failed subscriber once, loudly (to stderr, not to the pipe)."""
+        with self._lock:
+            try:
+                self._subs = [(s, w) for (s, w) in self._subs if s is not sink]
+            except Exception:  # noqa: BLE001
+                pass
+        if not warned:
+            import sys
+            print("[feed] dropped a dead subscriber", file=sys.stderr, flush=True)
+
+    def _journal(self, event: dict) -> None:
+        """Optional JSONL mirror of the feed — the stream itself, on disk."""
+        if self.journal_path is None:
+            return
+        try:
+            self.journal_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.journal_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(event, ensure_ascii=False) + "\n")
+        except OSError:
+            pass  # a full disk must not kill the run (same rule as stdio._log)
+
+    # -- consuming --------------------------------------------------------- #
+    def subscribe(self, sink) -> object:
+        """Register a queue-like sink; it immediately receives the full history."""
+        with self._lock:
+            self._subs.append((sink, False))
+            backlog = list(self._events)
+        for event in backlog:
+            try:
+                sink.put(event, block=False)
+            except Exception:  # noqa: BLE001
+                self._strike(sink, False)
+                break
+        return sink
+
+    def unsubscribe(self, sink) -> None:
+        with self._lock:
+            self._subs = [(s, w) for (s, w) in self._subs if s is not sink]
+
+    def history(self, limit: int | None = None) -> list[dict]:
+        with self._lock:
+            events = list(self._events)
+        return events[-limit:] if limit else events
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._events)
+
+
+# --------------------------------------------------------------------------- #
+# Payload builders — the one place that knows what each event looks like
+# --------------------------------------------------------------------------- #
+def run_state_event(agent) -> dict:
+    """Snapshot of where the run stands, from the agent's own model of the world.
+
+    Reads the attributes `observe()` maintains; every read is defensive so a
+    partially-initialised agent still yields a publishable state.
+    """
+    hp = agent.hp
+    run = agent.run
+    state: dict = {}
+    if hp is not None:
+        state.update({
+            "act": hp.act,
+            "hp": hp.current_hp,
+            "max_hp": hp.max_hp,
+            "reserved": hp.reserved_hp,
+            "budget_remaining": hp.remaining_budget,
+        })
+    if run is not None:
+        state.update({
+            "floor": run.floor,
+            "character": run.character,
+            "gold": run.gold,
+            "deck_size": len(run.deck or []),
+            "relics": list(run.relics or []),
+        })
+    return state
+
+
+def decision_event(decision, command: dict) -> dict:
+    """One Decision + the command it became, flattened for the dashboard.
+
+    `detail` carries the interesting internals — Score distributions, Noul probe
+    tables, gate breakdowns, fallback reasons — and is passed through verbatim:
+    the dashboard decides how to render each shape, the feed does not guess.
+    """
+    return {
+        "point": decision.point,
+        "value": decision.value,
+        "confidence": round(float(decision.confidence), 4),
+        "fallback": bool(decision.used_fallback),
+        "detail": _jsonable(decision.detail),
+        "command": command,
+    }
+
+
+def _jsonable(obj):
+    """Best-effort conversion so one odd value cannot poison the whole event."""
+    try:
+        json.dumps(obj, ensure_ascii=False)
+        return obj
+    except (TypeError, ValueError):
+        if isinstance(obj, dict):
+            return {str(k): _jsonable(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple, set)):
+            return [_jsonable(v) for v in obj]
+        return str(obj)

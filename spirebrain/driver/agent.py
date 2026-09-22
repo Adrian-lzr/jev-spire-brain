@@ -43,6 +43,7 @@ from spirebrain.jev_brain.state import (
     path_damage_probes,
     shop_items,
 )
+from spirebrain.overlay.feed import DecisionFeed, decision_event, run_state_event
 from spirebrain.tactical.combat_greedy import Card, CombatState, play_order
 from spirebrain.tactical.hp_budget import HPBudget
 
@@ -112,7 +113,8 @@ class SpireBrainAgent:
 
     def __init__(self, jev_backend: str = "mock", strategy_path: str | Path | None = None,
                  log_dir: str | Path | None = None,
-                 acceptance: str | None = None) -> None:
+                 acceptance: str | None = None,
+                 feed: DecisionFeed | None = None) -> None:
         strategy_file = Path(strategy_path) if strategy_path else ROOT / "config" / "strategy.json"
         self.strategy = json.loads(strategy_file.read_text(encoding="utf-8"))
         self.goal = self.strategy.get("goal", "")
@@ -130,7 +132,17 @@ class SpireBrainAgent:
         # that follows. The protocol is one command per screen, so the intent has
         # to survive across two states.
         self._pending_upgrade: int | None = None
+        # Guard #3 (ported from Ethics03/jevspire): navigation never costs a JEV
+        # call. Two rules, both marked with `reason_source: navigation`:
+        #   - non-decision screens get Proceed, not a model question;
+        #   - a shop is *asked* once per floor — the state that comes back after
+        #     a purchase is the same room wanting an exit, not a new decision.
+        self._shop_decided_on_floor: int | None = None
         self.history: list[dict] = []
+        # Phase 1.5, the interaction layer: an optional live feed of everything
+        # the brain is thinking. None (the default) changes nothing — the feed
+        # is an observability side-channel, never a dependency.
+        self.feed = feed
 
     # -- lifecycle --------------------------------------------------------- #
     def observe(self, game) -> None:
@@ -163,6 +175,17 @@ class SpireBrainAgent:
             goal=self.goal,
         ).with_budget(self.hp)
 
+        self._publish_state()
+
+    def _publish_state(self) -> None:
+        """Push a run snapshot to the feed, if anyone is watching."""
+        if self.feed is None:
+            return
+        try:
+            self.feed.publish("run_state", run_state_event(self))
+        except Exception:  # noqa: BLE001 - the dashboard must not break the run
+            pass
+
     def choose_action(self, game) -> dict:
         """Return ONE CommunicationMod command for the current screen."""
         self.observe(game)
@@ -179,7 +202,14 @@ class SpireBrainAgent:
         if handler is None and screen in GRID_SCREENS:
             handler = self._on_grid
         if handler is None:
-            return {"command": "wait", "reason": f"no handler for screen {screen!r}"}
+            # Guard #3 (jespire): a screen that is not a decision point gets a
+            # navigation Proceed — never a JEV call, and never a `wait`, which
+            # would leave the pipe idle forever on a screen the game expects an
+            # answer for. If Proceed is not offered, the transport's SAFE_VERBS
+            # substitution picks the next safe word; if Proceed does nothing,
+            # the transport's stall guard stops the loop instead of retrying.
+            return {"command": "proceed", "reason_source": "navigation",
+                    "reason": f"non-decision screen {screen!r}: navigation only, no JEV call"}
         return handler(game)
 
     # -- shared helpers ---------------------------------------------------- #
@@ -192,6 +222,11 @@ class SpireBrainAgent:
             "detail": decision.detail,
             "command": command,
         })
+        if self.feed is not None:
+            try:
+                self.feed.publish("decision", decision_event(decision, command))
+            except Exception:  # noqa: BLE001 - the dashboard must not break the run
+                pass
         return command
 
     def _budget(self) -> HPBudget:
@@ -349,6 +384,15 @@ class SpireBrainAgent:
         pipe — if the ordering differs, we buy the wrong item, which is visible
         and recoverable, so this stays a flagged assumption rather than a blocker.
         """
+        floor = int(_get(game, "floor", "floor_num", default=0))
+        if self._shop_decided_on_floor == floor:
+            # Guard #3 (jespire): the decision for this room already happened;
+            # the state that comes back after a purchase is the same room
+            # wanting an exit, not a new question. Re-asking JEV against a
+            # half-empty shelf spends a call to re-derive "leave".
+            return {"command": "return", "reason_source": "navigation",
+                    "reason": "second visit to the same shop this floor: leaving, no JEV call"}
+        self._shop_decided_on_floor = floor
         screen = _get(game, "screen_state", "screen", default=game)
         gold = int(_get(game, "gold", default=0))
         raw = []
