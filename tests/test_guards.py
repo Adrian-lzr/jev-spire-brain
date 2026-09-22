@@ -128,16 +128,18 @@ def _clean_env(monkeypatch_target: str = "JEVBRAIN_MAX_ACTIONS") -> dict:
     return saved
 
 
-def test_default_action_limit_is_1000():
-    """1000, not jespire's 200: one command per wire action means a healthy
-    full ascent spends 500-700, and the live run on 2026-09-22 hit 200 mid-run
-    (that specific death was the wait-bug loop, but even a clean run would
-    have tripped it). The cap is for runaways, not for long games."""
+def test_default_action_limit_is_5000():
+    """5000, user call 2026-09-22 evening. The budget is now per run (reset on
+    every menu->in_game edge) and the unmodeled-screen ladder removed the only
+    loop that ever reached the cap, so the cap is backstop duty and can be
+    generous. History of this number: jespire's 200 killed a healthy run
+    mid-Act 2 (2026-09-22 15:20); 1000 was the fix until the budget-reset and
+    the ladder changed what the cap protects."""
     saved = _clean_env()
     try:
         with tempfile.TemporaryDirectory() as tmp:
             transport = StdioTransport(_StubAgent(), log_path=None)
-            assert transport.max_commands == 1000
+            assert transport.max_commands == 5000
     finally:
         if saved is not None:
             os.environ["JEVBRAIN_MAX_ACTIONS"] = saved
@@ -238,6 +240,135 @@ def test_shop_rule_resets_on_a_new_floor():
         again = agent.choose_action(_shop(floor=6))  # a different room, a real question
         assert agent.jev.calls > calls_on_floor5
         assert again.get("reason_source") != "navigation"
+
+
+# --------------------------------------------------------------------------- #
+# Guard 4: the unmodeled-screen ladder
+# --------------------------------------------------------------------------- #
+def _unmodeled_msg(state: dict | None = None) -> str:
+    """A screen the mod cannot act on: no advancing verb is offered.
+
+    Shaped exactly like the live payload of 2026-09-22 18:08 (after Neow's
+    reward): available_commands is [key, click, wait, state] only.
+    """
+    return _msg(state if state is not None else {"screen_type": "NONE",
+                                                 "screen_state": {}},
+                available_commands=["key", "click", "wait", "state"])
+
+
+def _unmodeled(**over) -> dict:
+    state = {"screen_type": "NONE", "screen_state": {}}
+    state.update(over)
+    return state
+
+
+def test_unmodeled_screen_gets_waits_then_keys_then_click():
+    """The ladder, rung by rung: 2 waits -> SPACE -> ESCAPE -> click, then the
+    cycle repeats. Every rung must be a well-formed line the game accepts."""
+    with tempfile.TemporaryDirectory() as tmp:
+        agent = _StubAgent()
+        transport = StdioTransport(agent, log_path=None)
+        same = _unmodeled_msg()
+        sequence = [transport.handle_message(json.loads(same)) for _ in range(10)]
+        assert sequence[0] == "wait 20"
+        assert sequence[1] == "wait 20"
+        assert sequence[2] == "key SPACE"
+        assert sequence[3] == "key ESCAPE"
+        assert sequence[4] == "click 960 540"
+        assert sequence[5] == "wait 20"  # a second cycle starts
+        assert transport.stalled is False
+
+def test_unmodeled_screen_stops_loudly_after_three_cycles():
+    with tempfile.TemporaryDirectory() as tmp:
+        err = io.StringIO()
+        feed = DecisionFeed()
+        agent = _StubAgent(feed=feed)
+        transport = StdioTransport(agent, log_path=None, warn_stream=err)
+        same = _unmodeled_msg()
+        # 3 cycles x 5 rungs = 15 rungs; the 16th message stops loudly.
+        for _ in range(15):
+            assert transport.handle_message(json.loads(same)) is not None
+        assert transport.ladder_stopped is False  # the last rung is not the stop
+        assert transport.handle_message(json.loads(same)) is None  # msg 16 stops
+        assert transport.ladder_stopped is True
+        assert transport.ladder_events == 1
+        assert "UNMODELED SCREEN" in err.getvalue()
+        ends = [e for e in feed.history() if e["kind"] == "run_end"]
+        assert ends and ends[-1]["reason"] == "unmodeled_screen"
+        # Latched: no more messages are answered on this fingerprint...
+        assert transport.handle_message(json.loads(same)) is None
+        assert transport.ladder_events == 1  # ...and the alarm does not re-fire
+
+
+def test_unmodeled_screen_auto_resumes_when_a_modeled_screen_returns():
+    """A new modeled screen clears the latch by itself - a human (or an
+    animation) resolved the screen, and the agent must come back to life
+    without a game restart."""
+    with tempfile.TemporaryDirectory() as tmp:
+        err = io.StringIO()
+        agent = _StubAgent()
+        transport = StdioTransport(agent, log_path=None, warn_stream=err)
+        stuck = _unmodeled_msg()
+        for _ in range(15):
+            assert transport.handle_message(json.loads(stuck)) is not None
+        assert transport.ladder_stopped is False  # 15 rungs are the last cycle
+        assert transport.handle_message(json.loads(stuck)) is None  # msg 16 stops
+        assert transport.ladder_stopped is True
+        assert transport.ladder_events == 1  # announced exactly once
+        assert "UNMODELED SCREEN" in err.getvalue()
+        # The game moved on: a real, actionable screen arrives.
+        assert transport.handle_message(json.loads(_msg(_state()))) == "choose 0"
+        assert transport.ladder_stopped is False
+        assert transport._ladder_fp is None
+        # And a LATER unmodeled screen gets a fresh ladder, not the old latch.
+        assert transport.handle_message(json.loads(stuck)) == "wait 20"
+
+
+def test_unmodeled_ladder_never_asks_the_agent():
+    """The ladder is navigation, not a decision: the model is never consulted
+    for a screen nobody can act on."""
+    with tempfile.TemporaryDirectory() as tmp:
+        agent = _StubAgent()
+        transport = StdioTransport(agent, log_path=None)
+        same = _unmodeled_msg()
+        for _ in range(14):
+            transport.handle_message(json.loads(same))
+        assert agent.seen == []
+
+
+def test_run_budget_resets_on_a_new_run():
+    """The action budget is per run, not per process: a menu -> in_game edge
+    refills it. The 18:08 session's third run died ~50 commands in because
+    the counter carried its predecessors' debt."""
+    with tempfile.TemporaryDirectory() as tmp:
+        err = io.StringIO()
+        transport = StdioTransport(_StubAgent(), log_path=None, max_commands=5,
+                                   warn_stream=err)
+        # Run 1: hit the cap.
+        lines = [_msg(_state(floor=i)) for i in range(10)]
+        assert transport.run(iter(lines), _NoopStream(), send_ready=False) == 5
+        assert transport.action_limit_hit is True
+        # Back to the menu, then a new run starts.
+        menu = json.loads(_msg(None, in_game=False))
+        transport.handle_message(menu)  # in_game False: no budget reset yet
+        assert transport.commands == 5  # unchanged while at the menu
+        new_run = json.loads(_msg(_state(floor=0)))
+        transport.handle_message(new_run)
+        assert transport.commands == 1  # refilled
+        assert transport.action_limit_hit is False
+
+
+def test_unmodeled_screen_waits_cost_far_under_the_cap():
+    """The whole reason guard 4 exists: the identical failure on the old code
+    burned 991 waits on ONE screen. The ladder must spend an order less."""
+    with tempfile.TemporaryDirectory() as tmp:
+        agent = _StubAgent()
+        transport = StdioTransport(agent, log_path=None)
+        same = _unmodeled_msg()
+        for _ in range(60):  # six times the cycles the ladder allows
+            transport.handle_message(json.loads(same))
+        assert transport.commands <= 20
+        assert transport.ladder_stopped is True
 
 
 # --------------------------------------------------------------------------- #

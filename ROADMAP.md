@@ -90,6 +90,28 @@ Legend: `[x]` done · `[~]` done but unverifiable until an external condition is
      once per floor — the post-purchase state is the room wanting an exit.
 - [x] 11 guard tests (`tests/test_guards.py`); 16/16 test files green
 
+- [x] **Unmodeled-screen ladder + per-run action budget (2026-09-22 evening,
+  guard #4, own design)** — the third real-run death, dissected from
+  `logs/pipe.jsonl`: after Neow's reward the game showed a screen whose
+  `available_commands` were only `[key, click, wait, state]` — no advancing
+  verb — and the agent answered 991 `wait 20` in 66 s, hit the 1000 cap, and
+  exited ("agent not reachable"). Two root causes, both fixed:
+  1. **The ladder** (`stdio.py`): a screen with no advancing verb is
+     *unmodeled* — waiting there is the loop, not progress. The transport now
+     climbs a ladder (2 waits → SPACE → ESCAPE → centre click, 3 cycles max),
+     then pauses loudly with the reason (stderr + `run_end` feed event,
+     `reason: unmodeled_screen`) and auto-resumes when a modeled screen
+     returns. Replayed the 991-message crime scene through the fix: 15
+     commands, one announcement, process alive. Note the subtle trap this
+     exposed: "stay silent" must return **None**, not `""` — an empty string
+     is falsy in `run()` but breaks `is None` callers and reads as a bug.
+  2. **Per-run budget**: the action cap was process-wide, so a player
+     restarting a run in-game spent one shared counter — the third run of the
+     18:08 session died ~50 commands in, which read as "the cap is too
+     small". The cap now resets on every menu→in_game edge (and the default
+     is 5000, backstop duty now that the only known loop is gone).
+  6 new tests (`tests/test_guards.py`, 17 total there); 16/16 files green.
+
 ## Phase 2 — The brain (offline-first)
 - [x] `jev_brain/client.py` — three primitives, specs, answers, confidence conventions
 - [x] `jev_brain/client_real.py` — real HTTP client (TypeSafe direct + Cloudflare

@@ -54,14 +54,23 @@ argument, and a dead dashboard can never break a run (proven by
 `tests/test_overlay.py::test_agent_survives_a_hostile_feed`).
 
 GUARDS **Three runaway guards, ported from [Ethics03/jevspire](https://github.com/Ethics03/jevspire)**
-(the only other CommunicationMod+JEV project), all "stop spending, keep the game
-alive": a **stall guard** that latches auto-decisions off when the identical
-game state returns after our command (it did not take effect — retrying is how
-an agent burns money in a loop); an **action limit** (default 200 commands per
-process, `JEVBRAIN_MAX_ACTIONS` to change, <=0 unlimited) that stops a confused
-run loudly instead of quietly; and **navigation without the model** —
+(the only other CommunicationMod+JEV project), plus a fourth of our own, all
+"stop spending, keep the game alive": a **stall guard** that latches
+auto-decisions off when the identical game state returns after our command (it
+did not take effect — retrying is how an agent burns money in a loop); an
+**action limit** (default 5000 commands, **per run** — refilled on every
+menu→in-game edge, `JEVBRAIN_MAX_ACTIONS` to change, <=0 unlimited) that stops
+a confused run loudly instead of quietly; **navigation without the model** —
 non-decision screens get Proceed and a shop is asked once per floor, so no JEV
-call is ever spent re-deriving "leave". Covered in `tests/test_guards.py`.
+call is ever spent re-deriving "leave"; and the **unmodeled-screen ladder**
+(own design, 2026-09-22 evening): a screen whose `available_commands` offer no
+advancing verb gets two waits, SPACE, ESCAPE, a centre click — three cycles at
+most — then a loud pause with a reason, auto-resuming the moment a known
+screen returns. Born from a real death: after Neow's reward the game showed a
+screen the mod cannot act on, and the old code answered with 991 `wait 20` in
+66 seconds, hit the cap, and exited — the player saw "agent not reachable".
+Replayed through the fixed transport: 15 commands, one announcement, alive.
+Covered in `tests/test_guards.py`.
 
 ## Quick start — one command
 

@@ -56,15 +56,22 @@ READY = "Ready"
 #    JEVBRAIN_MAX_ACTIONS). A confused agent that "plays" 5000 cards is a
 #    runaway, and the cap is what turns that into a visible stop.
 # 3. NAVIGATION WITHOUT THE MODEL lives in agent.py (non-decision screens get
-#    Proceed, shops are asked once per floor) — listed here so all three guard
-#    names are documented in one place.
-# 1000, not jespire's 200: the cap exists to stop a *runaway* (a confused
-# loop burning API money), but this agent sends one command per wire action —
-# play, choose, and every combat card — so a healthy full ascent spends
-# 500-700. Measured 2026-09-22: a live run died at 200 in the error-loop
-# below, but even a clean run would have hit it mid-Act 2. 1000 still turns
-# a true runaway into a visible stop, ~10x over what a good run needs.
-DEFAULT_MAX_ACTIONS = 1000
+#    Proceed, shops are asked once per floor) — listed here so the guard names
+#    stay documented in one place.
+# 4. UNMODELED-SCREEN LADDER (own design, 2026-09-22 evening): a screen whose
+#    available_commands offer no advancing verb cannot be acted on at all.
+#    Waiting forever there is how the 18:08 run burned 991 waits and died on
+#    the action cap ("agent not reachable"). The ladder: two waits, a centre
+#    click, SPACE, then a loud stop — with auto-resume the moment a modeled
+#    screen returns.
+# 1000 -> 5000 (user call, 2026-09-22 evening). Two changes the same night
+# reshaped what the cap protects. (1) The budget is now PER RUN, not per
+# process — _reset_run_budget() fires on every menu->in_game edge, because a
+# player restarting a run in-game was spending one shared counter (the third
+# run of the 18:08 session died after ~50 commands; that is why 1000 "felt
+# small"). (2) The ladder removed the only loop that ever reached the cap, so
+# the cap is back to pure backstop duty and can be generous.
+DEFAULT_MAX_ACTIONS = 5000
 DEFAULT_STALL_LIMIT = 2
 
 # Verbs that cannot advance a run by themselves. Sending one is not "acting on
@@ -115,6 +122,28 @@ INTENT_ALIASES = {
 # STATE is last because it re-transmits without advancing anything — correct
 # when we are confused, but it does not move the run forward.
 SAFE_VERBS = ("proceed", "return", "wait", "state")
+
+# Verbs the ROUTER can emit that actually move a run forward. A screen whose
+# available_commands contain none of these is UNMODELED: CommunicationMod has
+# no API for whatever the game is showing (measured 2026-09-22 18:08: after
+# Neow's reward the game showed a screen offering only [key, click, wait,
+# state] — the agent answered with 991 `wait 20` in 66 seconds and died on the
+# action cap). `key`/`click` are deliberately NOT in this set: the router
+# never emits them — the only code that does is the unmodeled-screen ladder
+# below, under guard #4's own budget. `wait`/`state` cannot advance anything.
+ADVANCING_VERBS = frozenset({"start", "play", "end", "choose", "proceed",
+                             "return", "potion"})
+
+# The ladder for unmodeled screens: one cycle is this exact rung sequence,
+# tried on the same screen fingerprint. The game may ignore keys during an
+# animation, so the cycle repeats; after LADDER_CYCLES_BEFORE_STOP full
+# cycles, stop loudly instead of cycling forever.
+LADDER_CYCLE = ("wait", "wait", "SPACE", "ESCAPE", "click")
+LADDER_WAITS_BEFORE_KEY = 2   # kept for tests/documentation of intent
+# Trip the loud-stop after this many full ladder cycles on the same unmodeled
+# screen fingerprint: 5 rungs x 3 cycles is ~15 messages - far under any cap,
+# and if none of that advanced the game, only a human can.
+LADDER_CYCLES_BEFORE_STOP = 3
 
 
 def to_command_line(command: dict) -> str:
@@ -224,12 +253,78 @@ class StdioTransport:
         self.stalled = False          # latched by the stall guard, cleared on a new state
         self.stuck_events = 0         # how many times the stall guard fired
         self.action_limit_hit = False
+        self.ladder_stopped = False   # latched by the unmodeled-screen ladder
+        self.ladder_events = 0        # how many times the ladder stopped for a human
         self.substitutions: list[dict] = []
         # Guard warnings go here (default stderr). Injectable because stderr is
         # how the tests check that a guard *said something* when it fired.
         self.warn_stream = warn_stream if warn_stream is not None else sys.stderr
         self._acted_fingerprint: str | None = None
         self._stuck_seen = 0
+        # Guard #4 (unmodeled-screen ladder) state: fingerprint of the screen
+        # we are climbing on, and the rung index within the ladder cycle.
+        self._ladder_fp: str | None = None
+        self._ladder_step = 0
+        self._in_game = False
+
+    def _reset_run_budget(self) -> None:
+        """Per-run action budget: a fresh run inside the same process starts
+        with a full counter. The 18:08 session's third run died ~50 commands
+        in because the first two runs had already spent the process-wide cap —
+        the player read that as "1000 is too small"; it was really "budget
+        never resets"."""
+        self.commands = 0
+        self.action_limit_hit = False
+
+    def _ladder_command(self, fp: str) -> str:
+        """Next rung of the unmodeled-screen ladder, tracking cycles.
+
+        The full cycle runs LADDER_CYCLES_BEFORE_STOP times; the message AFTER
+        the last rung stops loudly (once - later silent messages change
+        nothing, so the announcement does not repeat and ladder_events does
+        not inflate).
+        """
+        if fp != self._ladder_fp:
+            self._ladder_fp = fp
+            self._ladder_step = 0
+        total_rungs = len(LADDER_CYCLE) * LADDER_CYCLES_BEFORE_STOP
+        if self._ladder_step >= total_rungs:
+            if not self.ladder_stopped:
+                self.ladder_stopped = True
+                self.ladder_events += 1
+                self._announce_unmodeled(fp)
+            return None  # stay silent; a new modeled screen auto-resumes
+        rung = LADDER_CYCLE[self._ladder_step % len(LADDER_CYCLE)]
+        self._ladder_step += 1
+        if rung == "wait":
+            return f"wait {DEFAULT_WAIT_FRAMES}"
+        if rung == "click":
+            # Centre of the game's native 1920x1080. The live payload does not
+            # carry dimensions; correct here on first live contact if it misses.
+            return "click 960 540"
+        return f"key {rung}"
+
+    def _announce_unmodeled(self, fp: str) -> None:
+        # ASCII only - see _announce_stall for the codepage reason.
+        print(
+            f"[stdio] UNMODELED SCREEN: {LADDER_CYCLES_BEFORE_STOP} ladder cycles "
+            f"(waits, click, SPACE, ESCAPE) did not advance this screen "
+            f"(fingerprint {fp[:12]}). The mod offers no command for what the "
+            f"game is showing - look at the game window and act by hand; the "
+            f"agent resumes by itself when a known screen returns.",
+            file=self.warn_stream, flush=True)
+        feed = getattr(self.agent, "feed", None)
+        if feed is not None:
+            try:
+                feed.publish("run_end", {
+                    "summary": "Unmodeled screen: clicks and keys did not "
+                               "advance it; pausing auto-decisions until a "
+                               "known screen returns.",
+                    "reason": "unmodeled_screen",
+                    "fingerprint": fp,
+                })
+            except Exception:  # noqa: BLE001 - a dead dashboard must not break the pipe
+                pass
 
     @staticmethod
     def _fingerprint(game: dict) -> str:
@@ -260,6 +355,7 @@ class StdioTransport:
             # may be sitting in the menu on purpose, and this agent is meant to
             # be watched while it plays.
             self.menu_idle += 1
+            self._in_game = False
             if not self.auto_start:
                 if self.menu_idle == 1:
                     # Say so out loud, once. Measured 2026-09-21: a real launch with
@@ -278,6 +374,16 @@ class StdioTransport:
                                  "ascension": self.ascension}),
                 message.get("available_commands"))
 
+        if not self._in_game:
+            # Menu -> in_game edge: a new run has begun inside this process.
+            # Give the action budget back — a restarted run is a new run, not
+            # the tail of the old one (the third run of 18:08 died ~50 commands
+            # in, spending its predecessors' debt).
+            self._in_game = True
+            self._reset_run_budget()
+            self._ladder_fp = None
+            self.ladder_stopped = False
+
         if not message.get("ready_for_command", True):
             # Absence of the flag is treated as "ready" rather than stalling
             # forever. PHASE 1 VERIFY: confirm no mid-animation states get
@@ -291,7 +397,14 @@ class StdioTransport:
             # guess. PHASE 1 VERIFY: check whether this occurs in practice.
             return "state"
 
+        available = message.get("available_commands")
         fp = self._fingerprint(game)
+        if not isinstance(available, list) or not any(
+                str(a).strip().lower() in ADVANCING_VERBS for a in available):
+            # Guard #4 (unmodeled-screen ladder): the mod offers no verb that
+            # can advance anything. Waiting here forever was the 18:08 death —
+            # 991 waits in 66 seconds. Climb the ladder instead.
+            return self._ladder_command(fp)
         if self.stalled:
             if fp != self._acted_fingerprint:
                 # A state we have never acted on: whatever stuck us is gone
@@ -316,7 +429,7 @@ class StdioTransport:
             self._stuck_seen = 0
 
         line = to_command_line(self.agent.choose_action(game))
-        line = self._ensure_offered(line, message.get("available_commands"))
+        line = self._ensure_offered(line, available)
         self.commands += 1
         if line and _verb_of(line) not in NON_ADVANCING_VERBS:
             # Only an advancing command counts as "acted on this state".
@@ -327,6 +440,9 @@ class StdioTransport:
             # that both failed to move the game are exactly the runaway this
             # guard exists to stop. Only a genuinely new state clears it.
             self._acted_fingerprint = fp
+        # A modeled screen is back: whatever the ladder was stuck on is gone.
+        self._ladder_fp = None
+        self.ladder_stopped = False
         return line
 
     def _announce_stall(self, fp: str) -> None:
@@ -554,7 +670,8 @@ def main(argv: list[str]) -> int:
           f"{transport.commands} commands, {transport.errors} errors, "
           f"{transport.menu_idle} menu states, "
           f"{len(transport.substitutions)} substitutions, "
-          f"{transport.stuck_events} stall-guard trips"
+          f"{transport.stuck_events} stall-guard trips, "
+          f"{transport.ladder_events} unmodeled-screen stops"
           + (" (action limit hit)" if transport.action_limit_hit else ""),
           file=sys.stderr)
     return 0
