@@ -132,6 +132,11 @@ class SpireBrainAgent:
         # that follows. The protocol is one command per screen, so the intent has
         # to survive across two states.
         self._pending_upgrade: int | None = None
+        # Set when this handler picks a card on ANY grid; consumed on the
+        # confirm-phase state of the same grid (measured live 2026-09-22:
+        # grids are two-phase — choose N puts the card in the slot, the same
+        # screen returns offering confirm/cancel, CONFIRM finalizes).
+        self._grid_picked: int | None = None
         # Guard #3 (ported from Ethics03/jevspire): navigation never costs a JEV
         # call. Two rules, both marked with `reason_source: navigation`:
         #   - non-decision screens get Proceed, not a model question;
@@ -201,6 +206,12 @@ class SpireBrainAgent:
         }.get(screen)
         if handler is None and screen in GRID_SCREENS:
             handler = self._on_grid
+        else:
+            # A half-finished pick only means anything on the grid it was made
+            # on. Clearing it here — on every screen that is not a grid — keeps
+            # a stale selection from being confirmed on some later, unrelated
+            # grid (Neow's removal, then a shop removal twenty floors on).
+            self._grid_picked = None
         if handler is None:
             # Guard #3 (jespire): a screen that is not a decision point gets a
             # navigation Proceed — never a JEV call, and never a `wait`, which
@@ -363,12 +374,46 @@ class SpireBrainAgent:
         A grid we did not ask for (card-removal, discard) gets the conservative
         first card — that is a real choice with a real cost, so it is logged as a
         fallback rather than passed off as a decision.
+
+        Two-phase grids, measured live (2026-09-22 18:54): after `choose N` the
+        SAME screen returns, now offering [confirm, cancel, ...] — the pick is
+        in the slot and the game wants CONFIRM to finalize. This handler tracks
+        what it picked; when the screen offers confirm, it confirms instead of
+        picking again (a second `choose` re-opens the slot, and the pipe
+        ping-pongs forever — the third live death that night).
         """
+        available = set()
+        # `available_commands` lives on the message, not the game_state; the
+        # router only sees game_state, so the transport passes it down when it
+        # differs. Fall back to the screen's own hint: CommunicationMod keeps
+        # the picked card in `screen_state.cards` and swaps the verb list.
+        for cmd in (_get(game, "available_commands", default=[]) or []):
+            available.add(str(cmd).strip().lower())
+        confirm_offered = "confirm" in available or \
+            bool(_get(_get(game, "screen_state", "screen", default={}),
+                      "confirm_button", "picked", default=False))
+
+        if confirm_offered and self._grid_picked is not None:
+            # Finalize the pick we made one state ago.
+            self._grid_picked = None
+            return {"command": "confirm"}
+        if confirm_offered:
+            # A confirm-only grid we did not pick (opened by the player?).
+            # Confirm is still the only way through; keep it honest in history.
+            return {"command": "confirm",
+                    "reason": "confirm offered with no pending pick; confirming to advance"}
+
         if self._pending_upgrade is not None:
             choice, self._pending_upgrade = self._pending_upgrade, None
-            return {"command": "choose", "choice": choice}
-        return {"command": "choose", "choice": 0,
-                "reason": "grid screen with no pending intent; took the first option"}
+            reason = None
+        else:
+            choice = 0
+            reason = "grid screen with no pending intent; took the first option"
+        self._grid_picked = choice
+        out = {"command": "choose", "choice": choice}
+        if reason:
+            out["reason"] = reason
+        return out
 
     def _hp_ratio(self) -> float:
         hp = self._budget()

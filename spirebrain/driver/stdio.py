@@ -100,18 +100,30 @@ DEFAULT_LOG = object()
 # The complete verb set from the CommunicationMod README. Our router is not
 # allowed to invent words: an unknown verb is ignored by the game, which from
 # this side is indistinguishable from the pipe having died.
+# CONFIRM/CANCEL joined on 2026-09-22 evening, from the live pipe: after a
+# GRID selection (Neow's card removal) the same screen comes back offering
+# [confirm, cancel, ...] — the mod's two-step select-then-finalize dance,
+# which this set's "complete" claim had quietly omitted. Every run death
+# that night started on exactly that screen.
 PROTOCOL_VERBS = frozenset({
-    "start", "potion", "play", "end", "choose", "proceed", "return", "key",
-    "click", "wait", "state",
+    "start", "potion", "play", "end", "choose", "confirm", "cancel",
+    "proceed", "return", "key", "click", "wait", "state",
 })
 
 # Our internal intent -> protocol verb. `skip` and `leave` are ours; the game
 # only knows RETURN.
+#
+# CONFIRM/CANCEL were aliased here until 2026-09-22 evening (to proceed/return),
+# from back when "cancel" meant *our* intent "leave this screen". Once they
+# turned out to be real protocol verbs — the GRID screen after a selection
+# offers exactly [confirm, cancel, ...] — the alias became a silent lie: the
+# router said `confirm`, this map rewrote it to `proceed`, proceed was not
+# offered, SAFE_VERBS fell through to `wait`, and the game sat on a screen it
+# was waiting to be CONFIRMED on. Aliases are for words the game does not know;
+# never for words it does.
 INTENT_ALIASES = {
     "skip": "return",
     "leave": "return",
-    "cancel": "return",
-    "confirm": "proceed",
     "purge": "choose",   # card-removal is one of the shop's choices
     "smith": "choose",   # upgrading is one of the rest site's choices
     "rest": "choose",
@@ -125,14 +137,15 @@ SAFE_VERBS = ("proceed", "return", "wait", "state")
 
 # Verbs the ROUTER can emit that actually move a run forward. A screen whose
 # available_commands contain none of these is UNMODELED: CommunicationMod has
-# no API for whatever the game is showing (measured 2026-09-22 18:08: after
-# Neow's reward the game showed a screen offering only [key, click, wait,
-# state] — the agent answered with 991 `wait 20` in 66 seconds and died on the
-# action cap). `key`/`click` are deliberately NOT in this set: the router
-# never emits them — the only code that does is the unmodeled-screen ladder
-# below, under guard #4's own budget. `wait`/`state` cannot advance anything.
-ADVANCING_VERBS = frozenset({"start", "play", "end", "choose", "proceed",
-                             "return", "potion"})
+# no API for whatever the game is showing. `key`/`click` are deliberately NOT
+# in this set: the router never emits them — the only code that does is the
+# unmodeled-screen ladder below, under guard #4's own budget.
+# `wait`/`state` cannot advance anything. `confirm`/`cancel` belong here: the
+# 18:54 run died on a GRID screen that offered exactly [confirm, cancel, key,
+# click, wait, state] and the router had no word for either — the ladder
+# clicked blindly while the game waited for `confirm`.
+ADVANCING_VERBS = frozenset({"start", "play", "end", "choose", "confirm",
+                             "cancel", "proceed", "return", "potion"})
 
 # The ladder for unmodeled screens: one cycle is this exact rung sequence,
 # tried on the same screen fingerprint. The game may ignore keys during an
@@ -204,6 +217,16 @@ def to_command_line(command: dict) -> str:
             if command.get("seed") is not None:
                 parts.append(str(command["seed"]))
         return " ".join(["start", *parts])
+
+    if verb == "confirm":
+        # CONFIRM/CANCEL: the second half of a grid selection. `choose N` puts
+        # the card in the pick slot (measured 2026-09-22: after `choose 0` on
+        # Neow's removal grid, the same screen comes back offering confirm);
+        # CONFIRM finalizes it. Without this word the agent was mute on the
+        # exact screen every run of that night died on.
+        return "confirm"
+    if verb == "cancel":
+        return "cancel"
 
     if verb == "key":
         keyname = command.get("key", command.get("keyname"))
@@ -282,7 +305,10 @@ class StdioTransport:
         The full cycle runs LADDER_CYCLES_BEFORE_STOP times; the message AFTER
         the last rung stops loudly (once - later silent messages change
         nothing, so the announcement does not repeat and ladder_events does
-        not inflate).
+        not inflate). `fp` is the SCREEN signature (screen_type + command
+        list), not the full state hash - animations mutate the state every
+        few messages, and a full-state fingerprint resets the ladder mid-
+        climb forever, which is how the 18:54 run burned 5008 waits.
         """
         if fp != self._ladder_fp:
             self._ladder_fp = fp
@@ -338,6 +364,22 @@ class StdioTransport:
         except (TypeError, ValueError):
             blob = repr(game)
         return hashlib.sha1(blob.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _screen_signature(game: dict) -> str:
+        """What KIND of screen this is, ignoring its churning internals.
+
+        The ladder counts its rungs against THIS, not against the full state
+        fingerprint: live screens mutate every few messages (uuids, animation
+        counters, hp floats), and a full-hash ladder restarts mid-climb
+        forever - the 18:54 run spent 5008 waits that way. Two fields that do
+        not churn are enough to know we are on the same stuck screen.
+        """
+        try:
+            screen = str(game.get("screen_type", "?"))
+        except Exception:  # noqa: BLE001 - a hostile state degrades, never raises
+            screen = "?"
+        return screen
 
     # -- one message ------------------------------------------------------- #
     def handle_message(self, message: dict) -> str | None:
@@ -403,8 +445,11 @@ class StdioTransport:
                 str(a).strip().lower() in ADVANCING_VERBS for a in available):
             # Guard #4 (unmodeled-screen ladder): the mod offers no verb that
             # can advance anything. Waiting here forever was the 18:08 death —
-            # 991 waits in 66 seconds. Climb the ladder instead.
-            return self._ladder_command(fp)
+            # 991 waits in 66 seconds. Climb the ladder instead. The ladder's
+            # rungs count against the SCREEN signature, not the state hash:
+            # animations churn the state, and a churning hash restarts the
+            # ladder forever (the 18:54 death, 5008 waits).
+            return self._ladder_command(self._screen_signature(game))
         if self.stalled:
             if fp != self._acted_fingerprint:
                 # A state we have never acted on: whatever stuck us is gone
@@ -428,6 +473,12 @@ class StdioTransport:
         else:
             self._stuck_seen = 0
 
+        # Grid screens are two-phase (choose -> confirm), and the router needs
+        # the offered verbs to know which phase it is in. `available_commands`
+        # lives on the message, not the game_state, so pass it down: the agent
+        # reads it defensively and other screens ignore it.
+        game = dict(game)
+        game["available_commands"] = available
         line = to_command_line(self.agent.choose_action(game))
         line = self._ensure_offered(line, available)
         self.commands += 1

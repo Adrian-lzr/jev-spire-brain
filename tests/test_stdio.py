@@ -341,6 +341,57 @@ def test_menu_start_is_dropped_when_the_game_does_not_offer_it():
 
 
 
+def test_confirm_and_cancel_are_sent_verbatim_not_aliased():
+    """The 18:54 death, pinned.
+
+    GRID screens are two-phase: choose N, then the SAME screen returns offering
+    [confirm, cancel, ...] and the game waits to be CONFIRMED. We used to alias
+    `confirm`->proceed and `cancel`->return in INTENT_ALIASES (leftovers from
+    when "cancel" meant our own intent "leave this screen"); proceed was not
+    offered, so SAFE_VERBS degraded the line to `wait 20` and the run idled on a
+    screen that had already been answered. Aliases are for words the game does
+    not know.
+    """
+    from spirebrain.driver.stdio import to_command_line, INTENT_ALIASES
+    assert "confirm" not in INTENT_ALIASES and "cancel" not in INTENT_ALIASES
+    assert to_command_line({"command": "confirm"}) == "confirm"
+    assert to_command_line({"command": "cancel"}) == "cancel"
+
+
+def test_grid_confirm_phase_survives_the_transport_end_to_end():
+    """MAP -> GRID(choose) -> GRID(confirm), with the REAL router on the wire.
+
+    Before the fix the third state produced `wait 20`; the acceptance bar is that
+    no substitution and no ladder trip happens at all. The router's own
+    two-phase logic is covered in test_agent_router.py; this case exists to pin
+    the TRANSPORT half of the chain (verb -> line -> offered check).
+    """
+    from spirebrain.driver.agent import SpireBrainAgent
+    with tempfile.TemporaryDirectory() as tmp:
+        agent = SpireBrainAgent(jev_backend="mock", log_dir=tmp)
+        transport = StdioTransport(agent, log_path=None)
+        deck = [{"cost": 1, "name": "Strike", "id": "Strike_R", "type": "ATTACK"},
+                {"cost": 1, "name": "Defend", "id": "Defend_R", "type": "SKILL"},
+                {"cost": 2, "name": "Bash", "id": "Bash", "type": "ATTACK"}]
+        grid = {"screen_type": "GRID", "screen_state": {"cards": deck}}
+        steps = [
+            ({"screen_type": "MAP", "screen_state": {"next_nodes": [{"symbol": "M"}]}},
+             ["choose", "return", "key", "click", "wait", "state"]),
+            (grid, ["choose", "return", "key", "click", "wait", "state"]),
+            (grid, ["confirm", "cancel", "key", "click", "wait", "state"]),
+        ]
+        sent = [transport.handle_message({"in_game": True, "ready_for_command": True,
+                                          "available_commands": avail,
+                                          "game_state": dict(state, act=1, floor=0,
+                                                             current_hp=80, max_hp=80,
+                                                             gold=99, deck=deck)})
+                for state, avail in steps]
+        assert sent[1] == "choose 0"
+        assert sent[2] == "confirm", sent
+        assert transport.substitutions == []
+        assert transport.ladder_events == 0
+
+
 if __name__ == "__main__":
     import traceback
 

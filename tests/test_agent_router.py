@@ -160,6 +160,49 @@ def test_grid_without_a_pending_intent_takes_the_first_card():
         assert "no pending intent" in cmd["reason"]
 
 
+def test_grid_confirm_phase_finalizes_the_pick():
+    """Measured live 2026-09-22 18:54: after `choose N` on a grid, the SAME
+    screen returns offering [confirm, cancel, ...]. The pick is in the slot;
+    the game wants CONFIRM. A second `choose` re-opens the slot and the pipe
+    ping-pongs forever - the third live death that night."""
+    with tempfile.TemporaryDirectory() as tmp:
+        agent = _agent(tmp)
+        # Phase 1: the pick.
+        pick = agent.choose_action(_base(screen_type="GRID",
+                                         screen_state={"cards": DECK_10}))
+        assert pick["command"] == "choose"
+        # Phase 2: same screen, confirm now offered, state carries what we chose.
+        confirm = agent.choose_action(_base(
+            screen_type="GRID", screen_state={"cards": DECK_10},
+            available_commands=["confirm", "cancel", "key", "click", "wait", "state"]))
+        assert confirm["command"] == "confirm", confirm
+        # A later grid starts fresh (no stale confirm).
+        fresh = agent.choose_action(_base(screen_type="GRID",
+                                          screen_state={"cards": DECK_10}))
+        assert fresh["command"] == "choose"
+
+
+def test_a_half_finished_grid_pick_does_not_leak_to_a_later_grid():
+    """A pick only means something on the grid it was made on.
+
+    Without the clear-on-leave rule, a pick abandoned mid-dance (the player took
+    over, the run moved on) would still be in `_grid_picked` when an unrelated
+    confirm-phase grid showed up floors later — and we would confirm a selection
+    we never made, on a grid we never asked about.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        agent = _agent(tmp)
+        agent.choose_action(_base(screen_type="GRID", screen_state={"cards": DECK_10}))
+        assert agent._grid_picked == 0
+        agent.choose_action(_base(screen_type="MAP", screen_state={}))
+        assert agent._grid_picked is None, "a pick leaked past the grid it belongs to"
+        later = agent.choose_action(_base(
+            screen_type="GRID", screen_state={"cards": DECK_10},
+            available_commands=["confirm", "cancel", "key", "click", "wait", "state"]))
+        assert later["command"] == "confirm"
+        assert "no pending pick" in later["reason"]
+
+
 # --------------------------------------------------------------------------- #
 # Shop
 # --------------------------------------------------------------------------- #
