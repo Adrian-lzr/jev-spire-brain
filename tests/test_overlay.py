@@ -419,7 +419,8 @@ def test_state_snapshot_is_empty_but_shaped_before_anything_happens():
 
     snap = _state_snapshot(DecisionFeed())
     assert snap == {"last_decision": None, "last_advice": None,
-                    "last_outcome": None, "run_state": None}
+                    "last_outcome": None, "run_state": None,
+                    "agent_state": None}
 
 
 def test_state_snapshot_finds_the_outcome_past_the_agents_own_run_state():
@@ -532,6 +533,35 @@ def test_the_dashboard_refuses_to_share_its_port():
             assert "--port" in str(exc)   # the message carries the fix
     finally:
         first.httpd.server_close()
+
+
+
+def test_state_snapshot_carries_agent_presence():
+    """`agent_state` tells the in-game panel the agent is ALIVE but waiting.
+
+    Before this field the panel said "agent not online" while the advisor sat
+    at the main menu working exactly as designed (the 20:50 misreport): at the
+    menu the agent publishes nothing else, so an empty /state was read as
+    absence. Waiting is a state, not an error; it gets its own event, and the
+    overlay renders it calm green instead of alarm orange.
+    """
+    from spirebrain.overlay.feed import DecisionFeed
+    from spirebrain.overlay.server import _state_snapshot
+
+    feed = DecisionFeed()
+    feed.publish("agent_state", {"state": "waiting_for_run",
+                                 "detail": "军师在线，等你开局"})
+    snap = _state_snapshot(feed)
+    assert snap["agent_state"] == {"state": "waiting_for_run",
+                                   "detail": "军师在线，等你开局"}
+
+
+def test_state_snapshot_without_presence_reports_none():
+    from spirebrain.overlay.feed import DecisionFeed
+    from spirebrain.overlay.server import _state_snapshot
+
+    snap = _state_snapshot(DecisionFeed())
+    assert snap["agent_state"] is None
 
 
 if __name__ == "__main__":

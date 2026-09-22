@@ -553,6 +553,20 @@ class StdioTransport:
                               "to start a run (class/ascension/seed are your calls). "
                               "Advice begins on the run's first screen.",
                               file=sys.stderr, flush=True)
+                        # The panel must not say "agent not online" while the agent
+                        # is alive and waiting for the player to start a run - that
+                        # exact misreport is what the 20:50 session showed. A
+                        # presence event distinguishes "waiting" from "absent".
+                        feed = getattr(self.agent, "feed", None)
+                        if feed is not None:
+                            try:
+                                feed.publish("agent_state", {
+                                    "state": "waiting_for_run",
+                                    "detail": ("军师在线，等你开局：职业/升华/种子由你决定，"
+                                               "开局后第一屏开始给建议。"),
+                                })
+                            except Exception:  # noqa: BLE001
+                                pass
                     else:
                         print("[stdio] at the main menu and --auto-start is off: staying "
                               "silent so the player keeps control. Start a run in-game, or "

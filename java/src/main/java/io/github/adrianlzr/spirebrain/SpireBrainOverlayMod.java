@@ -132,8 +132,47 @@ public class SpireBrainOverlayMod implements PostInitializeSubscriber, RenderSub
             drawNotice(sb);
             return;
         }
+        if (!snap.hasAdvice && !snap.hasOutcome && snap.headline.isEmpty()
+                && "waiting_for_run".equals(snap.agentState)) {
+            // The agent is ALIVE and waiting for the player to start a run.
+            // Rendering "agent not online" here (the 20:50 misreport) taught the
+            // player their setup was broken when it was working exactly as
+            // designed. A calm green note, same panel shape.
+            drawWaiting(sb, snap);
+            return;
+        }
         resolveStrings(snap);
         drawPanel(sb, snap);
+    }
+
+    /** The advisor is alive and waiting for the player's first decision. */
+    private void drawWaiting(SpriteBatch sb, Snapshot snap) {
+        float scale = Settings.scale;
+        float pad = 14f * scale;
+        float w = Math.min(Settings.WIDTH * 0.52f, 760f * scale);
+        float x = (Settings.WIDTH - w) * 0.5f;
+        float top = Settings.HEIGHT - 26f * scale;
+        float bottom = top - 96f * scale;
+
+        sb.setColor(0f, 0f, 0f, 0.62f);
+        sb.draw(whitePixel, x - pad, bottom, w + 2f * pad, top - bottom + pad);
+
+        BitmapFont big = bigFont();
+        if (big == null) {
+            return;
+        }
+        Color calm = new Color(0.55f, 0.85f, 0.6f, 1f);
+        FontHelper.renderFontLeftTopAligned(sb, big,
+                fit(big, "军师在线，等你开局", "SpireBrain: online, waiting for you"),
+                x, top - 8f * scale, calm);
+        String detail = snap.agentDetail == null || snap.agentDetail.isEmpty()
+                ? "开局后第一屏开始给建议" : snap.agentDetail;
+        FontHelper.renderFontLeftTopAligned(sb, FontHelper.tipBodyFont,
+                fit(FontHelper.tipBodyFont, detail,
+                        "advice starts on the run's first screen"),
+                x, top - 44f * scale, Color.LIGHT_GRAY);
+        FontHelper.renderFontLeftTopAligned(sb, FontHelper.tipBodyFont,
+                "F8 = hide   |   " + dashboardUrl, x, top - 68f * scale, Color.GRAY);
     }
 
     /**

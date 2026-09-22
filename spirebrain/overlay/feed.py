@@ -42,7 +42,7 @@ from pathlib import Path
 
 # Event kinds the dashboard understands. Kept as a tuple so tests can assert
 # the vocabulary the same way PROTOCOL_VERBS pins the game's verb set.
-EVENT_KINDS = ("run_state", "decision", "advice", "outcome", "run_end")
+EVENT_KINDS = ("run_state", "decision", "advice", "outcome", "run_end", "agent_state")
 
 
 class DecisionFeed:

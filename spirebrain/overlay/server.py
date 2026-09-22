@@ -81,6 +81,7 @@ def _state_snapshot(feed: DecisionFeed) -> dict:
     last_decision = None
     last_advice = None
     last_outcome = None
+    agent_state = None
     for event in reversed(events):
         kind = event.get("kind")
         if last_decision is None and kind == "decision":
@@ -126,6 +127,11 @@ def _state_snapshot(feed: DecisionFeed) -> dict:
         if run_state is None and kind == "run_state":
             run_state = {k: v for k, v in event.items()
                          if k not in ("seq", "ts", "kind")}
+        if agent_state is None and kind == "agent_state":
+            agent_state = {
+                "state": event.get("state"),
+                "detail": event.get("detail") or "",
+            }
         # All four, not three. Stopping at "decision + advice + run_state" was a
         # real bug, found by reading /state against a live advisor session
         # (2026-09-22): the agent's own observe() publishes a run_state BETWEEN
@@ -136,7 +142,8 @@ def _state_snapshot(feed: DecisionFeed) -> dict:
         if run_state and last_decision and last_advice and last_outcome:
             break
     return {"last_decision": last_decision, "last_advice": last_advice,
-            "last_outcome": last_outcome, "run_state": run_state}
+            "last_outcome": last_outcome, "run_state": run_state,
+            "agent_state": agent_state}
 
 
 class PortInUse(RuntimeError):

@@ -72,6 +72,12 @@ public final class FeedClient {
         // -- run state ------------------------------------------------------ //
         public int hp, maxHp, budgetRemaining, budgetMax;
 
+        // -- agent presence ------------------------------------------------- //
+        /** "waiting_for_run": the agent is ALIVE at the main menu, not absent. */
+        public String agentState = "";
+        /** What to tell the player about that state (Chinese). */
+        public String agentDetail = "";
+
         // -- play-mode fallback (no advice in the payload) ------------------ //
         public String headline = "";
         public String detail = "";
@@ -154,11 +160,18 @@ public final class FeedClient {
         JSONObject outcome = state.optJSONObject("last_outcome");
         JSONObject last = state.optJSONObject("last_decision");
         JSONObject run = state.optJSONObject("run_state");
-        if (advice == null && outcome == null && last == null && run == null) {
+        JSONObject presence = state.optJSONObject("agent_state");
+        if (advice == null && outcome == null && last == null && run == null
+                && presence == null) {
             return null;
         }
 
         Snapshot snap = new Snapshot();
+
+        if (presence != null) {
+            snap.agentState = presence.optString("state", "");
+            snap.agentDetail = presence.optString("detail", "");
+        }
 
         if (advice != null) {
             String point = advice.optString("point", "");
