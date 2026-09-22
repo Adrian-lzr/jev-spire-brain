@@ -1,31 +1,18 @@
-"""CommunicationMod stdio transport — the entry point the game actually launches.
+"""The stdio transport: what the game actually launches.
 
-`agent.py` decides *what* to do; this module is *how it is said*. Between them
-they are the whole Phase 1 integration, and until now only the first half
-existed (`agent.py` had no `__main__` at all, so CommunicationMod had nothing to
-spawn).
+`agent.py` decides *what* to do; this module is *how it is said*. The pieces that
+are not about the pipe itself have been moved out (2026-09-22), because a
+1147-line file that also owns vocabulary, encoding and mode policy is a file
+nobody can safely change — and it was the file where both of that night's live
+deaths happened:
 
-Verified against the CommunicationMod README (fetched 2026-09-21). The four
-details that are easy to get wrong, all now implemented, all confirmed in that
-document:
+* `protocol.py` — the verb set, the intent aliases, and `to_command_line`
+* `modes.py`    — `advise` (default) vs `play`, and their poll settings
+* `encoding.py` — stream encodings and the lone-surrogate scrub
 
-1. **Send `Ready\\n` first.** "Make sure your process sends "Ready\\n" to stdout
-   when it is ready to receive commands." Without it the game hangs for ten
-   seconds and then the process quits — the mod's own FAQ entry.
-2. **PLAY is 1-indexed.** "CardIndex is 1-indexed to match up with the card
-   numbers in game." CHOOSE is 0-indexed. The agent stays 0-indexed throughout;
-   the +1 happens in `to_command_line()` and nowhere else.
-3. **There is no `skip` verb.** Skipping a card reward and leaving a shop are
-   both `RETURN`, which the README defines as "Equivalent to SKIP, CANCEL, and
-   LEAVE". `PURGE` and `SMITH` do not exist either — every screen choice is
-   `CHOOSE`.
-4. **Errors arrive as a message too**: `{"error": "...", "ready_for_command":
-   True}`. Silently ignoring one stalls the pipe, because the game is waiting for
-   input; we answer with `STATE`, which the README says is "Always available".
-
-Also encoded here: **nothing prints to stdout except `Ready` and commands.**
-stdout is captured into the game log; a stray print corrupts the stream, and the
-README points users at a log file for exactly this reason.
+Everything below is the transport proper: read a message, route it, write one
+command back, and keep the run alive while the player plays. The names above are
+re-exported here so callers (and tests) that import from `stdio` keep working.
 
 Anything that still cannot be confirmed offline is flagged `PHASE 1 VERIFY`.
 """
@@ -40,6 +27,27 @@ import time
 from pathlib import Path
 from typing import Any, Iterable
 
+from spirebrain.driver.encoding import (
+    configure_streams,
+    scrub_surrogates,
+)
+from spirebrain.driver.modes import (
+    ADVISE_POLL_VERBS,
+    DEFAULT_MODE,
+    DEFAULT_POLL_FRAMES,
+    MODES,
+)
+from spirebrain.driver.protocol import (
+    ADVANCING_VERBS,
+    DEFAULT_WAIT_FRAMES,
+    INTENT_ALIASES,
+    NON_ADVANCING_VERBS,
+    PROTOCOL_VERBS,
+    READY,
+    SAFE_VERBS,
+    to_command_line,
+    verb_of,
+)
 from spirebrain.driver.witness import (
     SCREEN_POINT,
     Advice,
@@ -48,6 +56,14 @@ from spirebrain.driver.witness import (
     label_for,
 )
 from spirebrain.overlay.feed import advice_event, outcome_event
+
+# Names that used to live in this module and are still imported from it. Kept as
+# thin aliases rather than a shim object: a caller that wants the new home should
+# import from there, and this list makes the old surface explicit instead of
+# implicit re-export magic.
+_scrub_surrogates = scrub_surrogates
+_verb_of = verb_of
+
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -83,20 +99,6 @@ READY = "Ready"
 DEFAULT_MAX_ACTIONS = 5000
 DEFAULT_STALL_LIMIT = 2
 
-# Verbs that cannot advance a run by themselves. Sending one is not "acting on
-# a state", so it must not arm the stall guard: `state` re-transmits on purpose
-# and `wait` waits on purpose — the state coming back unchanged is what they
-# are *for*.
-NON_ADVANCING_VERBS = frozenset({"state", "wait"})
-
-# Bare `wait` is not a command, it is an error: the game rejects it with
-# `Argument missing in command "wait".` (measured twice on 2026-09-22 — the
-# second time because the SAFE_VERBS substitution below bypassed
-# to_command_line and sent the verb name as the whole line). Every `wait`,
-# wherever it originates, goes out with a frame count: 20 frames is about a
-# third of a second, enough for a screen transition, invisible to a human.
-DEFAULT_WAIT_FRAMES = 20
-
 # Sentinel for "use the default log path". Distinct from None, because None must
 # mean *no logging at all* — tests pass None, and when None silently meant "write
 # to the repo's default file" the test suite appended 44 KB of synthetic game
@@ -105,56 +107,6 @@ DEFAULT_WAIT_FRAMES = 20
 # already being mistaken for a working pipe. Found 2026-09-21, before that
 # misinterpretation reached anyone else.
 DEFAULT_LOG = object()
-
-# The complete verb set from the CommunicationMod README. Our router is not
-# allowed to invent words: an unknown verb is ignored by the game, which from
-# this side is indistinguishable from the pipe having died.
-# CONFIRM/CANCEL joined on 2026-09-22 evening, from the live pipe: after a
-# GRID selection (Neow's card removal) the same screen comes back offering
-# [confirm, cancel, ...] — the mod's two-step select-then-finalize dance,
-# which this set's "complete" claim had quietly omitted. Every run death
-# that night started on exactly that screen.
-PROTOCOL_VERBS = frozenset({
-    "start", "potion", "play", "end", "choose", "confirm", "cancel",
-    "proceed", "return", "key", "click", "wait", "state",
-})
-
-# Our internal intent -> protocol verb. `skip` and `leave` are ours; the game
-# only knows RETURN.
-#
-# CONFIRM/CANCEL were aliased here until 2026-09-22 evening (to proceed/return),
-# from back when "cancel" meant *our* intent "leave this screen". Once they
-# turned out to be real protocol verbs — the GRID screen after a selection
-# offers exactly [confirm, cancel, ...] — the alias became a silent lie: the
-# router said `confirm`, this map rewrote it to `proceed`, proceed was not
-# offered, SAFE_VERBS fell through to `wait`, and the game sat on a screen it
-# was waiting to be CONFIRMED on. Aliases are for words the game does not know;
-# never for words it does.
-INTENT_ALIASES = {
-    "skip": "return",
-    "leave": "return",
-    "purge": "choose",   # card-removal is one of the shop's choices
-    "smith": "choose",   # upgrading is one of the rest site's choices
-    "rest": "choose",
-    "buy": "choose",
-}
-
-# If our chosen verb is not in `available_commands`, prefer these, in order.
-# STATE is last because it re-transmits without advancing anything — correct
-# when we are confused, but it does not move the run forward.
-SAFE_VERBS = ("proceed", "return", "wait", "state")
-
-# Verbs the ROUTER can emit that actually move a run forward. A screen whose
-# available_commands contain none of these is UNMODELED: CommunicationMod has
-# no API for whatever the game is showing. `key`/`click` are deliberately NOT
-# in this set: the router never emits them — the only code that does is the
-# unmodeled-screen ladder below, under guard #4's own budget.
-# `wait`/`state` cannot advance anything. `confirm`/`cancel` belong here: the
-# 18:54 run died on a GRID screen that offered exactly [confirm, cancel, key,
-# click, wait, state] and the router had no word for either — the ladder
-# clicked blindly while the game waited for `confirm`.
-ADVANCING_VERBS = frozenset({"start", "play", "end", "choose", "confirm",
-                             "cancel", "proceed", "return", "potion"})
 
 # The ladder for unmodeled screens: one cycle is this exact rung sequence,
 # tried on the same screen fingerprint. The game may ignore keys during an
@@ -166,136 +118,6 @@ LADDER_WAITS_BEFORE_KEY = 2   # kept for tests/documentation of intent
 # screen fingerprint: 5 rungs x 3 cycles is ~15 messages - far under any cap,
 # and if none of that advanced the game, only a human can.
 LADDER_CYCLES_BEFORE_STOP = 3
-
-# --------------------------------------------------------------------------- #
-# Modes
-# --------------------------------------------------------------------------- #
-# `advise` — the DEFAULT — recommends to the player and never acts. `play` is the
-# auto-player the offline measurements needed. The default is `advise` because
-# this tool exists to make a human play better: a helper that silently plays the
-# game for you is the wrong default for that job, and it is the difference
-# between a coach and a bot.
-MODES = ("advise", "play")
-DEFAULT_MODE = "advise"
-
-# In advise mode the ONLY commands we ever send are polls: `wait` re-evaluates
-# after N frames, `state` re-transmits. Both are non-advancing by definition, so
-# the mouse and the keyboard stay the player's. `proceed`/`return` are
-# deliberately absent even though SAFE_VERBS contains them — they move the run.
-ADVISE_POLL_VERBS = ("wait", "state")
-
-# Poll cadence in frames. 20 is ~1/3 second: fast enough that a recommendation
-# lands while the decision is still live, and since it is a poll and not an
-# action, being early costs a re-transmitted state, not a card played.
-DEFAULT_POLL_FRAMES = 20
-
-
-def to_command_line(command: dict) -> str:
-    """Turn the agent's command dict into the protocol's one-line form.
-
-    Note what is *absent*: there is no free-text path into the game. Every
-    command is a verb plus integer indices the tactical layer computed — the same
-    discipline as the JEV calls themselves, where the model supplies judgements
-    and the code supplies anything that must be exact.
-    """
-    verb = str(command.get("command", "")).strip().lower()
-    if not verb:
-        raise ValueError(f"command dict has no 'command' key: {command!r}")
-    verb = INTENT_ALIASES.get(verb, verb)
-
-    if verb == "play":
-        card = command.get("card", command.get("card_index"))
-        if card is None:
-            raise ValueError("play needs 'card'")
-        # The one place 0-indexed becomes 1-indexed. See module docstring (2).
-        target = command.get("target", command.get("target_index"))
-        line = f"play {int(card) + 1}"
-        return line + (f" {int(target)}" if target is not None else "")
-
-    if verb == "choose":
-        # CHOOSE takes an index OR a name; names come from the game state and
-        # avoid our label->index mapping entirely when they are available.
-        if command.get("name"):
-            return f"choose {command['name']}"
-        idx = command.get("choice", command.get("index"))
-        if idx is None:
-            raise ValueError("choose needs 'choice' or 'name'")
-        return f"choose {int(idx)}"
-
-    if verb == "potion":
-        action = str(command.get("action", "use")).lower()
-        slot = command.get("slot", command.get("choice"))
-        if slot is None:
-            raise ValueError("potion needs 'slot'")
-        target = command.get("target")
-        return f"potion {action} {int(slot)}" + (
-            f" {int(target)}" if target is not None else "")
-
-    if verb == "wait":
-        frames = command.get("frames", command.get("ms"))
-        return f"wait {int(frames) if frames is not None else DEFAULT_WAIT_FRAMES}"
-
-    if verb == "start":
-        # START PlayerClass [AscensionLevel] [Seed] — class is required, and the
-        # order is NOT (seed, difficulty, ascension); getting it wrong silently
-        # starts a different game.
-        klass = command.get("player_class", command.get("class"))
-        if not klass:
-            raise ValueError("start needs 'player_class'")
-        parts = [str(klass)]
-        if command.get("ascension") is not None:
-            parts.append(str(int(command["ascension"])))
-            if command.get("seed") is not None:
-                parts.append(str(command["seed"]))
-        return " ".join(["start", *parts])
-
-    if verb == "confirm":
-        # CONFIRM/CANCEL: the second half of a grid selection. `choose N` puts
-        # the card in the pick slot (measured 2026-09-22: after `choose 0` on
-        # Neow's removal grid, the same screen comes back offering confirm);
-        # CONFIRM finalizes it. Without this word the agent was mute on the
-        # exact screen every run of that night died on.
-        return "confirm"
-    if verb == "cancel":
-        return "cancel"
-
-    if verb == "key":
-        keyname = command.get("key", command.get("keyname"))
-        if not keyname:
-            raise ValueError("key needs 'key'")
-        timeout = command.get("timeout")
-        return f"key {keyname}" + (f" {int(timeout)}" if timeout is not None else "")
-
-    return verb  # end / proceed / return / state / click
-
-
-def _scrub_surrogates(obj):
-    """Drop the lone surrogates the CJK fork's JSON escapes can carry.
-
-    `json.loads` happily turns a `\\uD8xx` escape into a LONE surrogate
-    character (pairs are combined; anything left is alone), and the first
-    `.encode("utf-8")` on it raises UnicodeEncodeError - surrogates not
-    allowed. That is how one in-game state killed both agents 11 seconds into
-    the 2026-09-22 20:49 session: no advice, no error anywhere the player
-    could see, and the panel left saying "agent not online". Scrubbing at this
-    one boundary fixes every consumer (fingerprint, witness, agent, logging)
-    at once.
-    """
-    if isinstance(obj, str):
-        try:
-            obj.encode("utf-8")
-            return obj
-        except UnicodeEncodeError:
-            return obj.encode("utf-8", "ignore").decode("utf-8")
-    if isinstance(obj, dict):
-        return {_scrub_surrogates(k): _scrub_surrogates(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_scrub_surrogates(v) for v in obj]
-    return obj
-
-
-def _verb_of(line: str) -> str:
-    return line.split(" ", 1)[0].strip().lower()
 
 
 def _screen_of(game: Any) -> str:
@@ -1025,16 +847,10 @@ def replay(paths: list[Path], agent, *, log_path: str | Path | None = None,
 
 
 def main(argv: list[str]) -> int:
-    # Our diagnostics must survive the console encoding. Windows Python defaults
-    # to the locale codepage (cp936 on this machine), and the mod captures stderr
-    # into communication_mod_errors.log: the em dash in our banner arrived there
-    # as the two stray bytes `a1 aa`. Only stderr is reconfigured — stdout is the
-    # protocol stream and is ASCII by construction, so it is left alone.
-    if hasattr(sys.stderr, "reconfigure"):
-        try:
-            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-        except (OSError, ValueError):
-            pass
+    # Both pipes get pinned to UTF-8 up front: stderr carries our diagnostics
+    # into the mod's log, and stdin is the protocol stream the game writes UTF-8
+    # to (see `encoding.configure_streams` for the two deaths behind this).
+    configure_streams(sys.stdin, sys.stderr)
 
     def value(name: str) -> str | None:
         prefix = f"--{name}="
@@ -1101,20 +917,6 @@ def main(argv: list[str]) -> int:
           f"acceptance={acceptance or 'margin'} mode={transport.mode}; "
           f"waiting for state on stdin",
           file=sys.stderr)
-    # stdin is the protocol stream and MUST be decoded as UTF-8, whatever the
-    # console's locale is: the game (Java) writes UTF-8 bytes, and Windows
-    # Python would otherwise read them as the ANSI codepage (cp936 here) — the
-    # 21:15 session logged relic names as mojibake (`鐕冪儳涔嬭` for 燃烧之血)
-    # and a CJK character misread that way decodes into lone surrogates, which
-    # is exactly the poison that kept killing the agent. Reading with
-    # errors="replace" makes a malformed byte a '?' in our copy of the log —
-    # the JSON parser sees the game's own \uXXXX escapes either way, so the
-    # decision layer is untouched; only the log copy degrades.
-    if hasattr(sys.stdin, "reconfigure"):
-        try:
-            sys.stdin.reconfigure(encoding="utf-8", errors="replace")
-        except (OSError, ValueError):
-            pass
     transport.run(sys.stdin, sys.stdout)
     print(f"[stdio] stdin closed after {transport.messages} messages, "
           f"{transport.commands} commands, {transport.errors} errors, "
