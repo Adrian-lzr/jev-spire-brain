@@ -122,7 +122,7 @@ def test_build_then_parse_gives_back_the_exact_command():
     assert parsed["command"] == command, "the mod must see the path we intended"
     assert parsed["runAtGameStart"] == "true"
     assert parsed["verbose"] == "true"
-    assert parsed["maxInitializationTimeout"] == "10"
+    assert parsed["maxInitializationTimeout"] == "30"  # 10 was too short for a cold start
 
 
 def test_the_file_bytes_are_pure_ascii():

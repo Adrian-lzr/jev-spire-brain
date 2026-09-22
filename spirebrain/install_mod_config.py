@@ -60,7 +60,12 @@ KEYS = ("command", "runAtGameStart", "verbose", "maxInitializationTimeout")
 DEFAULT_BACKEND = "openrouter"
 DEFAULT_RUN_AT_GAME_START = True
 DEFAULT_VERBOSE = True
-DEFAULT_TIMEOUT = 10
+# 30 s, not the mod's own default 10: the agent's first cold start compiles
+# every .pyc and initializes the JEV client + gamedata, which measured well
+# over 10 s on 2026-09-22 — the game gave up ("Agent not reachable") before
+# the agent could say Ready. A longer window costs nothing when startup is
+# fast, because Ready is sent the moment it is.
+DEFAULT_TIMEOUT = 30
 
 
 # --------------------------------------------------------------------------- #

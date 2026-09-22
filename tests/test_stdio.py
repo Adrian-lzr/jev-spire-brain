@@ -88,7 +88,9 @@ def test_start_argument_order_is_class_then_ascension_then_seed():
 def test_simple_verbs_and_wait_and_key():
     for verb in ("end", "proceed", "state"):
         assert to_command_line({"command": verb}) == verb
-    assert to_command_line({"command": "wait"}) == "wait"
+    # Bare `wait` is rejected by the live game ("Argument missing in command
+    # \"wait\"." — measured 2026-09-22); it always carries a frame count.
+    assert to_command_line({"command": "wait"}) == "wait 20"
     assert to_command_line({"command": "wait", "frames": 30}) == "wait 30"
     assert to_command_line({"command": "key", "key": "End_Turn"}) == "key End_Turn"
     assert to_command_line({"command": "key", "key": "Map", "timeout": 50}) == "key Map 50"

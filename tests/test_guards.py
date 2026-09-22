@@ -97,7 +97,7 @@ def test_state_and_wait_commands_never_arm_the_stall_guard():
         transport = StdioTransport(agent, log_path=None, stall_limit=2)
         same = _msg(_state())
         for _ in range(5):
-            assert transport.handle_message(json.loads(same)) == "wait"
+            assert transport.handle_message(json.loads(same)) == "wait 20"
         assert transport.stalled is False and transport.stuck_events == 0
 
 
@@ -128,12 +128,16 @@ def _clean_env(monkeypatch_target: str = "JEVBRAIN_MAX_ACTIONS") -> dict:
     return saved
 
 
-def test_default_action_limit_is_200():
+def test_default_action_limit_is_1000():
+    """1000, not jespire's 200: one command per wire action means a healthy
+    full ascent spends 500-700, and the live run on 2026-09-22 hit 200 mid-run
+    (that specific death was the wait-bug loop, but even a clean run would
+    have tripped it). The cap is for runaways, not for long games."""
     saved = _clean_env()
     try:
         with tempfile.TemporaryDirectory() as tmp:
             transport = StdioTransport(_StubAgent(), log_path=None)
-            assert transport.max_commands == 200
+            assert transport.max_commands == 1000
     finally:
         if saved is not None:
             os.environ["JEVBRAIN_MAX_ACTIONS"] = saved

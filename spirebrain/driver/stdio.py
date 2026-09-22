@@ -58,7 +58,13 @@ READY = "Ready"
 # 3. NAVIGATION WITHOUT THE MODEL lives in agent.py (non-decision screens get
 #    Proceed, shops are asked once per floor) — listed here so all three guard
 #    names are documented in one place.
-DEFAULT_MAX_ACTIONS = 200
+# 1000, not jespire's 200: the cap exists to stop a *runaway* (a confused
+# loop burning API money), but this agent sends one command per wire action —
+# play, choose, and every combat card — so a healthy full ascent spends
+# 500-700. Measured 2026-09-22: a live run died at 200 in the error-loop
+# below, but even a clean run would have hit it mid-Act 2. 1000 still turns
+# a true runaway into a visible stop, ~10x over what a good run needs.
+DEFAULT_MAX_ACTIONS = 1000
 DEFAULT_STALL_LIMIT = 2
 
 # Verbs that cannot advance a run by themselves. Sending one is not "acting on
@@ -146,7 +152,11 @@ def to_command_line(command: dict) -> str:
 
     if verb == "wait":
         frames = command.get("frames", command.get("ms"))
-        return "wait" if frames is None else f"wait {int(frames)}"
+        # Bare `wait` is NOT valid: the live game rejects it with
+        # `Argument missing in command "wait".` (measured 2026-09-22, the
+        # pipe log caught the loop). Default to a third of a second — long
+        # enough for a transition, invisible to a human.
+        return f"wait {int(frames) if frames is not None else 20}"
 
     if verb == "start":
         # START PlayerClass [AscensionLevel] [Seed] — class is required, and the
@@ -316,9 +326,12 @@ class StdioTransport:
         return line
 
     def _announce_stall(self, fp: str) -> None:
+        # ASCII only: CommunicationMod writes stderr into
+        # communication_mod_errors.log via the platform codepage, and an em
+        # dash arrives there as mojibake (measured 2026-09-22).
         print(
             f"[stdio] STALL GUARD: the same game state came back {self._stuck_seen}x "
-            f"after we acted on it — the last command did not take effect. "
+            f"after we acted on it - the last command did not take effect. "
             f"Auto-decisions are paused for this state; play on manually or let a "
             f"new state arrive to resume. (fingerprint {fp[:12]})",
             file=self.warn_stream, flush=True)
@@ -385,9 +398,10 @@ class StdioTransport:
                 if not self.action_limit_hit:
                     # Guard #2 (jespire): say *why* the agent went quiet. A cap
                     # that trips silently looks exactly like a crashed process.
+                    # ASCII only - see _announce_stall for the codepage reason.
                     self.action_limit_hit = True
                     print(f"[stdio] ACTION LIMIT: {self.max_commands} commands sent "
-                          f"this process — stopping auto-decisions (runaway guard). "
+                          f"this process - stopping auto-decisions (runaway guard). "
                           f"Set JEVBRAIN_MAX_ACTIONS to change or 0 for unlimited.",
                           file=self.warn_stream, flush=True)
                     feed = getattr(self.agent, "feed", None)
@@ -518,7 +532,8 @@ def main(argv: list[str]) -> int:
                                ascension=int(value("ascension") or 0))
     if log_path:
         transport.log_path = Path(log_path)
-    print(f"[stdio] ready — backend={backend or 'mock'} "
+    # ASCII only in every stderr line - see _announce_stall.
+    print(f"[stdio] ready - backend={backend or 'mock'} "
           f"acceptance={acceptance or 'margin'}; waiting for state on stdin",
           file=sys.stderr)
     transport.run(sys.stdin, sys.stdout)
