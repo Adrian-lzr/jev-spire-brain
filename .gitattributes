@@ -1,0 +1,4 @@
+# cmd.exe on a Chinese-locale Windows parses batch files in GBK, but the
+# repository (and GitHub's rendering of it) should hold UTF-8. This attribute
+# makes git store UTF-8 and convert to GBK on checkout - both sides correct.
+*.bat working-tree-encoding=GBK
