@@ -27,6 +27,7 @@ import time
 from pathlib import Path
 from typing import Any, Iterable
 
+from spirebrain.driver.advisor import AdviseSession
 from spirebrain.driver.encoding import (
     configure_streams,
     scrub_surrogates,
@@ -48,14 +49,7 @@ from spirebrain.driver.protocol import (
     to_command_line,
     verb_of,
 )
-from spirebrain.driver.witness import (
-    SCREEN_POINT,
-    Advice,
-    PlayerTracker,
-    advice_key,
-    label_for,
-)
-from spirebrain.overlay.feed import advice_event, outcome_event
+from spirebrain.driver.witness import PlayerTracker
 
 # Names that used to live in this module and are still imported from it. Kept as
 # thin aliases rather than a shim object: a caller that wants the new home should
@@ -118,31 +112,6 @@ LADDER_WAITS_BEFORE_KEY = 2   # kept for tests/documentation of intent
 # screen fingerprint: 5 rungs x 3 cycles is ~15 messages - far under any cap,
 # and if none of that advanced the game, only a human can.
 LADDER_CYCLES_BEFORE_STOP = 3
-
-
-def _screen_of(game: Any) -> str:
-    """The screen's type, upper-cased, or "" — never raises on a hostile state."""
-    try:
-        return str((game or {}).get("screen_type", "")).upper()
-    except Exception:  # noqa: BLE001
-        return ""
-
-
-def _advice_line(command: dict) -> str:
-    """ASCII one-liner for the console: the verb and its indices, no prose.
-
-    Deliberately NOT `to_command_line`: that one applies the protocol's own
-    1-indexed +1 for PLAY, which would make a console line about **card #1**
-    disagree with every log and every other message in this repo.
-    """
-    verb = str(command.get("command", "?"))
-    if verb == "play":
-        card = command.get("card", command.get("card_index", "?"))
-        target = command.get("target", command.get("target_index"))
-        return f"play card#{card}" + (f" -> target#{target}" if target is not None else "")
-    if verb == "choose":
-        return f"choose {command.get('name') or command.get('choice', command.get('index', '?'))}"
-    return verb
 
 
 class StdioTransport:
@@ -214,14 +183,28 @@ class StdioTransport:
         self._ladder_fp: str | None = None
         self._ladder_step = 0
         self._in_game = False
-        # Advisor mode (mode == "advise"): the player chooses, we recommend, and
-        # `PlayerTracker` turns the next state change into a verdict on what they
-        # did. `_advised_fp` is what keeps polling from becoming a per-second
-        # JEV bill — the brain is asked once per *distinct* state, not once per
-        # poll, and a poll re-transmits the same state by design.
-        self.tracker = PlayerTracker()
-        self._advised_fp: str | None = None
-        self.advice_issued = 0
+        # Advisor mode (mode == "advise"): the player chooses, we recommend,
+        # and the session below watches what they did with it. The same code
+        # that used to live on this class, moved out with its dependencies
+        # passed explicitly so the transport stops owning the conversation.
+        self.advisor = AdviseSession(
+            agent=self.agent,
+            advice_path=self.advice_path,
+            poll_frames=self.poll_frames,
+            warn_stream=self.warn_stream,
+            ensure_offered=self._ensure_offered,
+            fingerprint=self._fingerprint,
+            message_count=lambda: self.messages,
+        )
+
+    @property
+    def tracker(self) -> PlayerTracker:
+        """The advisor's scorekeeper: read by the closing banner and by tests."""
+        return self.advisor.tracker
+
+    @property
+    def advice_issued(self) -> int:
+        return self.advisor.issued
 
     def _reset_run_budget(self) -> None:
         """Per-run action budget: a fresh run inside the same process starts
@@ -231,13 +214,7 @@ class StdioTransport:
         never resets"."""
         self.commands = 0
         self.action_limit_hit = False
-        # A new run invalidates any advice pending from the old one: the state it
-        # was made on is gone, and adjudicating it against the new run's first
-        # state would score a match/mismatch that never happened. The tally
-        # itself survives — it is the project's metric, measured across runs.
-        self.tracker.pending = None
-        self.tracker.remember_state(None)
-        self._advised_fp = None
+        self.advisor.reset_run()
 
     def _ladder_command(self, fp: str) -> str:
         """Next rung of the unmodeled-screen ladder, tracking cycles.
@@ -433,7 +410,7 @@ class StdioTransport:
             # force a stuck screen forward by pressing keys — the one thing an
             # advisor must never do — and the stall guard pauses auto-decisions
             # that do not exist. Neither has anything to protect here.
-            return self._advise(game, available, modeled)
+            return self.advisor.advise(game, available, modeled)
         if not modeled:
             # Guard #4 (unmodeled-screen ladder): the mod offers no verb that
             # can advance anything. Waiting here forever was the 18:08 death —
@@ -538,168 +515,6 @@ class StdioTransport:
                 return sent
         self.substitutions.append({"wanted": line, "sent": ""})
         return ""
-
-    # -- advisor mode ------------------------------------------------------ #
-    def _advise(self, game: dict, available: Any, modeled: bool) -> str | None:
-        """Recommend, never act. Returns the poll command to send.
-
-        The recommendation comes from the SAME pipeline auto-play uses — the JEV
-        call, the gate, the tactical layer — because advice from a different
-        brain than the one we measured is advice nobody can trust. What changes
-        is only where the answer goes: to the player, not to the game.
-
-        Two things are deliberately absent here. The action limit does not apply
-        (every command is a poll, see __init__). And the brain is asked once per
-        *distinct* state, not once per poll: polling re-transmits the same state
-        every ~1/3 second, and re-asking JEV on each one would turn a $0.001
-        decision into a per-second bill for a player who is simply thinking.
-        """
-        outcome = self.tracker.resolve(game)
-        if outcome is not None:
-            self._publish_outcome(outcome)
-
-        if not modeled:
-            # A screen we cannot read: no advice is possible, and pressing its
-            # keys/click is forbidden. Keep the pipe alive and stay quiet.
-            return self._poll(available)
-
-        fp = self._fingerprint(game)
-        if fp != self._advised_fp:
-            self._advised_fp = fp
-            self._advise_once(game, available)
-        return self._poll(available)
-
-    def _advise_once(self, game: dict, available: Any) -> None:
-        """Ask the brain once for this state and publish what it says."""
-        payload = dict(game)
-        # Same plumbing as auto-play: the two-phase grid handler reads the
-        # offered verbs, which live on the message rather than the state.
-        payload["available_commands"] = available
-        try:
-            command = self.agent.choose_action(payload)
-        except Exception as exc:  # noqa: BLE001 - advice must never kill the pipe
-            print(f"[advise] the router raised on {_screen_of(game)!r}: {exc!r}",
-                  file=self.warn_stream, flush=True)
-            return
-
-        screen = _screen_of(game)
-        point = SCREEN_POINT.get(screen, "navigation")
-        confidence, fallback, reason = self._last_decision_fields(command)
-        advice = Advice(
-            point=point, screen=screen, command=command,
-            key=advice_key(payload, command, point),
-            label=label_for(payload, command, point),
-            reason=reason or str(command.get("reason", "") or ""),
-            confidence=confidence, fallback=fallback,
-            act=int(game.get("act", 0) or 0), floor=int(game.get("floor", 0) or 0),
-            message=self.messages,
-        )
-        self.tracker.remember_state(game)
-        self.tracker.note(advice)
-        self.advice_issued += 1
-        self._publish_advice(advice)
-        # One ASCII line on stderr: the live console and the mod's error log have
-        # no reliable encoding for the Chinese label, so the sentence the player
-        # reads lives in the advice event and this line only proves liveness.
-        print(f"[advise] {point} -> {_advice_line(command)}"
-              f" (conf {confidence:.2f}, msg {self.messages})",
-              file=self.warn_stream, flush=True)
-
-    def _poll(self, available: Any) -> str | None:
-        """The only thing advisor mode is allowed to send.
-
-        If the mod offers neither `wait` nor `state` there is no harmless verb
-        left, and silence is the honest answer: an advisor does not press
-        buttons. Returning None costs nothing — the game is in the player's
-        hands either way, and the alternative (`_ensure_offered`'s empty-string
-        substitution) is falsy in `run()` but is NOT None, which is the exact
-        distinction that broke the ladder's callers on 2026-09-22. Both are
-        handled here so no caller has to know.
-        """
-        if available:
-            offered = {str(a).strip().lower() for a in available}
-            if not offered & set(ADVISE_POLL_VERBS):
-                return None
-        line = self._ensure_offered(f"wait {self.poll_frames}", available,
-                                    safe=ADVISE_POLL_VERBS)
-        return line or None
-
-    def _last_decision_fields(self, command: dict) -> tuple[float, bool, str]:
-        """Confidence, fallback flag and *reason* of the decision behind `command`.
-
-        Screens answered by navigation rules (non-decision screens, a grid with no
-        pending intent) never went through `_record`, so there is no number and no
-        reason to report. 0.0 means "rules, not a judgement" — which the panel
-        renders as 规则判断 rather than as a 0% certainty, because those are
-        different facts.
-
-        The reason has to be read from the history rather than from the command:
-        `_record` stores the judgement in `detail` and returns the wire command
-        alone, so `command.get("reason")` is empty for every recorded decision —
-        measured 2026-09-22 with the overlay's own poller, which showed a "why"
-        line that was blank on every screen that had a reason.
-        """
-        history = getattr(self.agent, "history", None) or []
-        if history and history[-1].get("command") == command:
-            entry = history[-1]
-            detail = entry.get("detail") or {}
-            gate = detail.get("gate") or {}
-            reason = str(detail.get("reason") or gate.get("reason") or "")
-            return (float(entry.get("confidence") or 0.0),
-                    bool(entry.get("fallback")), reason)
-        return 0.0, False, ""
-
-    def _publish_advice(self, advice: Advice) -> None:
-        self._advice_log({"kind": "advice", "point": advice.point,
-                          "screen": advice.screen, "label": advice.label,
-                          "verb": str(advice.command.get("command", "")),
-                          "command": advice.command, "key": list(advice.key or ()),
-                          "reason": advice.reason, "confidence": advice.confidence,
-                          "fallback": advice.fallback})
-        feed = getattr(self.agent, "feed", None)
-        if feed is None:
-            return
-        try:
-            feed.publish("advice", advice_event(advice, self.tracker.tally,
-                                                self.tracker.agreement))
-        except Exception:  # noqa: BLE001 - a dead dashboard must not break the pipe
-            pass
-
-    def _publish_outcome(self, outcome) -> None:
-        self._advice_log({"kind": "outcome", "point": outcome.advice.point,
-                          "verdict": outcome.verdict,
-                          "advice_label": outcome.advice.label,
-                          "acted_label": outcome.acted_label,
-                          "acted": list(outcome.acted_key or ()),
-                          "evidence": outcome.evidence,
-                          "tally": dict(self.tracker.tally),
-                          "agreement": self.tracker.agreement})
-        print(f"[advise] verdict {outcome.verdict}: advised "
-              f"{_advice_line(outcome.advice.command)} / player did "
-              f"{outcome.acted_label or '?'} | agreement "
-              f"{'-' if self.tracker.agreement is None else format(self.tracker.agreement, '.2f')}"
-              f" over {self.tracker.judged} judged",
-              file=self.warn_stream, flush=True)
-        feed = getattr(self.agent, "feed", None)
-        if feed is None:
-            return
-        try:
-            feed.publish("outcome", outcome_event(outcome, self.tracker.tally,
-                                                  self.tracker.agreement))
-        except Exception:  # noqa: BLE001
-            pass
-
-    def _advice_log(self, event: dict) -> None:
-        """Append one advice/verdict line. Failing to log must not stop advice."""
-        if self.advice_path is None:
-            return
-        try:
-            self.advice_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.advice_path, "a", encoding="utf-8") as handle:
-                handle.write(json.dumps({"ts": time.time(), **event},
-                                        ensure_ascii=False, default=str) + "\n")
-        except OSError:
-            pass
 
     # -- the stream -------------------------------------------------------- #
     def handle_line(self, line: str) -> str | None:
