@@ -193,6 +193,98 @@ IRONCLAD: dict[str, CardKnowledge] = {
                       "6 HP for a whole turn; the deck's best card by community win rate"),
 }
 
+
+# --------------------------------------------------------------------------- #
+# Campfire and card removal: the two card choices that are not "add a card"
+# --------------------------------------------------------------------------- #
+#: How much an upgrade is worth, as a role judgement (0-3), not a damage delta.
+#:
+#: Sources: Forgotten Arbiter's guide ("Whirlwind is the highest priority,
+#: followed by True Grit and Body Slam. Afterwards, generally Powers > Utility
+#: Skills > Defensive Skills > Attacks"; Bash is medium-high because 2 -> 3
+#: Vulnerable carries Act 1 elites), and the tier lists, which agree that an
+#: upgrade that changes what a card *does* (Limit Break stops exhausting,
+#: Corruption gets cheaper) beats one that only adds a number.
+UPGRADE_PRIORITY: dict[str, int] = {
+    "Whirlwind": 3, "True Grit": 3, "Body Slam": 3, "Limit Break": 3,
+    "Corruption": 3, "Demon Form": 3, "Barricade": 3, "Feel No Pain": 3,
+    "Bash": 3,          # 2 -> 3 Vulnerable is what makes Act 1 elites killable
+    "Uppercut": 3, "Pommel Strike": 3, "Dark Embrace": 3, "Impervious": 3,
+    "Shockwave": 2, "Battle Trance": 2, "Offering": 2, "Fiend Fire": 2,
+    "Inflame": 2, "Spot Weakness": 2, "Armaments": 2, "Shrug It Off": 2,
+    "Flame Barrier": 2, "Power Through": 2, "Metallicize": 2, "Exhume": 2,
+    "Second Wind": 2, "Sever Soul": 2, "Reaper": 2, "Feed": 2, "Immolate": 2,
+    "Bludgeon": 1, "Heavy Blade": 1, "Twin Strike": 1, "Cleave": 1,
+    "Clothesline": 1, "Thunderclap": 1, "Anger": 1, "Iron Wave": 1,
+    "Bloodletting": 1, "Seeing Red": 1, "Intimidate": 1, "Disarm": 1,
+    "Burning Pact": 1, "Rampage": 1, "Dropkick": 1, "Hemokinesis": 1,
+    "Headbutt": 1, "Warcry": 1, "Dual Wield": 1, "Double Tap": 1,
+    "Entrench": 1, "Ghostly Armor": 1, "Juggernaut": 1, "Rupture": 1,
+    "Evolve": 1, "Fire Breathing": 1, "Brutality": 1, "Berserk": 1,
+    "Combust": 1, "Sentinel": 1, "Pummel": 1, "Infernal Blade": 1,
+    "Sword Boomerang": 1, "Rage": 1, "Flex": 1,
+    # Starter cards are never the upgrade: they are the removal.
+    "Strike_Red": 0, "Defend_Red": 0, "Strike_R": 0, "Defend_R": 0,
+}
+
+#: Anything in these packages is a removal target before any real card: a Wound
+#: or a curse in hand is worse than a Strike.
+REMOVAL_ALWAYS = {"CURSE", "STATUS"}
+
+#: The starter cards by name, for snapshots that key cards by display name
+#: rather than by id (the tests do, and so does a modded install that reports
+#: names instead).
+_STARTERS = {"Strike", "Defend", "Strike_R", "Strike_Red", "Defend_R", "Defend_Red"}
+
+
+def upgrade_value(card_id: str, card_type: str = "", rarity: str = "") -> int:
+    """How much this card wants the campfire, with an honest fallback.
+
+    The authored table covers what the sources cover; everything else falls back
+    to the guide's structural rule — Powers before Skills before Attacks — rather
+    than to a guess about a specific card.
+    """
+    known = UPGRADE_PRIORITY.get(card_id)
+    if known is not None:
+        return known
+    if rarity == "BASIC":
+        return 0
+    if card_type == "POWER":
+        return 2
+    if card_type in ("SKILL", "ATTACK"):
+        return 1
+    return 0
+
+
+def removal_value(card_id: str, card_type: str = "", rarity: str = "") -> int:
+    """How badly this card should be the one removed (higher = better target).
+
+    Only what the sources actually say is scored, in their order of severity:
+
+    * curses and statuses (4) — a Wound in hand is worse than a Strike;
+    * basic **Strikes** (3), then basic **Defends** (2) — "remove Strikes first,
+      followed by Defends" is Forgotten Arbiter's rule, close to universal.
+
+    Two wrong versions preceded this one, and both are the two ways a name rule
+    goes bad, so they are recorded:
+
+    * `rarity == "BASIC"` classified Bash — a card you never remove — as a target;
+    * a bare `"Strike" in card_id` matched **Pommel Strike**, a good card, so a
+      deck with no basic Strikes left proposed removing a real attack.
+
+    The rule therefore needs a starter name AND the basic rarity, plus an explicit
+    list for snapshots that carry no metadata. Everything else scores 0: a
+    defensible "least useful card" ranking needs quality data this project does
+    not have, and inventing one is the confident guess this layer exists to avoid.
+    """
+    if card_type in REMOVAL_ALWAYS:
+        return 4
+    is_starter = card_id in _STARTERS or (
+        rarity == "BASIC" and ("Strike" in card_id or "Defend" in card_id))
+    if not is_starter:
+        return 0
+    return 3 if "Strike" in card_id else 2
+
 #: Cards that actively hurt a deck unless something in the deck pays them off.
 #: Not a ban list: each entry names the condition that makes it correct, and
 #: `deck._caution_cleared` checks that condition against the real deck.

@@ -152,12 +152,37 @@ def test_rest_with_smith_chooses_the_option_then_answers_the_grid():
             assert follow_up["choice"] == agent._pending_upgrade or agent._pending_upgrade is None
 
 
-def test_grid_without_a_pending_intent_takes_the_first_card():
+def test_grid_without_a_pending_intent_names_the_card_to_remove():
+    """A grid we did not ask for is a removal, and the deck picks the target.
+
+    This used to take the first card and log a fallback. On a card-removal
+    screen that can delete the best card in the deck, so it now applies the
+    documented rule — cursors and statuses first, then Strikes, then Defends —
+    and says which card and why. DECK_10 starts with five Strikes, so the answer
+    is still index 0, but for a reason this time.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         agent = _agent(tmp)
         cmd = agent.choose_action(_base(screen_type="GRID", screen_state={"cards": DECK_10}))
         assert cmd["command"] == "choose" and cmd["choice"] == 0
-        assert "no pending intent" in cmd["reason"]
+        assert "删牌优先级" in cmd["reason"] and "打击" in cmd["reason"]
+        assert cmd["local_removal"]["card"] in ("Strike", "Strike_R", "Strike_Red")
+
+
+def test_grid_removal_is_honest_when_nothing_is_worth_removing():
+    """With no basic Strikes or Defends left, there is no documented answer.
+
+    The old behaviour (first card) is kept, but as a stated fallback rather than
+    as a recommendation: the knowledge layer refuses to rank the player's real
+    cards against each other without quality data it does not have.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        agent = _agent(tmp)
+        deck = [{"name": "Bash"}, {"name": "Pommel Strike"}, {"name": "Inflame"}]
+        cmd = agent.choose_action(_base(screen_type="GRID", screen_state={"cards": deck},
+                                        deck=deck))
+        assert cmd["command"] == "choose" and cmd["choice"] == 0
+        assert "local_removal" not in cmd
 
 
 def test_grid_confirm_phase_finalizes_the_pick():
@@ -425,6 +450,105 @@ def test_hp_budget_resets_between_acts():
         agent.choose_action(_base(act=2, screen_type="REST", screen={"rest_options": ["rest"]}))
         assert agent._budget().act == 2
         assert agent._budget().remaining_budget == 80 - int(80 * 0.40)
+
+
+# --------------------------------------------------------------------------- #
+# Rest site: the upgrade decision matrix (model vs the deck's upgrade table)
+# --------------------------------------------------------------------------- #
+class _Ans:
+    """A JEV answer with the shape the deciders actually read."""
+
+    def __init__(self, value, confidence):
+        self.value, self.confidence = value, confidence
+        self.raw = {"probabilities": {value: max(0.0, confidence), "x": max(0.0, 1.0 - confidence)}}
+
+
+class _Resp:
+    def __init__(self, heal_p, up_value, up_conf):
+        self.answers = {"need_heal": _Ans("no", heal_p), "upgrade": _Ans(up_value, up_conf)}
+
+
+class _StubJev:
+    """Answers heal with `heal_p` and the upgrade question with a fixed card."""
+
+    def __init__(self, heal_p, up_value, up_conf):
+        self.heal_p, self.up_value, self.up_conf = heal_p, up_value, up_conf
+
+    def ask(self, state, questions):
+        return _Resp(self.heal_p, self.up_value, self.up_conf)
+
+
+CAMPFIRE_DECK = [{"id": n, "name": n} for n in
+                 ["Strike_R"] * 5 + ["Defend_R"] * 4 + ["Bash", "Whirlwind", "Inflame"]]
+
+
+def _campfire(tmp, heal_p, up_value, up_conf, hp=74):
+    agent = _agent(tmp)
+    agent.jev = _StubJev(heal_p, up_value, up_conf)
+    game = _base(deck=CAMPFIRE_DECK, current_hp=hp,
+                 screen_type="REST", screen_state={"rest_options": ["rest", "smith"]})
+    cmd = agent.choose_action(game)
+    return agent, cmd, agent.history[-1]
+
+
+def test_campfire_fallback_names_the_deck_upgrade_when_healthy():
+    """The safe fallback heals; the deck's documented table can beat it.
+
+    `RestSiteDecider._fallback` returns "rest" whenever the model is unsure --
+    right at low HP, and wasteful when the player is healthy and the deck holds
+    a value-3 upgrade target the sources name (Whirlwind here, an archetype
+    core). The advice and the COMMAND must agree: an advice/command split
+    (recommend the upgrade, choose rest) is exactly what a player cannot trust.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        agent, cmd, rec = _campfire(tmp, heal_p=0.5, up_value="Cleave", up_conf=0.57)
+        assert rec["value"] == "Whirlwind"          # the table's pick
+        assert rec["fallback"] is True              # the model did NOT decide
+        assert "local_upgrade" in rec["detail"]
+        assert "升级优先级" in rec["detail"]["reason"]
+        assert cmd == {"command": "choose", "choice": 1}   # the smith slot
+        assert agent._pending_upgrade == 10               # Whirlwind's index
+
+
+def test_campfire_fallback_heals_at_low_hp():
+    """Low HP: the safe fallback STANDS -- healing is the documented rule."""
+    with tempfile.TemporaryDirectory() as tmp:
+        agent, cmd, rec = _campfire(tmp, heal_p=0.5, up_value="Cleave", up_conf=0.57, hp=30)
+        assert rec["value"] == "rest"
+        assert cmd == {"command": "choose", "choice": 0}
+        assert agent._pending_upgrade is None
+
+
+def test_campfire_a_confident_model_beats_the_table():
+    """A confident model answer on a real card outranks the local table.
+
+    Inflame is on the screen and in the deck; the model answered with 0.9. The
+    local table prefers Whirlwind (value 4 vs 2) but the table exists for when
+    the model cannot decide, not to overrule it when it can. The pending grid
+    intent must still carry Inflame, not the table's preference.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        agent, cmd, rec = _campfire(tmp, heal_p=0.3, up_value="Inflame", up_conf=0.9)
+        assert rec["value"] == "Inflame"
+        assert rec["fallback"] is False
+        assert "local_upgrade" not in rec["detail"]
+        assert cmd == {"command": "choose", "choice": 1}
+        assert agent._pending_upgrade == 11   # Inflame's index in CAMPFIRE_DECK
+
+
+def test_campfire_an_invalid_model_answer_is_a_fallback_not_a_judgement():
+    """The model naming a card that is not on the screen has said NOTHING.
+
+    This used to be recorded as a model "rest" judgement ("no upgrade worth the
+    HP") with used_fallback=False, so the caller could not tell "the model
+    considered the options and chose rest" from "the model answered nonsense".
+    The latter is a fallback, and the deck's upgrade table may speak.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        agent, cmd, rec = _campfire(tmp, heal_p=0.3, up_value="Phantom Card", up_conf=0.8)
+        assert rec["fallback"] is True
+        assert "invalid answer" in rec["detail"]["fallback_reason"]  # kept, not erased
+        assert rec["value"] == "Whirlwind"      # the deck's table fills the void
 
 
 if __name__ == "__main__":

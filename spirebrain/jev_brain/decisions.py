@@ -642,7 +642,18 @@ class RestSiteDecider:
                                 {"reason": "judged to need healing"})
             if heal is None or not accept_choice(up):
                 return self._fallback(upgradable, hp_ratio, "uncertain")
-            if up.value == "rest" or up.value not in upgradable:
+            # Two different things used to share this branch, and the difference
+            # is exactly the one `used_fallback` exists for: the model *choosing*
+            # rest ("include 'rest' if no upgrade is worth the HP") is a real
+            # judgement, while the model naming a card that is not on the screen
+            # is an INVALID answer -- no evidence, so the safe rule took over and
+            # must be marked as a fallback. Collapsing them made an invalid
+            # answer look like a considered "rest", and the caller had no way to
+            # tell "the model said rest" from "the model said nonsense".
+            if up.value not in upgradable:
+                return Decision("rest", "rest", 0.0, True,
+                                {"reason": f"invalid answer: {up.value!r} is not on this screen"})
+            if up.value == "rest":
                 return Decision("rest", "rest", up.confidence, False,
                                 {"reason": "no upgrade worth the HP"})
             return Decision("rest", up.value, up.confidence, False,

@@ -27,12 +27,110 @@ from spirebrain.cards.knowledge import (
     NEED,
     archetype_signal,
     knowledge,
+    removal_value,
+    upgrade_value,
 )
 
 #: Past this size, adding an average card starts to cost more than it gives. The
 #: community range for a focused deck is 15-30, with the tighter rule being
 #: "only take what you are going to upgrade".
 COMFORTABLE_SIZE = 20
+
+# --------------------------------------------------------------------------- #
+# Campfire and card removal: the two card choices that are not "add a card"
+# --------------------------------------------------------------------------- #
+@dataclass
+class Choice:
+    """One card picked out of the deck, with the reason it was picked."""
+
+    card_id: str
+    value: int
+    reasons: list[str] = field(default_factory=list)
+
+    def reason_text(self) -> str:
+        return "；".join(self.reasons)
+
+
+def best_upgrade(deck_ids: list[str], act: int = 1,
+                 effects: dict[str, str] | None = None) -> Choice | None:
+    """Which card deserves the campfire.
+
+    The documented rule is structural, not per-card list: upgrade value comes
+    from the upgrade changing what a card *does* (Limit Break stops exhausting,
+    Corruption gets cheaper, Bash reaches 3 Vulnerable) rather than from how much
+    damage it adds. `knowledge.UPGRADE_PRIORITY` holds the cards the sources name;
+    everything else falls back to Powers > Skills > Attacks.
+
+    Deck awareness enters through the same signal the pick grader uses: a card
+    that the deck is built around is worth upgrading before a card that merely
+    fills a slot.
+    """
+    if not deck_ids:
+        return None
+    archetypes = archetype_signal(deck_ids)
+    best: Choice | None = None
+    for card_id in deck_ids:
+        text, card_type = _effect_and_type(card_id, effects)
+        info = meta.card(card_id)
+        value = upgrade_value(card_id, card_type, str(info.get("rarity", "")))
+        if value <= 0:
+            continue
+        reasons: list[str] = []
+        # A card the deck's archetype leans on is the one to invest in.
+        for arch_key, hits in archetypes.items():
+            if hits < 2:
+                continue
+            for arch in IRONCLAD_ARCHETYPES:
+                if arch.key == arch_key and card_id in (arch.core | arch.payoff):
+                    value += 1
+                    reasons.append(f"卡组主轴「{arch.label}」的核心")
+        if act <= 1 and card_id == "Bash":
+            reasons.append("第一幕把「痛击」升到 3 层易伤，精英战最好用")
+        elif value >= 3:
+            reasons.append("升级会改变这张牌的作用，不只是加数值")
+        elif card_type == "POWER":
+            reasons.append("能力牌优先：升级收益持续整局")
+        if best is None or value > best.value:
+            best = Choice(card_id=card_id, value=value, reasons=reasons)
+    if best is not None and not best.reasons:
+        best.reasons.append("当前卡组里升级收益最高")
+    return best
+
+
+def best_removal(deck_ids: list[str],
+                 effects: dict[str, str] | None = None) -> Choice | None:
+    """Which card to delete, when the game offers a removal.
+
+    "Remove Strikes first, followed by Defends" is the community's order and it
+    is close to universal, because a Strike is nearly a curse once better attacks
+    exist. Curses and statuses outrank both: a Wound is worse than a Strike.
+
+    This exists because the grid handler used to take the FIRST card when it had
+    no pending intent — and on a card-removal screen that can delete the best
+    card in the deck.
+    """
+    if not deck_ids:
+        return None
+    best: Choice | None = None
+    for card_id in deck_ids:
+        _text, card_type = _effect_and_type(card_id, effects)
+        info = meta.card(card_id)
+        value = removal_value(card_id, card_type, str(info.get("rarity", "")))
+        if value <= 0:
+            continue
+        reasons: list[str] = []
+        if card_type in ("CURSE", "STATUS"):
+            reasons.append("诅咒/状态牌，留着只会占手牌")
+        elif "Strike" in card_id:
+            reasons.append("打击：有了更好的攻击牌之后基本等于诅咒")
+        elif "Defend" in card_id:
+            reasons.append("防御：真正的格挡牌到位后，起手防御最不值钱")
+        else:
+            reasons.append("这张牌当前收益最低")
+        if best is None or value > best.value:
+            best = Choice(card_id=card_id, value=value, reasons=reasons)
+    return best
+
 
 _AXIS_ZH = {"damage": "伤害", "aoe": "群伤", "block": "格挡", "scaling": "成长",
             "draw": "抽牌", "energy": "能量", "utility": "功能"}

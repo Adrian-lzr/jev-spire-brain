@@ -16,13 +16,24 @@ are judgement (with `docs/CARD_STRATEGY.md` as the receipts), and the scoring is
 arithmetic over both. Changing one does not mean re-checking the others.
 """
 
-from spirebrain.cards.deck import DeckProfile, PickGrade, grade, profile, synergy
+from spirebrain.cards.deck import (
+    Choice,
+    DeckProfile,
+    PickGrade,
+    best_removal,
+    best_upgrade,
+    grade,
+    profile,
+    synergy,
+)
 from spirebrain.cards.knowledge import (
     AXES,
     IRONCLAD_ARCHETYPES,
     Archetype,
     CardKnowledge,
     knowledge,
+    removal_value,
+    upgrade_value,
 )
 from spirebrain.cards.meta import card, cost, ids, rarity, type_of
 
@@ -30,9 +41,12 @@ __all__ = [
     "AXES",
     "Archetype",
     "CardKnowledge",
+    "Choice",
     "DeckProfile",
     "IRONCLAD_ARCHETYPES",
     "PickGrade",
+    "best_removal",
+    "best_upgrade",
     "card",
     "cost",
     "grade",
@@ -40,6 +54,8 @@ __all__ = [
     "knowledge",
     "profile",
     "rarity",
+    "removal_value",
     "synergy",
     "type_of",
+    "upgrade_value",
 ]

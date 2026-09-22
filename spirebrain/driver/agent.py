@@ -24,9 +24,11 @@ from pathlib import Path
 
 from spirebrain.jev_brain.client import get_client
 from spirebrain.jev_brain.decisions import (
+    HEAL_WHEN_UNSURE_HP_RATIO,
     BossRelicJudge,
     CardRewardJudge,
     CombatRiskGate,
+    Decision,
     EventChooser,
     MapRouter,
     RestSiteDecider,
@@ -44,6 +46,7 @@ from spirebrain.jev_brain.state import (
     path_damage_probes,
     shop_items,
 )
+from spirebrain.cards import best_removal, best_upgrade
 from spirebrain.overlay.feed import DecisionFeed, decision_event, run_state_event
 from spirebrain.tactical.combat_greedy import Card, CombatState, play_order
 from spirebrain.tactical.hp_budget import HPBudget
@@ -352,6 +355,7 @@ class SpireBrainAgent:
         character = self.run.character if self.run else None
         upgradable: dict[str, str] = {}
         labels: list[str] = []
+        label_of_card: dict[str, str] = {}      # game id -> this screen's label
         for i, card in enumerate(deck):
             if _get(card, "upgrades", default=0):
                 continue
@@ -360,12 +364,67 @@ class SpireBrainAgent:
                      or str(_get(card, "name", default=f"card {i}")))
             labels.append(label)
             upgradable[label] = card_line(card, character=character)
+            if keys:
+                label_of_card[keys[0]] = label
         d = RestSiteDecider(self.jev, self._budget(), self.goal,
                             run=self.run).decide(hp_ratio=self._hp_ratio(),
                                                  upgradable=upgradable)
         if d.value == "rest":
-            self._pending_upgrade = None
-            return self._record(d, {"command": "choose", "choice": rest_i})
+            # The safe fallback always heals ("an unnecessary upgrade can kill
+            # the run"), and that is still the right answer at low HP. But a
+            # coach can beat the safe default when the deck itself names a
+            # target: the upgrade table IS the documented consensus, so a
+            # value-3 card (Whirlwind, Bash early, an archetype core) is a
+            # stronger recommendation than "rest" repeated for free. Still a
+            # fallback decision -- the model did not make it -- and it only
+            # fires with real HP headroom, the same line the decider uses.
+            local = best_upgrade(deck_keys(deck), act=self._budget().act)
+            if (d.used_fallback and local is not None and local.value >= 3
+                    and self._hp_ratio() >= HEAL_WHEN_UNSURE_HP_RATIO):
+                local_label = label_of_card.get(local.card_id)
+                if local_label is not None:
+                    # Keep the original fallback reason: an audit trail that
+                    # replaced its evidence is not an audit trail.
+                    d = Decision("rest", local_label, 0.0, True,
+                                 {**d.detail,
+                                  "fallback_reason": d.detail.get("reason", ""),
+                                  "local_upgrade": {"model": "rest",
+                                                    "local": local_label,
+                                                    "reason": local.reason_text()},
+                                  "reason": (f"血量充足，按升级优先级升级「{local_label}」"
+                                             f"：{local.reason_text()}")})
+            if d.value == "rest":
+                # Still resting (the fallback stood, or the deck named nothing):
+                # no grid intent, answer the rest-site screen with rest.
+                self._pending_upgrade = None
+                return self._record(d, {"command": "choose", "choice": rest_i})
+            # An upgrade was chosen ON THIS SCREEN (model or deck): the command
+            # is the smith slot, and the following grid gets the card's index.
+            # Saying "upgrade Whirlwind" while choosing rest would be exactly
+            # the kind of advice/command split a player cannot trust.
+            _, index = _unique_labels(labels)
+            self._pending_upgrade = index.get(str(d.value), 0)
+            return self._record(d, {"command": "choose", "choice": smith_i})
+
+        # The deck gets a vote, as it does on card rewards. The upgrade table is
+        # the one the sources actually document ("Whirlwind first, then True Grit
+        # and Body Slam; Powers > utility > defence > attacks", and Bash early),
+        # so when the model is unsure this decides — an upgrade is permanent, and
+        # spending it on the wrong card is the mistake the table exists to stop.
+        local = best_upgrade(deck_keys(deck), act=self._budget().act)
+        local_label = label_of_card.get(local.card_id) if local else None
+        if local is not None and local_label is None:
+            # The local pick is not on this screen (an already-upgraded copy, or
+            # a name this screen renders differently): keep the model's answer but
+            # record what the deck would have preferred, so it stays auditable.
+            d.detail["local_preference"] = {"card": local.card_id,
+                                            "reason": local.reason_text()}
+        elif local_label is not None and local_label != str(d.value) \
+                and float(d.confidence or 0.0) < 0.6:
+            d.detail["local_override"] = {"model": str(d.value), "local": local_label,
+                                          "reason": local.reason_text()}
+            d = Decision("rest", local_label, 0.0, True,
+                         {**d.detail, "reason": f"按升级优先级：{local.reason_text()}"})
 
         # PHASE 1 VERIFY: the grid's index is the position among *upgradable*
         # cards in the order the game presents them. We assume that order matches
@@ -376,11 +435,13 @@ class SpireBrainAgent:
         return self._record(d, {"command": "choose", "choice": smith_i})
 
     def _on_grid(self, game) -> dict:
-        """Card-grid screens: fulfil the pending upgrade, else take the first card.
+        """Card-grid screens: fulfil the pending upgrade, else name the removal.
 
-        A grid we did not ask for (card-removal, discard) gets the conservative
-        first card — that is a real choice with a real cost, so it is logged as a
-        fallback rather than passed off as a decision.
+        A grid we did not ask for is almost always a *card removal* (a shop's
+        purge, an event's sacrifice), and taking the first card there is how you
+        delete the best card in the deck. It now asks the deck which card to lose
+        — the community's order is "Strikes first, then Defends", and a curse or
+        a status outranks both — and says so in the reason.
 
         Two-phase grids, measured live (2026-09-22 18:54): after `choose N` the
         SAME screen returns, now offering [confirm, cancel, ...] — the pick is
@@ -414,8 +475,27 @@ class SpireBrainAgent:
             choice, self._pending_upgrade = self._pending_upgrade, None
             reason = None
         else:
+            # No intent of ours: the game is offering a removal, and the deck
+            # knows which card it can spare. The cards on screen are the deck's
+            # own, in the order `_deck` reports them, so the index of the local
+            # pick among them is the index this screen wants.
             choice = 0
-            reason = "grid screen with no pending intent; took the first option"
+            reason = "网格屏无待定意图；按删牌优先级选择的说明见 local_removal"
+            detail_note = None
+            deck = self._deck(game)
+            removal = best_removal(deck_keys(deck))
+            if removal is not None:
+                ids_in_order = deck_keys(deck)
+                if removal.card_id in ids_in_order:
+                    choice = ids_in_order.index(removal.card_id)
+                    reason = f"删牌优先级：{removal.reason_text()}"
+                    detail_note = {"card": removal.card_id,
+                                   "reason": removal.reason_text()}
+            self._grid_picked = choice
+            out = {"command": "choose", "choice": choice, "reason": reason}
+            if detail_note:
+                out["local_removal"] = detail_note
+            return out
         self._grid_picked = choice
         out = {"command": "choose", "choice": choice}
         if reason:
