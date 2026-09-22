@@ -139,6 +139,43 @@ def _state_snapshot(feed: DecisionFeed) -> dict:
             "last_outcome": last_outcome, "run_state": run_state}
 
 
+class PortInUse(RuntimeError):
+    """The dashboard port is taken, and the message says what to do about it.
+
+    Its own exception type rather than a bare OSError because the *fix* is worth
+    naming: a listener on 8787 is usually a stale dashboard from an earlier
+    session (or the player's own, still running), and either way the answer is
+    "close it, or use --port", never "try again later".
+    """
+
+    def __init__(self, port: int, cause: BaseException) -> None:
+        self.port = port
+        self.cause = cause
+        super().__init__(
+            f"port {port} is already in use — another dashboard is running"
+            f" (often a stale one from an earlier session). Close it, or start this"
+            f" one elsewhere with `--port {port + 1}`. Underlying error: {cause}"
+        )
+
+
+class _ExclusiveHTTPServer(ThreadingHTTPServer):
+    """A server that refuses to share its port.
+
+    `socketserver` sets `SO_REUSEADDR` by default, and on **Windows** that lets a
+    second process bind a port the first is still listening on. The failure is
+    silent and nasty: connections are handed to whichever socket the kernel
+    picks, so three stale dashboard processes ended up sharing 8787 on 2026-09-22
+    and answered the in-game overlay's `/state` with `404` from old code — the
+    panel stayed empty and nothing anywhere said why.
+
+    Turning reuse off means the second `start.py` fails loudly instead, and
+    `main()` explains how to fix it. A clear error beats a haunted port.
+    """
+
+    allow_reuse_address = False
+    daemon_threads = True
+
+
 class DashboardServer:
     """Bind a port, hold one DecisionFeed, serve the page and the stream."""
 
@@ -152,8 +189,10 @@ class DashboardServer:
         self.port = port
         self.page_path = Path(page_path) if page_path else DASHBOARD
         self._handler = _make_handler(self.feed, self.page_path)
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", port), self._handler)
-        self.httpd.daemon_threads = True
+        try:
+            self.httpd = _ExclusiveHTTPServer(("127.0.0.1", port), self._handler)
+        except OSError as exc:
+            raise PortInUse(port, exc) from exc
         self.port = self.httpd.server_address[1]  # port=0 -> the OS's choice
 
     def serve_forever(self) -> None:

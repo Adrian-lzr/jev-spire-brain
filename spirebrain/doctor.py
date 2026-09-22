@@ -283,50 +283,108 @@ def check_communicationmod(rep: Report, found: list[Path]) -> bool:
 
 
 def check_mod_config(rep: Report) -> None:
-    local = os.environ.get("LOCALAPPDATA")
-    if not local:
-        rep.add(WARN, "CommunicationMod config", "%LOCALAPPDATA% is not set")
+    """Judge every CommunicationMod-family config, not just the official one.
+
+    `SpireConfig` is keyed on the mod name, so the official mod reads
+    `ModTheSpire\\CommunicationMod\\config.properties` and the CJK fork reads
+    `ModTheSpire\\CommunicationModCJK\\config.properties`. Writing one and hoping
+    the player ticked the matching mod fails totally and silently when they did
+    not: an empty `command=` launches no agent at all. Measured 2026-09-22, one
+    hour lost, so every existing config is checked here.
+    """
+    try:
+        from spirebrain.install_mod_config import check_argv, family_config_paths, parse_config
+    except Exception as exc:  # noqa: BLE001
+        rep.add(WARN, "CommunicationMod configs", f"cannot inspect: {exc}")
         return
-    cfg = Path(local) / "ModTheSpire" / "CommunicationMod" / "config.properties"
-    if not cfg.exists():
-        rep.add(WARN, "CommunicationMod config", f"not created yet ({cfg})",
+
+    existing = [p for p in family_config_paths() if p.exists()]
+    if not existing:
+        rep.add(WARN, "CommunicationMod config", "not created yet",
                 "the mod creates it on its first load. Either start the game once with"
                 " the mod enabled, or let us write it now:"
                 " `python -m spirebrain.install_mod_config --write`")
         return
-    text = cfg.read_text(encoding="latin-1")   # the encoding the mod itself uses
-    rep.add(PASS, "CommunicationMod config", str(cfg))
 
-    # Decode the way the mod does before judging the paths, or every \uXXXX escape
-    # looks like a broken path. One implementation of the escaping lives in
-    # install_mod_config, so doctor can never disagree with the writer.
-    from spirebrain.install_mod_config import check_argv, parse_config
+    # Which config is the LIVE one is decided by which mod is ticked, and
+    # mod_lists.json knows. Without it, every existing config has to be treated as
+    # possibly-live, which is why an empty one is a FAIL rather than a note.
+    ticked = enabled_mod_jars() or []
+    required = None
+    for jar in ticked:
+        if jar.lower().startswith("communicationmod"):
+            required = Path(jar).stem  # CommunicationModCJK.jar -> CommunicationModCJK
+            break
 
-    parsed = parse_config(text)
-    command = parsed.get("command", "")
-    if not command.strip():
-        rep.add(FAIL, "Config: command=",
-                "missing or empty",
-                "run `python -m spirebrain.install_mod_config --write`")
-        return
-    if "run_agent.py" in command:
-        rep.add(PASS, "Config: command=", command[:120])
-    elif "stdio.py" in command:
-        rep.add(FAIL, "Config: command=", "points at the module file",
-                "point it at run_agent.py: running a module file cannot import the"
-                " package")
-    else:
-        rep.add(WARN, "Config: command=", command[:120],
-                "expected run_agent.py; anything else needs a reason")
-
-    argv = check_argv(command)
-    print(f"          argv ({argv['argv_count']}): " + " | ".join(argv["argv"]))
-    for problem in argv["problems"]:
-        rep.add(FAIL, "Config: command line", problem,
-                "fix it with `python -m spirebrain.install_mod_config --write`")
+    for cfg in existing:
+        name = cfg.parent.name
+        text = cfg.read_text(encoding="latin-1")   # the encoding the mod itself uses
+        # Decode the way the mod does before judging the paths, or every \uXXXX
+        # escape looks like a broken path. One implementation of the escaping lives
+        # in install_mod_config, so doctor can never disagree with the writer.
+        parsed = parse_config(text)
+        command = parsed.get("command", "")
+        is_live = required is None or required == name
+        if not command.strip():
+            # An empty command= means the game starts NO agent, and says nothing
+            # about it. That is the failure this whole check exists for: 2026-09-22,
+            # the player had ticked the fork while the command lived in the official
+            # mod's config, and one hour went into finding it.
+            status = FAIL if is_live else WARN
+            why = ("this is the ticked mod, so nothing will run"
+                   if is_live else
+                   f"not the ticked mod ({required} is) — harmless right now")
+            rep.add(status, f"Config ({name}): command=", f"missing or empty — {why}",
+                    "run `python -m spirebrain.install_mod_config --write` — it writes"
+                    " every config in the family, so it no longer matters which"
+                    " CommunicationMod is ticked")
+            continue
+        if "run_agent.py" not in command and "stdio.py" in command:
+            rep.add(FAIL if is_live else WARN, f"Config ({name}): command=",
+                    "points at the module file",
+                    "point it at run_agent.py: running a module file cannot import the"
+                    " package")
+            continue
+        ok = "run_agent.py" in command
+        label = f"Config ({name}{' = ticked' if is_live and required else ''})"
+        rep.add(PASS if ok else WARN, label, command[:110],
+                "" if ok else "expected run_agent.py; anything else needs a reason")
+        argv = check_argv(command)
+        print(f"          argv ({argv['argv_count']}): " + " | ".join(argv["argv"]))
+        for problem in argv["problems"]:
+            rep.add(FAIL, f"Config ({name}): command line", problem,
+                    "fix it with `python -m spirebrain.install_mod_config --write`")
 
 
 COMMUNICATIONMOD_FAMILY = ("CommunicationMod", "CommunicationModCJK")
+
+
+def enabled_mod_jars() -> list[str] | None:
+    """The mod jars ModTheSpire has TICKED, from its own saved list — or None.
+
+    `%LOCALAPPDATA%\\ModTheSpire\\mod_lists.json` holds the selection the player
+    actually launches with (`lists.<defaultList>` is a list of jar file names).
+    Reading it is the difference between "two CommunicationMods are on disk" and
+    "two are going to run", and only the second one is a problem: a jar sitting
+    unticked in the Workshop folder does nothing.
+
+    None means "no saved list" (ModTheSpire has never been launched, or the file
+    moved), in which case the caller falls back to judging what is installed and
+    says so rather than pretending to know.
+    """
+    local = os.environ.get("LOCALAPPDATA")
+    if not local:
+        return None
+    path = Path(local) / "ModTheSpire" / "mod_lists.json"
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        lists = data.get("lists") or {}
+        jars = lists.get(data.get("defaultList")) or lists.get("<Default>") or []
+        return [str(j) for j in jars] if isinstance(jars, list) else None
+    except Exception:  # noqa: BLE001 - a corrupt list means "unknown", not "fail"
+        return None
 
 
 def _declared_modid(jar: Path) -> str | None:
@@ -367,6 +425,39 @@ def check_single_communicationmod(rep: Report, game: Path | None,
     """
     by_modid: dict[str, list[Path]] = {}
     roots: list[Path] = []
+
+    # Ask ModTheSpire what it is actually going to LOAD before judging what is on
+    # disk. "Two jars installed" is not a problem; "two mods ticked" is, and only
+    # the second one costs a player anything.
+    ticked = enabled_mod_jars()
+    if ticked is not None:
+        family = [j for j in ticked if j.lower().startswith("communicationmod")]
+        overlay = [j for j in ticked if "spirebrain" in j.lower()]
+        if not family:
+            rep.add(FAIL, "CommunicationMod ticked", "none",
+                    "tick ONE CommunicationMod in ModTheSpire. It is the pipe: without"
+                    " it the agent receives no game state, so there is nothing to advise"
+                    " on and the panel stays empty.")
+        elif len(family) == 1:
+            rep.add(PASS, "CommunicationMod ticked", family[0])
+        else:
+            rep.add(FAIL, "Two CommunicationMods are ticked", ", ".join(family),
+                    "untick one in ModTheSpire. Each of them spawns its own agent"
+                    " against the same game, so one agent's command lands on the NEXT"
+                    " screen, and each doubles the JEV calls. Keep EITHER one - the"
+                    " installer writes the config for both, so neither is special."
+                    " Confirm the fix: the agent's banner in"
+                    " communication_mod_errors.log appears once per launch, not twice.")
+        if not overlay:
+            rep.add(WARN, "In-game overlay not ticked",
+                    "the agent runs but nothing is drawn in-game",
+                    "tick SpireBrainOverlay.jar in ModTheSpire's mod list")
+        else:
+            rep.add(PASS, "In-game overlay ticked", overlay[0])
+        return
+
+    # No saved selection to read (ModTheSpire has never been launched, or the list
+    # moved), so judge what is installed and say that is what this is judging.
     if game is not None:
         roots.append(game / "mods")
     # ModTheSpire auto-loads Workshop items too, so a second CommunicationMod
@@ -395,25 +486,20 @@ def check_single_communicationmod(rep: Report, game: Path | None,
         modid = next(iter(by_modid))
         copies = by_modid[modid]
         rep.add(PASS, "CommunicationMod instances",
-                f"exactly one mod active: {modid}"
+                f"exactly one mod installed: {modid}"
                 + (f" ({len(copies)} copies on disk; ModTheSpire dedupes by modid)"
                    if len(copies) > 1 else ""))
         return
 
-    # Two DISTINCT modids is the failing case. Grouping by modid matters: the
-    # same jar in mods\ and in the Workshop folder is one mod to ModTheSpire
-    # (measured: its mod list showed CommunicationMod once), so complaining about
-    # that would send the player chasing a non-problem.
+    # Two DISTINCT modids installed, with no saved list to prove which is ticked.
+    # A WARN, not a FAIL: grouping by modid already rules out the harmless case
+    # (the same jar in mods\ and the Workshop folder is one mod to ModTheSpire),
+    # but without mod_lists.json this genuinely cannot say whether both will load.
     names = ", ".join(sorted(by_modid))
-    rep.add(FAIL, "Two CommunicationMods are active", names,
-            "untick one of them in ModTheSpire's mod list before launching (or"
-            " unsubscribe the one you do not want in Steam's Workshop). Two of"
-            " them each spawn their own agent against the same game, so one"
-            " agent's command lands on the NEXT screen. Keep ONE: the CJK fork"
-            " (CommunicationModCJK) if your game runs in Chinese/Japanese/Korean,"
-            " the official CommunicationMod otherwise. To confirm the fix: the"
-            " agent's banner in communication_mod_errors.log must appear once per"
-            " launch, not twice.")
+    rep.add(WARN, "Two CommunicationMods installed", names,
+            "launch ModTheSpire once so it saves the mod list, then re-run this"
+            " check; if both are ticked, untick one (they each spawn an agent, and"
+            " the second agent's command lands on the NEXT screen)")
     for modid, jars in sorted(by_modid.items()):
         for jar in jars:
             print(f"          - {modid}: {jar}")

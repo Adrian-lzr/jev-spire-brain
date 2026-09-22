@@ -331,25 +331,63 @@ python java/build.py --check       # run the mod's own poller against a live /st
   silently loses its one actionable line is worse than an English one.
 * **`F8`** hides/shows the panel. No config file, because a player whose screen is
   covered needs one keypress.
+* **It never goes blank.** When there is nothing to advise on yet, the panel says
+  why, in the same place and shape as the real panel: *军师待命：agent 还没上线*
+  (the dashboard is up, no agent has published), *端口上是一个旧版 dashboard* (an
+  old server is holding the port — see below), or *连不上 dashboard：start.py 好像没
+  在运行*. This exists because the first version drew a dim grey line at the
+  top-left in that state, and a player reasonably reported "the panel never
+  appears" while the real cause was an empty `command=` in a config file.
+* **One dashboard per port.** Python's `HTTPServer` sets `SO_REUSEADDR`, which on
+  Windows lets several processes bind the same port; three stale demo servers once
+  shared 8787 and answered `/state` with `404` from old code. The server now
+  refuses to share (`allow_reuse_address = False`), so a second `start.py` fails
+  loudly instead of quietly splitting traffic.
 * Rollback: every install backs the previous jar up next to it
   (`SpireBrainOverlay.jar.bak-<timestamp>`).
 
 ### Only ONE CommunicationMod may be installed
 
-`python -m spirebrain.doctor` now FAILs when two are active, because on
-2026-09-22 this machine had **both** the official mod and the CJK fork installed
-and ModTheSpire loaded both. The evidence: two `Received message from external
-process: Ready` lines 162 ms apart in `sendToDevs/mts_process_launch.log`, and
-every agent startup banner appearing **twice** in `communication_mod_errors.log`.
+**Verdict first: you DO need one.** CommunicationMod is the pipe — without it the
+agent receives no game state, so there is nothing to advise on and the in-game
+panel stays empty (it will now say so). What must be ticked in ModTheSpire:
 
-What that costs: each mod spawns its own agent against the same game. In play
-mode the second agent's command lands on the **next** screen (a `choose 0` meant
-for the map got applied in the fight that followed); in advice mode JEV is called
-twice per state, so the bill doubles. Nothing in the game reports it.
+| Mod | Why |
+|---|---|
+| **BaseMod** | required by CommunicationMod and by our overlay |
+| **exactly ONE CommunicationMod** — the official one *or* `CommunicationModCJK` | the pipe. Either works; both is a bug, neither is a silent no-op |
+| **SpireBrainOverlay** | draws the advice in-game |
+| StSLib | optional, harmless |
 
-Fix: untick one in ModTheSpire's mod list (or unsubscribe it in Steam). Keep the
-CJK fork if the game runs in Chinese — otherwise the official one. Confirm with
-`communication_mod_errors.log`: one banner per launch, not two.
+`python -m spirebrain.doctor` reads ModTheSpire's own saved selection
+(`%LOCALAPPDATA%\ModTheSpire\mod_lists.json`) and reports what is *ticked*, not
+what happens to be on disk — "two jars installed" is not a problem, "two ticked"
+is. It also reports an unticked overlay, because that is the difference between
+"the agent runs" and "you can see it".
+
+#### Each CommunicationMod keeps its OWN config file
+
+`SpireConfig` is keyed on the mod name, so the official mod reads
+`ModTheSpire\CommunicationMod\config.properties` and the CJK fork reads
+`ModTheSpire\CommunicationModCJK\config.properties`. Writing only one works *if*
+you ticked that mod, and fails **completely silently** otherwise: an empty
+`command=` means the game starts no agent at all.
+
+That cost an hour on 2026-09-22 (the player had unticked the official mod, so the
+fork's freshly-created empty config was the live one; the panel simply never
+appeared). So `install_mod_config` now writes **every config in the family**:
+
+```bash
+python -m spirebrain.install_mod_config --write      # fills both, backs both up
+python -m spirebrain.install_mod_config --show       # shows both, decoded
+```
+
+Two agents at once is its own problem, which is why the ticked check exists: with
+both mods loaded, each spawns its own agent, and in play mode the second agent's
+command lands on the **next** screen. Evidence for that failure mode: two
+`Received message from external process: Ready` lines 162 ms apart in
+`sendToDevs/mts_process_launch.log`, and the agent's startup banner appearing
+**twice** in `communication_mod_errors.log`.
 
 ## 7. Troubleshooting
 

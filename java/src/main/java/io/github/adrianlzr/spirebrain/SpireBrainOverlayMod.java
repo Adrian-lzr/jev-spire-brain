@@ -74,7 +74,8 @@ public class SpireBrainOverlayMod implements PostInitializeSubscriber, RenderSub
 
     private static volatile Snapshot latest;
     private static volatile long lastPollMs = 0;
-    private static volatile String statusLine = "SpireBrain: waiting for the agent (python start.py)";
+    /** Why there is nothing to show yet: a code from the poller, not prose. */
+    private static volatile String statusCode = "idle";
     private static volatile boolean visible = true;
 
     /** A 1x1 white pixel: the only safe way to draw solid bars game-agnostically. */
@@ -117,22 +118,83 @@ public class SpireBrainOverlayMod implements PostInitializeSubscriber, RenderSub
         if (Gdx.input.isKeyJustPressed(Input.Keys.F8)) {
             visible = !visible;
         }
-
-        // The status line is the "nothing to show" state and must stay visible
-        // even when the panel is hidden: it is how a player finds out the agent
-        // is not running, and hiding it would make the mod look broken.
-        if (snap == null) {
-            FontHelper.renderFontLeftTopAligned(sb, FontHelper.tipHeaderFont,
-                    statusLine, 20f * Settings.scale, Settings.HEIGHT - 60f * Settings.scale,
-                    Color.GRAY);
-            return;
-        }
         if (!visible) {
             return;
         }
 
+        if (snap == null) {
+            // NOT the silent path any more. On 2026-09-22 this panel drew a dim
+            // grey line at the top-left when it had no data, and the player
+            // reasonably reported "the panel never appears" — an hour went into
+            // finding an empty `command=` in one of the two CommunicationMod
+            // configs. A surface that shows nothing must at least say that it has
+            // nothing, and why.
+            drawNotice(sb);
+            return;
+        }
         resolveStrings(snap);
         drawPanel(sb, snap);
+    }
+
+    /**
+     * The "no data yet" panel: same backdrop, same position, one clear sentence.
+     *
+     * Deliberately the same shape as the real panel rather than a different
+     * widget: the player learns one place to look, and "nothing there" is
+     * replaced by "here is what is wrong" instead of by nothing at all.
+     */
+    private void drawNotice(SpriteBatch sb) {
+        float scale = Settings.scale;
+        float pad = 14f * scale;
+        float w = Math.min(Settings.WIDTH * 0.52f, 760f * scale);
+        float x = (Settings.WIDTH - w) * 0.5f;
+        float top = Settings.HEIGHT - 26f * scale;
+        float bottom = top - 96f * scale;
+
+        sb.setColor(0f, 0f, 0f, 0.62f);
+        sb.draw(whitePixel, x - pad, bottom, w + 2f * pad, top - bottom + pad);
+
+        String code = statusCode;
+        String zh = "军师未连接";
+        String ascii = "SpireBrain: not connected";
+        String hintZh;
+        String hintAscii;
+        switch (code == null ? "idle" : code) {
+            case "no_agent":
+                zh = "军师待命：agent 还没上线";
+                ascii = "SpireBrain: waiting for the agent";
+                hintZh = "游戏外的 agent 由 CommunicationMod 启动，检查它的配置里 command= 不为空";
+                hintAscii = "the agent is launched by CommunicationMod; check its config's command=";
+                break;
+            case "old_server":
+                zh = "端口上是一个旧版 dashboard（没有 /state）";
+                ascii = "an OLD dashboard is holding this port (no /state)";
+                hintZh = "关掉它再重启 start.py，或用 --port 换端口";
+                hintAscii = "close it and re-run start.py (or use --port)";
+                break;
+            case "unreachable":
+                zh = "连不上 dashboard：start.py 好像没在运行";
+                ascii = "cannot reach the dashboard: is start.py running?";
+                hintZh = "双击 日常启动.bat（或 python start.py），然后进游戏";
+                hintAscii = "run start.py, then start the game";
+                break;
+            default:
+                hintZh = "先运行 start.py，再开始一局";
+                hintAscii = "run start.py, then start a run";
+                break;
+        }
+
+        BitmapFont big = bigFont();
+        if (big == null) {
+            return;   // nothing to draw with; the game is still starting up
+        }
+        FontHelper.renderFontLeftTopAligned(sb, big,
+                fit(big, zh, ascii), x, top - 8f * scale, Color.ORANGE);
+        FontHelper.renderFontLeftTopAligned(sb, FontHelper.tipBodyFont,
+                fit(FontHelper.tipBodyFont, hintZh, hintAscii),
+                x, top - 44f * scale, Color.LIGHT_GRAY);
+        FontHelper.renderFontLeftTopAligned(sb, FontHelper.tipBodyFont,
+                "F8 = hide   |   " + dashboardUrl, x, top - 68f * scale, Color.GRAY);
     }
 
     // --------------------------------------------------------------------- //
@@ -343,11 +405,14 @@ public class SpireBrainOverlayMod implements PostInitializeSubscriber, RenderSub
 
     private void onSnapshot(Snapshot snap) {
         latest = snap;
-        statusLine = null;
+        statusCode = null;
     }
 
-    private void onStatus(String message) {
-        statusLine = message;
+    private void onStatus(String code) {
+        // Do NOT clear `latest` here: a snapshot that arrived earlier is still the
+        // best thing we know, and blanking the panel on one failed poll would make
+        // a flaky second look like a dead agent.
+        statusCode = code;
     }
 
     private static Texture safeTexture(String path) {

@@ -27,6 +27,7 @@ The three things, each of which has bitten a mod build before:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -275,9 +276,15 @@ def install(game: Path) -> int:
             print("[install] the game has the jar open — close Slay the Spire and retry")
             return 1
     shutil.copy2(OUT_JAR, dest)
+    version = "?"
+    try:
+        with zipfile.ZipFile(dest) as z:
+            version = json.loads(z.read("ModTheSpire.json").decode("utf-8")).get("version", "?")
+    except Exception:  # noqa: BLE001 - a cosmetic line is not worth failing over
+        pass
     print(f"[install] {dest}")
-    print("[install] next launch: ModTheSpire's mod list should show "
-          "SpireBrain Overlay 0.2.0")
+    print(f"[install] next launch: ModTheSpire's mod list should show"
+          f" SpireBrain Overlay {version}")
     return 0
 
 

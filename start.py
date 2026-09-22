@@ -71,13 +71,25 @@ def run_doctor(live: bool = False) -> bool:
 def start_dashboard(port: int, open_browser: bool) -> tuple[object, str]:
     """Start the dashboard server, open a browser, return (server, url)."""
     from spirebrain.overlay.feed import DecisionFeed
-    from spirebrain.overlay.server import DashboardServer
+    from spirebrain.overlay.server import DashboardServer, PortInUse
 
-    server = DashboardServer(
-        feed=DecisionFeed(journal_path=ROOT / "logs" / "dashboard_feed.jsonl"),
-        port=port)
-    server.start_background()
+    try:
+        server = DashboardServer(
+            feed=DecisionFeed(journal_path=ROOT / "logs" / "dashboard_feed.jsonl"),
+            port=port)
+    except PortInUse as exc:
+        # The one case where a previous run is the most likely explanation, so say
+        # it here rather than letting a raw OSError reach a player. Two dashboards
+        # on one port used to be possible (Windows allows the bind) and the game's
+        # panel would then read /state from whichever one the kernel picked —
+        # including an old build that has no /state at all.
+        print("\n[2/3] the dashboard port is taken")
+        print(f"      {exc}")
+        print("      most likely: an earlier `start.py` (or a demo) is still running.")
+        print("      Close that window, or run:  python start.py --port %d" % (port + 1))
+        raise SystemExit(2)
     url = f"http://127.0.0.1:{server.port}"
+    server.start_background()
     print(f"\n[2/3] dashboard running: {url}")
     if open_browser:
         webbrowser.open(url)

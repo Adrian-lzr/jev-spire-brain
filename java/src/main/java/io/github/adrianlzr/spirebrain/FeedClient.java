@@ -107,6 +107,13 @@ public final class FeedClient {
                     Snapshot snap = parse(state);
                     if (snap != null) {
                         onSnapshot.accept(snap);
+                    } else {
+                        // Reachable, but with nothing in it: the dashboard is up and
+                        // no agent has ever published. Distinguishing this from
+                        // "cannot reach the dashboard at all" is half the diagnosis,
+                        // and it is the exact state this panel spent an hour in on
+                        // 2026-09-22 while looking like nothing was wrong.
+                        onStatus.accept("no_agent");
                     }
                 }
                 synchronized (this) {
@@ -115,7 +122,22 @@ public final class FeedClient {
             } catch (InterruptedException ie) {
                 return;
             } catch (Exception e) {
-                onStatus.accept("SpireBrain: agent not reachable (" + e.getClass().getSimpleName() + ")");
+                // A machine-readable reason, so the overlay can say it in Chinese
+                // (and in ASCII) rather than forwarding a Java class name to a
+                // player. 404 is its own case: the port is answered by a server
+                // that has no /state, which means an OLD dashboard is holding it —
+                // the trap that cost an hour on 2026-09-22.
+                String reason = "unreachable";
+                if (e instanceof IllegalStateException
+                        && String.valueOf(e.getMessage()).contains("404")) {
+                    reason = "old_server";
+                } else if (e instanceof java.net.ConnectException
+                        || e instanceof java.net.SocketTimeoutException) {
+                    reason = "unreachable";
+                } else if (e instanceof java.net.UnknownHostException) {
+                    reason = "unreachable";
+                }
+                onStatus.accept(reason);
                 try {
                     synchronized (this) {
                         wait(5000L); // backing off; the dashboard may not be up yet

@@ -210,10 +210,43 @@ def build_config(command: str, *, run_at_game_start: bool = DEFAULT_RUN_AT_GAME_
 
 def config_path() -> Path:
     """`ConfigUtils.CONFIG_DIR` + mod name + config name, per ModTheSpire source."""
+    return config_dir(MOD_NAME) / CONFIG_NAME
+
+
+def config_dir(mod_name: str) -> Path:
     local = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
     if not local:
         raise RuntimeError("%LOCALAPPDATA% is not set; cannot locate ModTheSpire's config dir")
-    return Path(local) / "ModTheSpire" / MOD_NAME / CONFIG_NAME
+    return Path(local) / "ModTheSpire" / mod_name
+
+
+# Every mod in the CommunicationMod family keeps its OWN config file, because
+# `SpireConfig` is keyed on the mod name:
+#
+#   CommunicationMod/config.properties      the official mod
+#   CommunicationModCJK/config.properties   the CJK fork (modid CommunicationModCJK)
+#
+# Measured 2026-09-22, and it cost an hour: the player had unticked the official
+# mod and kept the fork, so the fork's own — freshly created, therefore EMPTY —
+# `command=` was the one being read. No command, no agent, no advice, and nothing
+# anywhere said so. Writing ONE file and hoping the player ticked the matching mod
+# is a trap, so we write every config whose mod is actually installed.
+FAMILY = ("CommunicationMod", "CommunicationModCJK")
+
+
+def family_config_paths() -> list[Path]:
+    """Every config file this project should keep in sync, official one first.
+
+    The official path is always included (it is created on demand). A fork's path
+    is included when its directory already exists — that directory is how a mod
+    that has run at least once shows up, so it means "this fork is in use here".
+    """
+    paths = [config_dir(FAMILY[0]) / CONFIG_NAME]
+    for name in FAMILY[1:]:
+        directory = config_dir(name)
+        if directory.exists():
+            paths.append(directory / CONFIG_NAME)
+    return paths
 
 
 def parse_config(text: str) -> dict:
@@ -283,19 +316,22 @@ def main(argv: list[str]) -> int:
             hit = argv[argv.index(f"--{name}") + 1]
         return hit
 
-    path = config_path()
+    paths = family_config_paths()
+    path = paths[0]
 
     if "--show" in argv:
-        print(f"config file: {path}")
-        if not path.exists():
-            print("  does not exist yet — the mod creates it on its first load.")
-            return 0
-        text = path.read_bytes().decode("latin-1")
-        print("--- raw bytes, decoded as ISO-8859-1 (what the mod reads) ---")
-        print(text.rstrip())
-        print("--- parsed keys ---")
-        for key, val in parse_config(text).items():
-            print(f"  {key} = {val}")
+        for target in paths:
+            print(f"config file: {target}")
+            if not target.exists():
+                print("  does not exist yet — the mod creates it on its first load.")
+                continue
+            text = target.read_bytes().decode("latin-1")
+            print("--- raw bytes, decoded as ISO-8859-1 (what the mod reads) ---")
+            print(text.rstrip())
+            print("--- parsed keys ---")
+            for key, val in parse_config(text).items():
+                print(f"  {key} = {val}")
+            print()
         return 0
 
     backend = value("backend") or DEFAULT_BACKEND
@@ -312,8 +348,8 @@ def main(argv: list[str]) -> int:
     argv_check = check_argv(command)
 
     print(f"repo            : {ROOT}")
-    print(f"config file     : {path}")
-    print(f"exists yet      : {path.exists()}")
+    print("config files    : " + ", ".join(str(p) for p in paths))
+    print(f"exists yet      : {', '.join('yes' if p.exists() else 'no' for p in paths)}")
     if mode:
         print(f"agent mode      : {mode}"
               + ("  (recommends only - you keep the mouse and the keyboard;"
@@ -356,28 +392,39 @@ def main(argv: list[str]) -> int:
         print("Preview only. Re-run with --write to apply.")
         return 0
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        backup = path.with_suffix(f".properties.bak-{time.strftime('%Y%m%d-%H%M%S')}")
-        shutil.copy2(path, backup)
-        print(f"backed up the existing config to {backup.name}")
-    path.write_bytes(text.encode("ascii"))
+    # Write EVERY family config, not just the official one. Each mod in the
+    # family reads its own file, so writing only one means "it works if you ticked
+    # the right mod" — and the failure is total silence, which is exactly how an
+    # hour went missing on 2026-09-22 (the player had ticked the CJK fork, whose
+    # own config was empty).
+    written: list[Path] = []
+    for target in paths:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            backup = target.with_suffix(f".properties.bak-{time.strftime('%Y%m%d-%H%M%S')}")
+            shutil.copy2(target, backup)
+            print(f"backed up {backup.name} (in {backup.parent.name}\\)")
+        target.write_bytes(text.encode("ascii"))
+        written.append(target)
 
     # Verification: read the bytes back the way the mod does and check the value.
-    readback = parse_config(path.read_bytes().decode("latin-1"))
-    if readback.get("command") != command:
-        print("FAILED verification: the file does not decode back to the intended command.")
-        print(f"  intended: {command!r}")
-        print(f"  read back: {readback.get('command')!r}")
-        return 1
-    print(f"wrote {path}")
-    print("verified: decoding the file's bytes as ISO-8859-1 yields the intended command")
+    for target in written:
+        readback = parse_config(target.read_bytes().decode("latin-1"))
+        if readback.get("command") != command:
+            print(f"FAILED verification for {target}: the file does not decode back to"
+                  " the intended command.")
+            print(f"  intended: {command!r}")
+            print(f"  read back: {readback.get('command')!r}")
+            return 1
+    print(f"wrote {len(written)} config file(s); each decodes back to the intended command")
+    for target in written:
+        print(f"  {target}")
     missing = [k for k in KEYS if k not in readback]
     if missing:
         print(f"warning: keys missing from the file: {missing}")
     print()
-    print("Next: launch the game through ModTheSpire with CommunicationMod enabled. "
-          "In the mod's settings panel the '(Re)start external process' button relaunches "
+    print("Next: launch the game through ModTheSpire with ONE CommunicationMod enabled. "
+          "In its settings panel the '(Re)start external process' button relaunches "
           "our agent without restarting the game. Its stderr lands in "
           "communication_mod_errors.log in the game folder.")
     return 0

@@ -1,11 +1,15 @@
 {
   "modid": "spirebrain-overlay",
   "name": "SpireBrain Overlay",
-  "author_list": ["Adrian-lzr"],
-  "description": "In-game coach: shows the JEV brain's recommendation for the decision in front of you, why, what you did with the last one, and the running agreement rate. Also shows the HP-budget state. Needs the SpireBrain agent running (python start.py). F8 hides/shows the panel.",
-  "version": "0.2.0",
+  "author_list": [
+    "Adrian-lzr"
+  ],
+  "description": "In-game coach: shows the JEV brain's recommendation for the decision in front of you, why, what you did with the last one, and the running agreement rate. Also shows the HP-budget state. When the agent is not reachable the panel says so instead of staying blank. Needs the SpireBrain agent running (python start.py). F8 hides/shows the panel.",
+  "version": "0.2.1",
   "sts_version": "12-22-2020",
   "mts_version": "3.30.0",
-  "dependencies": ["basemod"],
+  "dependencies": [
+    "basemod"
+  ],
   "target_version": "^12-22-2020"
 }

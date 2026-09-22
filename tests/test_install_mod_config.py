@@ -9,7 +9,9 @@ what prevents it, so it is pinned here rather than trusted.
 
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -194,6 +196,76 @@ def test_cli_flags_build_the_command_it_documents():
     assert "--auto-start" in out
     assert "--class SILENT" in out
     assert "--ascension 3" in out
+
+
+def _isolated_localappdata(tmp: str):
+    """Context manager: point LOCALAPPDATA at a temp dir, restore it after.
+
+    Written as a context manager rather than a pytest fixture on purpose: the
+    suite runs as plain scripts (`python tests/test_x.py`), so a test that needs an
+    argument would simply not run.
+    """
+    import contextlib
+
+    @contextlib.contextmanager
+    def _cm():
+        saved = os.environ.get("LOCALAPPDATA")
+        os.environ["LOCALAPPDATA"] = tmp
+        try:
+            yield
+        finally:
+            if saved is None:
+                os.environ.pop("LOCALAPPDATA", None)
+            else:
+                os.environ["LOCALAPPDATA"] = saved
+    return _cm()
+
+
+def test_family_config_paths_covers_every_mod_in_the_family():
+    """The bug that cost an hour: each CommunicationMod keeps its OWN config.
+
+    `SpireConfig` is keyed on the mod name, so the official mod reads
+    ModTheSpire\\CommunicationMod\\config.properties and the CJK fork reads
+    ModTheSpire\\CommunicationModCJK\\config.properties. Writing one and hoping the
+    player ticked that mod fails totally and silently when they ticked the other:
+    an empty `command=` launches no agent, and nothing anywhere reports it.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        with _isolated_localappdata(tmp):
+            from spirebrain.install_mod_config import config_dir, family_config_paths
+
+            assert [p.parent.name for p in family_config_paths()] == ["CommunicationMod"]
+            config_dir("CommunicationModCJK").mkdir(parents=True)
+            paths = family_config_paths()
+            assert [p.parent.name for p in paths] == ["CommunicationMod", "CommunicationModCJK"]
+            assert all(p.name == "config.properties" for p in paths)
+
+
+def test_write_fills_every_family_config():
+    """`--write` must leave no family config without a command."""
+    with tempfile.TemporaryDirectory() as tmp:
+        with _isolated_localappdata(tmp):
+            from spirebrain.install_mod_config import (
+                config_dir, family_config_paths, parse_config)
+
+            for name in ("CommunicationMod", "CommunicationModCJK"):
+                directory = config_dir(name)
+                directory.mkdir(parents=True, exist_ok=True)
+                (directory / "config.properties").write_text("command=\n", encoding="latin-1")
+
+            import contextlib
+            import io
+
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code = main(["--mode", "advise", "--write"])
+            out = buf.getvalue()
+            assert code == 0, out
+            for path in family_config_paths():
+                parsed = parse_config(path.read_bytes().decode("latin-1"))
+                assert "run_agent.py" in parsed.get("command", ""), path
+                assert "--mode" in parsed.get("command", ""), path
+            assert out.count("backed up") == 2
 
 
 if __name__ == "__main__":

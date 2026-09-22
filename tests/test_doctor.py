@@ -16,7 +16,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from spirebrain.doctor import (
+    FAIL,
+    PASS,
+    WARN,
+    Report,
     WORKSHOP_EXPECTED,
+    check_single_communicationmod,
+    enabled_mod_jars,
     read_workshop_ledger,
     workshop_content_dir,
 )
@@ -120,6 +126,86 @@ def test_the_expected_items_identify_communicationmod():
     """If this id ever changes, docs/SETUP.md and the download instructions with it."""
     name, required, why = WORKSHOP_EXPECTED["2131373661"]
     assert name == "CommunicationMod" and required is True and "pipe" in why
+
+
+def _with_localappdata(tmp: str, body):
+    """Run `body` with LOCALAPPDATA pointed at `tmp`, then restore it."""
+    import os
+
+    saved = os.environ.get("LOCALAPPDATA")
+    os.environ["LOCALAPPDATA"] = tmp
+    try:
+        return body()
+    finally:
+        if saved is None:
+            os.environ.pop("LOCALAPPDATA", None)
+        else:
+            os.environ["LOCALAPPDATA"] = saved
+
+
+def test_enabled_mod_jars_reads_modthespires_saved_selection():
+    """The TICKED set, not what happens to be on disk.
+
+    "Two CommunicationMod jars are installed" is not a problem; "two are ticked"
+    is. On 2026-09-22 the doctor failed on the installed pair while the player had
+    already unticked one — a false alarm that would have sent them hunting for a
+    bug they had already fixed. ModTheSpire saves its selection in
+    `%LOCALAPPDATA%\\ModTheSpire\\mod_lists.json`, so the check can just read it.
+    """
+    import json
+
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = Path(tmp) / "ModTheSpire"
+        directory.mkdir(parents=True)
+        assert _with_localappdata(tmp, enabled_mod_jars) is None  # nothing saved yet
+
+        (directory / "mod_lists.json").write_text(json.dumps({
+            "defaultList": "<Default>",
+            "lists": {"<Default>": ["BaseMod.jar", "CommunicationModCJK.jar",
+                                    "SpireBrainOverlay.jar"]},
+        }), encoding="utf-8")
+        ticked = _with_localappdata(tmp, enabled_mod_jars)
+        assert ticked == ["BaseMod.jar", "CommunicationModCJK.jar", "SpireBrainOverlay.jar"]
+
+        (directory / "mod_lists.json").write_text("{ not json", encoding="utf-8")
+        assert _with_localappdata(tmp, enabled_mod_jars) is None  # unknown, not a fail
+
+
+def test_doctor_judges_the_ticked_mods_and_calls_out_an_unticked_overlay():
+    """A ticked list of one CommunicationMod is fine; two is not; and the overlay
+    being off must be said even when the agent would run."""
+    import contextlib
+    import io
+    import json
+
+    def run(ticked):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / "ModTheSpire"
+            directory.mkdir(parents=True)
+            (directory / "mod_lists.json").write_text(json.dumps(
+                {"defaultList": "<Default>", "lists": {"<Default>": ticked}}),
+                encoding="utf-8")
+
+            def body():
+                rep = Report()
+                with contextlib.redirect_stdout(io.StringIO()):
+                    check_single_communicationmod(rep, None, [])
+                return rep.lines
+
+            return _with_localappdata(tmp, body)
+
+    lines = run(["BaseMod.jar", "CommunicationModCJK.jar", "SpireBrainOverlay.jar"])
+    assert (PASS, "CommunicationMod ticked", "CommunicationModCJK.jar") in lines
+    assert (PASS, "In-game overlay ticked", "SpireBrainOverlay.jar") in lines
+
+    lines = run(["BaseMod.jar", "CommunicationMod.jar", "CommunicationModCJK.jar"])
+    assert any(st == FAIL and "Two CommunicationMods" in what for st, what, _ in lines)
+
+    lines = run(["BaseMod.jar", "CommunicationModCJK.jar"])
+    assert any(st == WARN and "overlay not ticked" in what for st, what, _ in lines)
+
+    lines = run(["BaseMod.jar", "SpireBrainOverlay.jar"])
+    assert any(st == FAIL and what == "CommunicationMod ticked" for st, what, _ in lines)
 
 
 if __name__ == "__main__":

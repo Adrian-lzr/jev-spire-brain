@@ -511,6 +511,29 @@ def test_state_snapshot_carries_every_field_the_in_game_overlay_reads():
     assert isinstance(outcome["acted"], list)   # asciiKey() iterates it
 
 
+def test_the_dashboard_refuses_to_share_its_port():
+    """Two dashboards on one port is a haunted port, not a convenience.
+
+    `socketserver` sets SO_REUSEADDR, and on Windows that lets a second process
+    bind a port another one is listening on. On 2026-09-22 three stale demo
+    servers shared 8787 and answered the in-game overlay with `404` from old code
+    (an old build has no `/state`), so the panel stayed empty with nothing
+    anywhere explaining why. The second bind now fails, loudly, with the fix.
+    """
+    from spirebrain.overlay.server import DashboardServer, PortInUse
+
+    first = DashboardServer(port=0)
+    try:
+        try:
+            DashboardServer(port=first.port)
+            raise AssertionError("a second dashboard bound the same port")
+        except PortInUse as exc:
+            assert str(first.port) in str(exc)
+            assert "--port" in str(exc)   # the message carries the fix
+    finally:
+        first.httpd.server_close()
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
