@@ -28,6 +28,12 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from spirebrain.driver.advisor import AdviseSession
+from spirebrain.driver.guards import (
+    LADDER_CYCLE,
+    LADDER_CYCLES_BEFORE_STOP,
+    LADDER_WAITS_BEFORE_KEY,
+    Ladder,
+)
 from spirebrain.driver.encoding import (
     configure_streams,
     scrub_surrogates,
@@ -102,16 +108,6 @@ DEFAULT_STALL_LIMIT = 2
 # misinterpretation reached anyone else.
 DEFAULT_LOG = object()
 
-# The ladder for unmodeled screens: one cycle is this exact rung sequence,
-# tried on the same screen fingerprint. The game may ignore keys during an
-# animation, so the cycle repeats; after LADDER_CYCLES_BEFORE_STOP full
-# cycles, stop loudly instead of cycling forever.
-LADDER_CYCLE = ("wait", "wait", "SPACE", "ESCAPE", "click")
-LADDER_WAITS_BEFORE_KEY = 2   # kept for tests/documentation of intent
-# Trip the loud-stop after this many full ladder cycles on the same unmodeled
-# screen fingerprint: 5 rungs x 3 cycles is ~15 messages - far under any cap,
-# and if none of that advanced the game, only a human can.
-LADDER_CYCLES_BEFORE_STOP = 3
 
 
 class StdioTransport:
@@ -170,18 +166,17 @@ class StdioTransport:
         self.stalled = False          # latched by the stall guard, cleared on a new state
         self.stuck_events = 0         # how many times the stall guard fired
         self.action_limit_hit = False
-        self.ladder_stopped = False   # latched by the unmodeled-screen ladder
-        self.ladder_events = 0        # how many times the ladder stopped for a human
         self.substitutions: list[dict] = []
         # Guard warnings go here (default stderr). Injectable because stderr is
         # how the tests check that a guard *said something* when it fired.
         self.warn_stream = warn_stream if warn_stream is not None else sys.stderr
         self._acted_fingerprint: str | None = None
         self._stuck_seen = 0
-        # Guard #4 (unmodeled-screen ladder) state: fingerprint of the screen
+        # Guard #4 (unmodeled-screen ladder) lives in `guards.py`: it
+        # owns the screen it is climbing on and the rung index, so a
+        # climb cannot be half-reset from here.
+        self.ladder = Ladder(agent=self.agent, warn_stream=self.warn_stream)
         # we are climbing on, and the rung index within the ladder cycle.
-        self._ladder_fp: str | None = None
-        self._ladder_step = 0
         self._in_game = False
         # Advisor mode (mode == "advise"): the player chooses, we recommend,
         # and the session below watches what they did with it. The same code
@@ -206,6 +201,14 @@ class StdioTransport:
     def advice_issued(self) -> int:
         return self.advisor.issued
 
+    @property
+    def ladder_stopped(self) -> bool:
+        return self.ladder.stopped
+
+    @property
+    def ladder_events(self) -> int:
+        return self.ladder.events
+
     def _reset_run_budget(self) -> None:
         """Per-run action budget: a fresh run inside the same process starts
         with a full counter. The 18:08 session's third run died ~50 commands
@@ -215,59 +218,6 @@ class StdioTransport:
         self.commands = 0
         self.action_limit_hit = False
         self.advisor.reset_run()
-
-    def _ladder_command(self, fp: str) -> str:
-        """Next rung of the unmodeled-screen ladder, tracking cycles.
-
-        The full cycle runs LADDER_CYCLES_BEFORE_STOP times; the message AFTER
-        the last rung stops loudly (once - later silent messages change
-        nothing, so the announcement does not repeat and ladder_events does
-        not inflate). `fp` is the SCREEN signature (screen_type + command
-        list), not the full state hash - animations mutate the state every
-        few messages, and a full-state fingerprint resets the ladder mid-
-        climb forever, which is how the 18:54 run burned 5008 waits.
-        """
-        if fp != self._ladder_fp:
-            self._ladder_fp = fp
-            self._ladder_step = 0
-        total_rungs = len(LADDER_CYCLE) * LADDER_CYCLES_BEFORE_STOP
-        if self._ladder_step >= total_rungs:
-            if not self.ladder_stopped:
-                self.ladder_stopped = True
-                self.ladder_events += 1
-                self._announce_unmodeled(fp)
-            return None  # stay silent; a new modeled screen auto-resumes
-        rung = LADDER_CYCLE[self._ladder_step % len(LADDER_CYCLE)]
-        self._ladder_step += 1
-        if rung == "wait":
-            return f"wait {DEFAULT_WAIT_FRAMES}"
-        if rung == "click":
-            # Centre of the game's native 1920x1080. The live payload does not
-            # carry dimensions; correct here on first live contact if it misses.
-            return "click 960 540"
-        return f"key {rung}"
-
-    def _announce_unmodeled(self, fp: str) -> None:
-        # ASCII only - see _announce_stall for the codepage reason.
-        print(
-            f"[stdio] UNMODELED SCREEN: {LADDER_CYCLES_BEFORE_STOP} ladder cycles "
-            f"(waits, click, SPACE, ESCAPE) did not advance this screen "
-            f"(fingerprint {fp[:12]}). The mod offers no command for what the "
-            f"game is showing - look at the game window and act by hand; the "
-            f"agent resumes by itself when a known screen returns.",
-            file=self.warn_stream, flush=True)
-        feed = getattr(self.agent, "feed", None)
-        if feed is not None:
-            try:
-                feed.publish("run_end", {
-                    "summary": "Unmodeled screen: clicks and keys did not "
-                               "advance it; pausing auto-decisions until a "
-                               "known screen returns.",
-                    "reason": "unmodeled_screen",
-                    "fingerprint": fp,
-                })
-            except Exception:  # noqa: BLE001 - a dead dashboard must not break the pipe
-                pass
 
     @staticmethod
     def _fingerprint(game: dict) -> str:
@@ -384,8 +334,9 @@ class StdioTransport:
             # in, spending its predecessors' debt).
             self._in_game = True
             self._reset_run_budget()
-            self._ladder_fp = None
-            self.ladder_stopped = False
+            # A new run starts with whatever screen the game feels like; the
+            # ladder's climb state is about the run that just ended.
+            self.ladder.reset()
 
         if not message.get("ready_for_command", True):
             # Absence of the flag is treated as "ready" rather than stalling
@@ -418,7 +369,7 @@ class StdioTransport:
             # rungs count against the SCREEN signature, not the state hash:
             # animations churn the state, and a churning hash restarts the
             # ladder forever (the 18:54 death, 5008 waits).
-            return self._ladder_command(self._screen_signature(game))
+            return self.ladder.command(self._screen_signature(game))
         if self.stalled:
             if fp != self._acted_fingerprint:
                 # A state we have never acted on: whatever stuck us is gone
@@ -461,8 +412,7 @@ class StdioTransport:
             # guard exists to stop. Only a genuinely new state clears it.
             self._acted_fingerprint = fp
         # A modeled screen is back: whatever the ladder was stuck on is gone.
-        self._ladder_fp = None
-        self.ladder_stopped = False
+        self.ladder.reset()
         return line
 
     def _announce_stall(self, fp: str) -> None:

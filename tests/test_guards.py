@@ -334,7 +334,7 @@ def test_unmodeled_screen_auto_resumes_when_a_modeled_screen_returns():
         # The game moved on: a real, actionable screen arrives.
         assert transport.handle_message(json.loads(_msg(_state()))) == "choose 0"
         assert transport.ladder_stopped is False
-        assert transport._ladder_fp is None
+        assert transport.ladder.fp is None
         # And a LATER unmodeled screen gets a fresh ladder, not the old latch.
         assert transport.handle_message(json.loads(stuck)) == "wait 20"
 
