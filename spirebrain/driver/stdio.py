@@ -73,6 +73,14 @@ DEFAULT_STALL_LIMIT = 2
 # are *for*.
 NON_ADVANCING_VERBS = frozenset({"state", "wait"})
 
+# Bare `wait` is not a command, it is an error: the game rejects it with
+# `Argument missing in command "wait".` (measured twice on 2026-09-22 — the
+# second time because the SAFE_VERBS substitution below bypassed
+# to_command_line and sent the verb name as the whole line). Every `wait`,
+# wherever it originates, goes out with a frame count: 20 frames is about a
+# third of a second, enough for a screen transition, invisible to a human.
+DEFAULT_WAIT_FRAMES = 20
+
 # Sentinel for "use the default log path". Distinct from None, because None must
 # mean *no logging at all* — tests pass None, and when None silently meant "write
 # to the repo's default file" the test suite appended 44 KB of synthetic game
@@ -152,11 +160,7 @@ def to_command_line(command: dict) -> str:
 
     if verb == "wait":
         frames = command.get("frames", command.get("ms"))
-        # Bare `wait` is NOT valid: the live game rejects it with
-        # `Argument missing in command "wait".` (measured 2026-09-22, the
-        # pipe log caught the loop). Default to a third of a second — long
-        # enough for a transition, invisible to a human.
-        return f"wait {int(frames) if frames is not None else 20}"
+        return f"wait {int(frames) if frames is not None else DEFAULT_WAIT_FRAMES}"
 
     if verb == "start":
         # START PlayerClass [AscensionLevel] [Seed] — class is required, and the
@@ -348,7 +352,14 @@ class StdioTransport:
                 pass
 
     def _ensure_offered(self, line: str, available: Any) -> str:
-        """Never send a verb the game did not advertise."""
+        """Never send a verb the game did not advertise.
+
+        The substitute is built as a full command line, not echoed as a verb
+        name: `wait` needs its frame argument, and echoing the bare verb here
+        is exactly the bug that burned 995 errors in the 2026-09-22 live run —
+        the substitution path bypassed to_command_line, where the default
+        lives.
+        """
         if not available:
             return line  # build does not advertise; trust the agent
         offered = {str(a).strip().lower() for a in available}
@@ -357,8 +368,10 @@ class StdioTransport:
             return line
         for candidate in SAFE_VERBS:
             if candidate in offered:
-                self.substitutions.append({"wanted": line, "sent": candidate})
-                return candidate
+                sent = (f"wait {DEFAULT_WAIT_FRAMES}" if candidate == "wait"
+                        else candidate)
+                self.substitutions.append({"wanted": line, "sent": sent})
+                return sent
         self.substitutions.append({"wanted": line, "sent": ""})
         return ""
 

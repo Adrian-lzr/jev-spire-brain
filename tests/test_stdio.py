@@ -195,6 +195,19 @@ def test_a_command_outside_available_commands_is_substituted_and_recorded():
     assert transport.substitutions == [{"wanted": "end", "sent": "proceed"}]
 
 
+def test_wait_substitution_carries_its_frame_argument():
+    """The live run on 2026-09-22 burned 995 errors here: on a NONE screen the
+    navigation Proceed was substituted to the bare verb `wait`, which the game
+    rejects (`Argument missing in command "wait".`). The substitution path
+    must not echo verb names - it builds a command line."""
+    transport = StdioTransport(_StubAgent({"command": "choose", "choice": 0}),
+                               log_path=None)
+    line = transport.handle_message(json.loads(
+        _msg(available_commands=["play", "end", "key", "click", "wait", "state"])))
+    assert line == "wait 20"
+    assert transport.substitutions[-1]["sent"] == "wait 20"
+
+
 def test_no_safe_substitute_means_no_command_at_all():
     transport = StdioTransport(_StubAgent({"command": "end"}), log_path=None)
     line = transport.handle_message(json.loads(_msg(available_commands=["play"])))
