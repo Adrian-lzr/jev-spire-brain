@@ -98,6 +98,12 @@ def _state_snapshot(feed: DecisionFeed) -> dict:
             last_advice = {
                 "point": event.get("point"),
                 "label": event.get("label"),
+                # `verb` + `command` travel to the in-game overlay so it can draw
+                # an ASCII form of the same advice. Without them a non-CJK install
+                # shows a blank line where the one actionable sentence should be —
+                # found 2026-09-22 by running the mod's own poller against /state.
+                "verb": event.get("verb"),
+                "command": event.get("command"),
                 "reason": event.get("reason") or "",
                 "confidence": event.get("confidence"),
                 "fallback": event.get("fallback"),
@@ -112,6 +118,8 @@ def _state_snapshot(feed: DecisionFeed) -> dict:
                 "verdict": event.get("verdict"),
                 "advice_label": event.get("advice_label"),
                 "acted_label": event.get("acted_label"),
+                # The action key, for the overlay's ASCII fallback.
+                "acted": event.get("acted"),
                 "agreement": event.get("agreement"),
                 "tally": event.get("tally"),
             }

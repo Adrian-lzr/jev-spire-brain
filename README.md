@@ -39,11 +39,27 @@ you actually did**, and the result is scored.
 | `mismatch` | You did something identifiable, and it was different |
 | `unobserved` | The state does not single out an action (a potion, a text event) — reported honestly instead of guessed |
 
-Where to watch it: the dashboard's left panel (`军师建议` / `你刚才的选择` /
-`建议命中率`), the in-game overlay (which polls `/state` for `last_advice`), and
-`logs/advice.jsonl` (one line per recommendation and per verdict, with the
-*evidence* for every inference — a verdict nobody can audit is not a
-measurement).
+Where to watch it — **the panel is in the game** (since 2026-09-22 evening):
+
+| Surface | What it shows | Needs |
+|---|---|---|
+| **In-game overlay** (primary) | `战斗 / 出「痛击」→ 咔咔 / 为什么 / 你刚才: 出「打击」 没采纳 / 命中率` + the HP-budget bar. `F8` hides and shows it. | the `SpireBrainOverlay` mod (installed with `python java/build.py --install`) and the agent running |
+| Dashboard page (`python start.py` opens it) | the full reasoning: Score rankings, Noul probe tables, route preview, the advice panel, and the verdict history | a browser tab — optional, for studying a run afterwards |
+
+A coach you have to alt-tab to read is not a coach, which is why the in-game
+panel is the default answer and the browser is now the *optional* one. Rebuild
+and reinstall the panel any time with:
+
+```bash
+python java/build.py --install      # compile (needs a JDK), verify, copy into mods\
+```
+
+The panel shows `waiting for the agent (python start.py)` when the agent is not
+running — silence would be indistinguishable from a broken mod.
+
+`logs/advice.jsonl` keeps the machine-readable record of everything: one line per
+recommendation and per verdict, with the *evidence* for every inference — a
+verdict nobody can audit is not a measurement.
 
 Two honest limitations, measured rather than assumed: **advice lag** (if you act
 before a recommendation lands, that pair scores as `unobserved` rather than as a

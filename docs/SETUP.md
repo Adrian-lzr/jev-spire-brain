@@ -304,6 +304,53 @@ does `logs/advice.jsonl` have lines (then the chain worked and the page is the
 problem); is the screen one the router models (an unmodeled screen gets no advice
 by design — there is nothing to recommend on a screen we cannot read).
 
+## 6.5 The in-game panel (SpireBrainOverlay)
+
+The advice shows up **inside the game**, so the run never needs a second window.
+The mod does not decide or talk to JEV: it polls `GET /state` on the dashboard
+over loopback and draws whatever the agent last published.
+
+```bash
+python java/build.py --install     # build from source, verify, copy into mods\
+python java/build.py --check       # run the mod's own poller against a live /state
+```
+
+* **Needs a JDK that can target Java 8.** The game ships its own JRE and this
+  install's is `1.8.0_144`, so the jar is compiled with `--release 8`; a jar built
+  for a newer JVM fails in the game with `UnsupportedClassVersionError` before any
+  of our code runs, which looks exactly like "the mod does nothing". Found JDKs on
+  this machine: `C:\Program Files\Java\jdk-21\bin\javac.exe` (used) and Android
+  Studio's bundled JBR.
+* **Maven is not required.** `java/build.py` does the three things the pom's shade
+  config describes — target 8, shade `org.json` in (ModTheSpire does no dependency
+  resolution), keep `ModTheSpire.json` at the jar root.
+* **Fonts.** The game generates its CJK fonts at runtime from `font/FeDPrm27C.otf`,
+  so Chinese renders on a ZHS install. The overlay still probes every string with
+  `BitmapFontData.hasGlyph` and falls back to an ASCII form when a glyph is
+  missing: a BitmapFont draws a missing glyph as *nothing*, and a panel that
+  silently loses its one actionable line is worse than an English one.
+* **`F8`** hides/shows the panel. No config file, because a player whose screen is
+  covered needs one keypress.
+* Rollback: every install backs the previous jar up next to it
+  (`SpireBrainOverlay.jar.bak-<timestamp>`).
+
+### Only ONE CommunicationMod may be installed
+
+`python -m spirebrain.doctor` now FAILs when two are active, because on
+2026-09-22 this machine had **both** the official mod and the CJK fork installed
+and ModTheSpire loaded both. The evidence: two `Received message from external
+process: Ready` lines 162 ms apart in `sendToDevs/mts_process_launch.log`, and
+every agent startup banner appearing **twice** in `communication_mod_errors.log`.
+
+What that costs: each mod spawns its own agent against the same game. In play
+mode the second agent's command lands on the **next** screen (a `choose 0` meant
+for the map got applied in the fight that followed); in advice mode JEV is called
+twice per state, so the bill doubles. Nothing in the game reports it.
+
+Fix: untick one in ModTheSpire's mod list (or unsubscribe it in Steam). Keep the
+CJK fork if the game runs in Chinese — otherwise the official one. Confirm with
+`communication_mod_errors.log`: one banner per launch, not two.
+
 ## 7. Troubleshooting
 
 | Symptom | Cause | Fix |

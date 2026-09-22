@@ -326,6 +326,134 @@ def check_mod_config(rep: Report) -> None:
                 "fix it with `python -m spirebrain.install_mod_config --write`")
 
 
+COMMUNICATIONMOD_FAMILY = ("CommunicationMod", "CommunicationModCJK")
+
+
+def _declared_modid(jar: Path) -> str | None:
+    """The `modid` a jar declares, or None. Never raises: a corrupt jar is data."""
+    import json as _json
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(jar) as z:
+            entry = next((n for n in z.namelist()
+                          if n.lower().endswith("modthespire.json")), None)
+            if entry is None:
+                return None
+            data = _json.loads(z.read(entry).decode("utf-8", "replace"))
+            modid = str(data.get("modid", "")).strip()
+            return modid or None
+    except Exception:  # noqa: BLE001 - a broken jar must not kill the doctor
+        return None
+
+
+def check_single_communicationmod(rep: Report, game: Path | None,
+                                  mods_jars: list[Path]) -> None:
+    """Exactly ONE CommunicationMod may be installed: it spawns the agent process.
+
+    Measured 2026-09-22 on this machine, and nothing in the game reports it: with
+    both the official mod and the CJK fork installed, ModTheSpire loads both
+    (each in its own classloader — they declare 242 class files in common), and
+    **each spawns its own agent process**. The evidence was two `Ready` handshakes
+    162 ms apart in `mts_process_launch.log`, and every startup banner pair in
+    `communication_mod_errors.log`.
+
+    Why it matters: in play mode, two agents answer the same state, so the second
+    command lands on the *next* screen (a `choose 0` meant for the map gets
+    applied in the fight that followed). In advice mode the agent calls JEV twice
+    per state, so the bill doubles. A jar is "active" if it is in the game's
+    `mods\\` folder *or* anywhere in Steam's Workshop content for this game —
+    ModTheSpire auto-loads Workshop items too.
+    """
+    by_modid: dict[str, list[Path]] = {}
+    roots: list[Path] = []
+    if game is not None:
+        roots.append(game / "mods")
+    # ModTheSpire auto-loads Workshop items too, so a second CommunicationMod
+    # living there is just as active as one copied into mods\.
+    for library in find_steam_libraries():
+        content = workshop_content_dir(library, "646570")
+        if content.exists():
+            roots.extend(d for d in sorted(content.iterdir()) if d.is_dir())
+
+    scanned: set[Path] = set()
+    for root in roots:
+        if not root.exists():
+            continue
+        for jar in sorted(root.glob("*.jar")):
+            resolved = jar.resolve()
+            if resolved in scanned:
+                continue
+            scanned.add(resolved)
+            modid = _declared_modid(jar)
+            if modid and modid.lower().startswith("communicationmod"):
+                by_modid.setdefault(modid, []).append(jar)
+
+    if not by_modid:
+        return  # check_communicationmod already reports a missing jar
+    if len(by_modid) == 1:
+        modid = next(iter(by_modid))
+        copies = by_modid[modid]
+        rep.add(PASS, "CommunicationMod instances",
+                f"exactly one mod active: {modid}"
+                + (f" ({len(copies)} copies on disk; ModTheSpire dedupes by modid)"
+                   if len(copies) > 1 else ""))
+        return
+
+    # Two DISTINCT modids is the failing case. Grouping by modid matters: the
+    # same jar in mods\ and in the Workshop folder is one mod to ModTheSpire
+    # (measured: its mod list showed CommunicationMod once), so complaining about
+    # that would send the player chasing a non-problem.
+    names = ", ".join(sorted(by_modid))
+    rep.add(FAIL, "Two CommunicationMods are active", names,
+            "untick one of them in ModTheSpire's mod list before launching (or"
+            " unsubscribe the one you do not want in Steam's Workshop). Two of"
+            " them each spawn their own agent against the same game, so one"
+            " agent's command lands on the NEXT screen. Keep ONE: the CJK fork"
+            " (CommunicationModCJK) if your game runs in Chinese/Japanese/Korean,"
+            " the official CommunicationMod otherwise. To confirm the fix: the"
+            " agent's banner in communication_mod_errors.log must appear once per"
+            " launch, not twice.")
+    for modid, jars in sorted(by_modid.items()):
+        for jar in jars:
+            print(f"          - {modid}: {jar}")
+
+
+def check_overlay_jar(rep: Report, game: Path | None) -> None:
+    """Is the in-game panel installed, and which version?
+
+    The panel is the surface a player actually reads, so "the mod is missing" must
+    be a reported fact rather than something noticed mid-run when the advice never
+    appears. Version matters more than presence: an old jar still loads and still
+    shows *something*, so a stale copy looks like a working panel that never
+    learned to show the advice.
+    """
+    if game is None:
+        return
+    jar = game / "mods" / "SpireBrainOverlay.jar"
+    if not jar.exists():
+        rep.add(WARN, "In-game overlay", "not installed — advice only shows in the browser",
+                "python java/build.py --install")
+        return
+    version = None
+    try:
+        import zipfile
+
+        with zipfile.ZipFile(jar) as z:
+            import json as _json
+
+            version = _json.loads(z.read("ModTheSpire.json")
+                                  .decode("utf-8", "replace")).get("version")
+    except Exception:  # noqa: BLE001 - an unreadable jar is data, not a crash
+        pass
+    if version:
+        rep.add(PASS, "In-game overlay", f"SpireBrainOverlay {version} in mods\\")
+    else:
+        rep.add(WARN, "In-game overlay", str(jar),
+                "the jar has no readable ModTheSpire.json; rebuild it with"
+                " `python java/build.py --install`")
+
+
 def check_gamedata(rep: Report) -> None:
     try:
         from spirebrain import gamedata
@@ -426,6 +554,8 @@ def main(argv: list[str]) -> int:
     jars = find_communicationmod(mods_jars)
     content = check_workshop(rep, local_jar=bool(jars))
     have_cm = check_communicationmod(rep, jars)
+    check_single_communicationmod(rep, game, mods_jars)
+    check_overlay_jar(rep, game)
     check_mod_config(rep)
     check_gamedata(rep)
     check_brain_config(rep)

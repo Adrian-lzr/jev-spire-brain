@@ -29,6 +29,60 @@ Legend: `[x]` done · `[~]` done but unverifiable until an external condition is
 - [ ] Confirm on the live pipe: grid index order, shop shelf order, and that the
   `screen_state` field name holds (all flagged `PHASE 1 VERIFY` in code)
 
+## Phase 1.7 — The coach moves into the game (2026-09-22 night)
+
+The player's report decided this one: the advice lived in a browser tab, so
+reading it meant alt-tabbing away from the game. A coach you have to switch
+windows to read is not a coach — so the panel moved inside.
+
+- [x] `java/` overlay rewritten to render the **advisor panel** instead of the
+  auto-play decision headline: the recommendation large (Chinese, from the
+  game's own vocabulary: `出「痛击」→ 咔咔`), the reason, what you did with the
+  last one and whether it matched, the running agreement rate, and the
+  HP-budget bar
+- [x] `java/build.py` — build without Maven, in three steps that each have a
+  failure mode: target Java 8 (the game's JRE is `1.8.0_144`; anything newer
+  dies with `UnsupportedClassVersionError` before our code runs), shade
+  `org.json` in (ModTheSpire resolves no dependencies), keep `ModTheSpire.json`
+  at the jar root. `--install` backs the previous jar up; `--verify` reads the
+  produced jar back and checks the class file version
+- [x] `java/build.py --check <url>` — runs the mod's own poller and parser
+  against a live dashboard and prints what the panel would show. This is how the
+  parser gets tested without launching the game, and it is the reason the next
+  two bugs were found at all
+- [x] Fonts handled rather than hoped for: the game generates CJK fonts at
+  runtime from `font/FeDPrm27C.otf`, and the overlay probes every string with
+  `BitmapFontData.hasGlyph`, falling back to an ASCII form when a glyph is
+  missing (a BitmapFont draws a missing glyph as nothing, so an unprobed font
+  would silently blank the one actionable line)
+- [x] Panel placement moved from the top-left (where the old overlay drew over
+  the game's own HP bar and relic row) to a translucent top-centre panel; `F8`
+  hides and shows it
+- [x] Two bugs the in-game chain exposed, both fixed and pinned:
+  **`/state` never carried `verb`/`command`/`acted`** (so the overlay's ASCII
+  fallback came back empty — a blank line on any non-CJK install), and
+  **the advice's `reason` was always empty** (the router stores the judgement in
+  `detail` and returns the wire command alone, so `command["reason"]` is empty
+  for every recorded decision)
+- [x] Contract test `test_state_snapshot_carries_every_field_the_in_game_overlay_reads`
+  — a renamed key fails no Java test, it just blanks a line in the game
+
+### And one thing that was quietly costing both modes: TWO CommunicationMods
+
+`python -m spirebrain.doctor` reported it on the first run after the check was
+written (2026-09-22): this machine had the official CommunicationMod **and** the
+CJK fork installed, and ModTheSpire loaded both. Evidence: two `Ready` handshakes
+162 ms apart in `mts_process_launch.log`, and every agent startup banner
+appearing twice in `communication_mod_errors.log`.
+
+- **Two agents per launch.** In play mode the second agent's command lands on the
+  *next* screen (a `choose 0` meant for the map gets applied in the fight that
+  followed); in advice mode JEV is called twice per state.
+- The doctor now FAILs on it, with the fix and the way to confirm it (one banner
+  per launch). Same-modid copies are reported separately, because ModTheSpire
+  dedupes by modid and complaining about those would send the player chasing a
+  non-problem.
+
 ## Phase 1.6 — Advisor mode: the agent recommends, the player plays (2026-09-22 evening)
 
 **The repositioning that reordered the roadmap.** The project's purpose is to help

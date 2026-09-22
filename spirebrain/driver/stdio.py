@@ -703,12 +703,12 @@ class StdioTransport:
 
         screen = _screen_of(game)
         point = SCREEN_POINT.get(screen, "navigation")
-        confidence, fallback = self._last_confidence(command)
+        confidence, fallback, reason = self._last_decision_fields(command)
         advice = Advice(
             point=point, screen=screen, command=command,
             key=advice_key(payload, command, point),
             label=label_for(payload, command, point),
-            reason=str(command.get("reason", "") or ""),
+            reason=reason or str(command.get("reason", "") or ""),
             confidence=confidence, fallback=fallback,
             act=int(game.get("act", 0) or 0), floor=int(game.get("floor", 0) or 0),
             message=self.messages,
@@ -743,18 +743,30 @@ class StdioTransport:
                                     safe=ADVISE_POLL_VERBS)
         return line or None
 
-    def _last_confidence(self, command: dict) -> tuple[float, bool]:
-        """The confidence of the decision that produced `command`, if it was one.
+    def _last_decision_fields(self, command: dict) -> tuple[float, bool, str]:
+        """Confidence, fallback flag and *reason* of the decision behind `command`.
 
-        Screens answered by navigation rules (non-decision screens, a grid with
-        no pending intent) never went through `_record`, so there is no number to
-        report. 0.0 means "rules, not a judgement" — which the dashboard renders
-        as 规则 rather than as a 0% certainty, because those are different facts.
+        Screens answered by navigation rules (non-decision screens, a grid with no
+        pending intent) never went through `_record`, so there is no number and no
+        reason to report. 0.0 means "rules, not a judgement" — which the panel
+        renders as 规则判断 rather than as a 0% certainty, because those are
+        different facts.
+
+        The reason has to be read from the history rather than from the command:
+        `_record` stores the judgement in `detail` and returns the wire command
+        alone, so `command.get("reason")` is empty for every recorded decision —
+        measured 2026-09-22 with the overlay's own poller, which showed a "why"
+        line that was blank on every screen that had a reason.
         """
         history = getattr(self.agent, "history", None) or []
         if history and history[-1].get("command") == command:
-            return float(history[-1].get("confidence") or 0.0), bool(history[-1].get("fallback"))
-        return 0.0, False
+            entry = history[-1]
+            detail = entry.get("detail") or {}
+            gate = detail.get("gate") or {}
+            reason = str(detail.get("reason") or gate.get("reason") or "")
+            return (float(entry.get("confidence") or 0.0),
+                    bool(entry.get("fallback")), reason)
+        return 0.0, False, ""
 
     def _publish_advice(self, advice: Advice) -> None:
         self._advice_log({"kind": "advice", "point": advice.point,

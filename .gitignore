@@ -20,6 +20,7 @@ Thumbs.db
 .idea/
 .vscode/
 
-# Java mod build artifacts (java/target is produced by scripts/build_overlay.py;
-# the sources in java/src are the real deliverable)
+# Java mod build artifacts (java/target is produced by java/build.py; the sources
+# in java/src are the real deliverable, and the installed jar lives in the game's
+# mods\ folder rather than in the repo)
 java/target/

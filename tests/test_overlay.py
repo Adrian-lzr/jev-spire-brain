@@ -456,6 +456,61 @@ def test_state_snapshot_finds_the_outcome_past_the_agents_own_run_state():
     assert snap["last_outcome"]["verdict"] == "match"
 
 
+def test_state_snapshot_carries_every_field_the_in_game_overlay_reads():
+    """A cross-language contract, pinned on the Python side.
+
+    The in-game overlay (`java/src/main/java/io/github/adrianlzr/spirebrain/
+    FeedClient.java`) parses this payload by key. A field renamed here fails no
+    Java test — it silently blanks one line of the panel inside the game, which
+    is the most expensive kind of regression to notice: you have to be mid-run to
+    see it, and it looks like the agent's fault.
+
+    Found exactly that way on 2026-09-22, by running the mod's own poller against
+    a live `/state` (`python java/build.py --check http://127.0.0.1:8801`): the
+    Chinese label arrived and the ASCII fallback came back empty, because
+    `verb`/`command`/`acted` were never in the snapshot. On a non-CJK install that
+    is a blank line where the one actionable sentence should be.
+
+    A list of names, not a full comparison on purpose: this is the contract, not
+    the payload.
+    """
+    from spirebrain.overlay.feed import DecisionFeed
+    from spirebrain.overlay.server import _state_snapshot
+
+    feed = DecisionFeed()
+    feed.publish("run_state", {"act": 1, "floor": 3, "hp": 70, "max_hp": 80,
+                               "reserved": 24, "budget_remaining": 28, "relics": []})
+    feed.publish("advice", {"point": "combat", "label": "出「痛击」→ 咔咔",
+                            "verb": "play", "command": {"command": "play", "card": 1,
+                                                        "target": 0},
+                            "reason": "lethal this turn", "confidence": 0.82,
+                            "fallback": False, "act": 1, "floor": 3,
+                            "tally": {"match": 0, "mismatch": 0, "unobserved": 0},
+                            "agreement": None})
+    feed.publish("outcome", {"point": "combat", "verdict": "match",
+                             "advice_label": "出「痛击」→ 咔咔",
+                             "acted_label": "出「痛击」→ 咔咔",
+                             "acted": ["play", "bash", "cultist"],
+                             "tally": {"match": 1, "mismatch": 0, "unobserved": 0},
+                             "agreement": 1.0})
+
+    snap = _state_snapshot(feed)
+    advice, outcome = snap["last_advice"], snap["last_outcome"]
+
+    required_advice = {"point", "label", "verb", "command", "reason",
+                       "confidence", "fallback", "act", "floor", "tally", "agreement"}
+    missing = required_advice - set(advice)
+    assert not missing, f"the overlay reads these and they are gone: {sorted(missing)}"
+    assert isinstance(advice["command"], dict) and advice["command"].get("command")
+    assert advice["verb"] == "play"      # asciiCommand() switches on the verb
+
+    required_outcome = {"point", "verdict", "advice_label", "acted_label",
+                        "acted", "tally", "agreement"}
+    missing = required_outcome - set(outcome)
+    assert not missing, f"the overlay reads these and they are gone: {sorted(missing)}"
+    assert isinstance(outcome["acted"], list)   # asciiKey() iterates it
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

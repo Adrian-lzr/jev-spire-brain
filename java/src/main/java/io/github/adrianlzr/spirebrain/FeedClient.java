@@ -12,36 +12,69 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 /**
- * Polls the SpireBrain dashboard for the latest decision, off the render thread.
+ * Polls the SpireBrain dashboard for the latest state, off the render thread.
  *
  * Design notes:
  * - One long-lived thread, one blocking GET with a short timeout, then sleep.
- *   Not a thread pool: the payload is ~1 KB and 2 s cadence needs no parallelism.
+ *   Not a thread pool: the payload is ~2 KB and a 1 s cadence needs no
+ *   parallelism.
  * - The server's /events is an infinite SSE stream; a poller instead wants a
- *   bounded answer. GET /health returns the event count; GET /state (added on
- *   the server for exactly this mod) returns the latest snapshot as JSON.
+ *   bounded answer. GET /state returns the latest snapshot as JSON, built for
+ *   this mod: the last decision, the last recommendation, the verdict on what
+ *   the player did with it, and the run state.
  * - Every failure path degrades to "keep showing the last snapshot" and, at
  *   most, a status line. Never an exception into the game's render loop.
+ *
+ * ADVISOR MODE (2026-09-22). The agent has two modes and this poller serves both:
+ *
+ *   advise (the default) — `last_advice` carries a Chinese recommendation
+ *                          ("出「痛击」→ 咔咔"), and `last_outcome` carries what the
+ *                          player actually did. This mod shows both, which is the
+ *                          whole point: a coach you have to alt-tab to read is
+ *                          not a coach.
+ *   play                 — there is no advice, only decisions; the panel falls
+ *                          back to the decision headline it always showed.
+ *
+ * The fields are parsed defensively and BOTH a Chinese and an ASCII form are
+ * kept for every label. Which one is drawn is decided by the overlay, which is
+ * the only side that can ask the game's font whether it can render a glyph.
  */
 public final class FeedClient {
 
-    /** What the mod renders. Immutable; swapped atomically by the poller. */
+    /** What the mod renders. One instance per poll; fields are never mutated. */
     public static final class Snapshot {
-        public final String headline;   // "[point] -> value"
-        public final String detail;     // fallback reason / gate reason (may be "")
-        public final boolean fallback;  // true when a rule took over
-        public final int hp, maxHp, budgetRemaining, budgetMax;
+        // -- advisor mode -------------------------------------------------- //
+        /** The recommendation in Chinese, e.g. 出「痛击」→ 咔咔. "" when none. */
+        public String adviceLabel = "";
+        /** The same recommendation in ASCII, for a font that cannot do Chinese. */
+        public String adviceAscii = "";
+        /** Which decision point it is: Chinese + ASCII pair. */
+        public String pointLabel = "";
+        public String pointAscii = "";
+        /** Why (the router's own reason — English, so ASCII-safe). */
+        public String adviceReason = "";
+        public double adviceConfidence = 0.0;
+        /** True when confidence is 0: rules answered, the model was not asked. */
+        public boolean ruleOnly = false;
+        public boolean fallback = false;
+        public boolean hasAdvice = false;
 
-        Snapshot(String headline, String detail, boolean fallback,
-                 int hp, int maxHp, int budgetRemaining, int budgetMax) {
-            this.headline = headline;
-            this.detail = detail;
-            this.fallback = fallback;
-            this.hp = hp;
-            this.maxHp = maxHp;
-            this.budgetRemaining = budgetRemaining;
-            this.budgetMax = budgetMax;
-        }
+        // -- what the player did with it ----------------------------------- //
+        /** match | mismatch | unobserved. "" when nothing was judged. */
+        public String verdict = "";
+        /** Chinese + ASCII forms of the player's action. */
+        public String actedLabel = "";
+        public String actedAscii = "";
+        /** "62%  采纳 8 · 未采纳 5 · 无法判定 3" (ASCII fallback included). */
+        public String tallyText = "";
+        public boolean hasOutcome = false;
+
+        // -- run state ------------------------------------------------------ //
+        public int hp, maxHp, budgetRemaining, budgetMax;
+
+        // -- play-mode fallback (no advice in the payload) ------------------ //
+        public String headline = "";
+        public String detail = "";
     }
 
     private final String baseUrl;
@@ -49,7 +82,6 @@ public final class FeedClient {
     private final Consumer<String> onStatus;
     private final Thread worker;
     private final AtomicBoolean running = new AtomicBoolean(true);
-    private volatile long lastEventSeq = 0;
 
     public FeedClient(String baseUrl, Consumer<Snapshot> onSnapshot, Consumer<String> onStatus) {
         this.baseUrl = baseUrl == null ? "http://127.0.0.1:8787" : baseUrl.replaceAll("/+$", "");
@@ -60,7 +92,7 @@ public final class FeedClient {
         this.worker.start();
     }
 
-    /** Called from the render thread: set the "want a poll" flag the worker honours. */
+    /** Called from the render thread: wake the poller (it sleeps between polls). */
     public void pollAsync() {
         synchronized (this) {
             notifyAll();
@@ -78,7 +110,7 @@ public final class FeedClient {
                     }
                 }
                 synchronized (this) {
-                    wait(2000L);
+                    wait(1000L);
                 }
             } catch (InterruptedException ie) {
                 return;
@@ -96,38 +128,152 @@ public final class FeedClient {
     }
 
     private Snapshot parse(JSONObject state) {
+        JSONObject advice = state.optJSONObject("last_advice");
+        JSONObject outcome = state.optJSONObject("last_outcome");
         JSONObject last = state.optJSONObject("last_decision");
         JSONObject run = state.optJSONObject("run_state");
-        if (last == null && run == null) {
+        if (advice == null && outcome == null && last == null && run == null) {
             return null;
         }
-        String headline;
-        boolean fallback = false;
-        String detail = "";
-        if (last != null) {
+
+        Snapshot snap = new Snapshot();
+
+        if (advice != null) {
+            String point = advice.optString("point", "");
+            snap.pointLabel = pointZh(point);
+            snap.pointAscii = point.isEmpty() ? "?" : point;
+            snap.adviceLabel = advice.optString("label", "");
+            snap.adviceAscii = asciiCommand(advice.optString("verb", ""),
+                    advice.optJSONObject("command"));
+            snap.adviceReason = advice.optString("reason", "");
+            snap.adviceConfidence = advice.optDouble("confidence", 0.0);
+            snap.ruleOnly = snap.adviceConfidence <= 0.0;
+            snap.fallback = advice.optBoolean("fallback", false);
+            snap.hasAdvice = !snap.adviceLabel.isEmpty() || !snap.adviceAscii.isEmpty();
+        }
+
+        if (outcome != null) {
+            snap.verdict = outcome.optString("verdict", "");
+            snap.actedLabel = outcome.optString("acted_label", "");
+            JSONArray acted = outcome.optJSONArray("acted");
+            snap.actedAscii = acted == null ? "" : asciiKey(acted);
+            snap.tallyText = tallyText(outcome);
+            snap.hasOutcome = !snap.verdict.isEmpty();
+        }
+
+        if (!snap.hasAdvice && last != null) {
+            // Play mode (or a screen the router could not advise on): show the
+            // decision headline exactly as this mod always did.
             String point = last.optString("point", "?");
             String value = String.valueOf(last.opt("value"));
             double conf = last.optDouble("confidence", 0.0);
-            fallback = last.optBoolean("fallback", false);
-            headline = String.format("[%s] -> %s   conf %.2f%s",
+            boolean fallback = last.optBoolean("fallback", false);
+            snap.headline = String.format("[%s] -> %s   conf %.2f%s",
                     point, value, conf, fallback ? "  (rule took over)" : "");
-            detail = last.optString("reason", "");
-            if (detail.isEmpty()) {
+            snap.detail = last.optString("reason", "");
+            if (snap.detail.isEmpty()) {
                 JSONObject gate = last.optJSONObject("gate");
                 if (gate != null) {
-                    detail = gate.optString("reason", "");
+                    snap.detail = gate.optString("reason", "");
                 }
             }
-        } else {
-            headline = "SpireBrain is watching the run…";
         }
 
-        int hp = run != null ? run.optInt("hp", 0) : 0;
-        int maxHp = run != null ? run.optInt("max_hp", 80) : 80;
-        int remaining = run != null ? run.optInt("budget_remaining", 0) : 0;
-        int reserved = run != null ? run.optInt("reserved", 0) : 0;
-        return new Snapshot(headline, detail, fallback,
-                hp, maxHp, remaining, Math.max(1, maxHp - reserved));
+        if (run != null) {
+            snap.hp = run.optInt("hp", 0);
+            snap.maxHp = run.optInt("max_hp", 80);
+            snap.budgetRemaining = run.optInt("budget_remaining", 0);
+            int reserved = run.optInt("reserved", 0);
+            snap.budgetMax = Math.max(1, snap.maxHp - reserved);
+        } else {
+            snap.maxHp = 80;
+            snap.budgetMax = 80;
+        }
+        return snap;
+    }
+
+    /** "62%  采纳 8 · 未采纳 5 · 无法判定 3" — the coach's own report card. */
+    private static String tallyText(JSONObject outcome) {
+        Object agreement = outcome.opt("agreement");
+        Object tally = outcome.opt("tally");
+        if (agreement == null && !(tally instanceof JSONObject)) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        if (agreement instanceof Number) {
+            sb.append(Math.round(((Number) agreement).doubleValue() * 100)).append('%');
+        }
+        if (tally instanceof JSONObject) {
+            JSONObject t = (JSONObject) tally;
+            sb.append("  ").append(t.optInt("match", 0)).append('/')
+              .append(t.optInt("mismatch", 0)).append('/')
+              .append(t.optInt("unobserved", 0));
+        }
+        return sb.toString().trim();
+    }
+
+    /** The point key in Chinese, plus nothing invented: unknown keys pass through. */
+    private static String pointZh(String point) {
+        if (point == null) {
+            return "";
+        }
+        switch (point) {
+            case "map":        return "地图选路";
+            case "card_reward":return "卡牌奖励";
+            case "event":      return "事件";
+            case "rest":       return "篝火";
+            case "shop":       return "商店";
+            case "boss_relic": return "Boss遗物";
+            case "combat":     return "战斗";
+            case "combat_risk":return "战斗风险";
+            case "grid":       return "选卡";
+            case "navigation": return "过场";
+            default:           return point;
+        }
+    }
+
+    /** ASCII form of an action key, e.g. ["play","strike_r","cultist"]. */
+    private static String asciiKey(JSONArray key) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < key.length(); i++) {
+            String part = key.optString(i, "");
+            if (part.isEmpty()) {
+                continue;
+            }
+            sb.append(sb.length() == 0 ? "" : " ").append(part);
+        }
+        return sb.toString();
+    }
+
+    /**
+     * ASCII form of a command, for installs whose font cannot draw the Chinese
+     * label. Card numbers are 1-based here on purpose: this is the line a player
+     * reads, and the game numbers cards 1..n (the wire is 1-based too, the
+     * agent's own logs are 0-based, and mixing them up in the one place a human
+     * reads would be worse than useless).
+     */
+    private static String asciiCommand(String verb, JSONObject command) {
+        if (verb == null || verb.isEmpty()) {
+            return "";
+        }
+        if (command == null) {
+            return verb;
+        }
+        if ("play".equals(verb)) {
+            int card = command.optInt("card", command.optInt("card_index", -1));
+            Object target = command.opt("target");
+            String s = "play card " + (card + 1);
+            return target instanceof Number ? s + " -> enemy " + (((Number) target).intValue() + 1) : s;
+        }
+        if ("choose".equals(verb)) {
+            Object name = command.opt("name");
+            if (name instanceof String && !((String) name).isEmpty()) {
+                return "choose " + name;
+            }
+            Object idx = command.opt("choice");
+            return idx instanceof Number ? "choose " + idx : "choose";
+        }
+        return verb;
     }
 
     private JSONObject getJson(String url) throws Exception {
