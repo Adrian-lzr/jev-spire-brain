@@ -162,6 +162,26 @@ def run_state_event(agent) -> dict:
             "deck_size": len(run.deck or []),
             "relics": list(run.relics or []),
         })
+    strategic = getattr(agent, "strategic", None)
+    if strategic is not None:
+        try:
+            detail = strategic.current_detail()
+            observed_state = getattr(agent, "_observed_state_id", "")
+            if (observed_state and getattr(strategic, "last_state_id", "")
+                    and observed_state != getattr(strategic, "last_state_id", "")):
+                detail = {**detail, "strategic_goal": "", "long_term_goal": "",
+                          "plan_id": "", "brain_source": "pending"}
+            state.update({
+                "state_id": observed_state
+                or getattr(strategic, "last_state_id", ""),
+                "strategic_goal": detail.get("strategic_goal", ""),
+                "long_term_goal": detail.get("long_term_goal", ""),
+                "plan_id": detail.get("plan_id", ""),
+                "brain_source": detail.get("brain_source", ""),
+                "brain_backend": detail.get("brain_backend", ""),
+            })
+        except Exception:  # optional observability must never affect gameplay
+            pass
     return state
 
 
@@ -210,6 +230,22 @@ def advice_event(advice, tally: dict | None = None,
         "source_type": advice.source_type,
         "source": advice.source,
         "guide_rules": advice.guide_rules,
+        "strategic_goal": advice.strategic_goal,
+        "plan_id": advice.plan_id,
+        "brain_source": advice.brain_source,
+        "jev_confidence": round(float(advice.jev_confidence or 0.0), 4),
+        "alternative_command": advice.alternative_command,
+        "alternative_label": advice.alternative_label,
+        "alternative_reason": advice.alternative_reason,
+        "alternative_condition": advice.alternative_condition,
+        "uncertain": bool(advice.uncertain),
+        "candidates": _jsonable(advice.candidates),
+        "candidate_id": advice.candidate_id,
+        "long_term_goal": advice.long_term_goal,
+        "brain_backend": advice.brain_backend,
+        "brain_latency_ms": advice.brain_latency_ms,
+        "brain_request_id": advice.brain_request_id,
+        "brain_error": advice.brain_error,
     }
 
 
@@ -224,6 +260,7 @@ def outcome_event(outcome, tally: dict | None = None,
     return {
         "point": outcome.advice.point,
         "verdict": outcome.verdict,
+        "plan_deviation": outcome.verdict == "mismatch",
         "advice_label": outcome.advice.label,
         "acted_label": outcome.acted_label,
         "acted": list(outcome.acted_key) if outcome.acted_key else None,

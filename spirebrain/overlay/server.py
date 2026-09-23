@@ -117,11 +117,28 @@ def _state_snapshot(feed: DecisionFeed) -> dict:
                 "source_type": event.get("source_type", ""),
                 "source": event.get("source", ""),
                 "guide_rules": event.get("guide_rules") or [],
+                "strategic_goal": event.get("strategic_goal", ""),
+                "plan_id": event.get("plan_id", ""),
+                "brain_source": event.get("brain_source", ""),
+                "long_term_goal": event.get("long_term_goal", ""),
+                "jev_confidence": event.get("jev_confidence", 0.0),
+                "alternative_command": event.get("alternative_command"),
+                "alternative_label": event.get("alternative_label", ""),
+                "alternative_reason": event.get("alternative_reason", ""),
+                "alternative_condition": event.get("alternative_condition", ""),
+                "uncertain": event.get("uncertain", False),
+                "candidates": event.get("candidates") or [],
+                "candidate_id": event.get("candidate_id", ""),
+                "brain_backend": event.get("brain_backend", ""),
+                "brain_latency_ms": event.get("brain_latency_ms", 0),
+                "brain_request_id": event.get("brain_request_id", ""),
+                "brain_error": event.get("brain_error", ""),
             }
         if last_outcome is None and kind == "outcome":
             last_outcome = {
                 "point": event.get("point"),
                 "verdict": event.get("verdict"),
+                "plan_deviation": bool(event.get("plan_deviation", False)),
                 "advice_label": event.get("advice_label"),
                 "acted_label": event.get("acted_label"),
                 # The action key, for the overlay's ASCII fallback.
@@ -146,10 +163,15 @@ def _state_snapshot(feed: DecisionFeed) -> dict:
         # events and this is a dict lookup each.
         if run_state and last_decision and last_advice and last_outcome:
             break
+    current_state_id = None
+    if run_state:
+        current_state_id = run_state.get("state_id")
+    if not current_state_id and last_advice:
+        current_state_id = last_advice.get("state_id")
     return {"last_decision": last_decision, "last_advice": last_advice,
             "last_outcome": last_outcome, "run_state": run_state,
             "agent_state": agent_state,
-            "current_state_id": last_advice.get("state_id") if last_advice else None}
+            "current_state_id": current_state_id}
 
 
 class PortInUse(RuntimeError):

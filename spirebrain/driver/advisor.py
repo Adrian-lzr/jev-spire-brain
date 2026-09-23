@@ -133,6 +133,7 @@ class AdviseSession:
         fp = self._fingerprint(game)
         outcome = self.tracker.resolve(game)
         if outcome is not None:
+            self._handle_outcome_for_strategy(outcome)
             self._publish_outcome(outcome)
 
         if not modeled:
@@ -150,12 +151,34 @@ class AdviseSession:
         if fp != self.advised_fp:
             self.advised_fp = fp
             self._latest_fp = fp
+            # A state can legitimately recur later (for example, returning to
+            # the same shop after a cancel).  The generation distinguishes that
+            # new request from a late result produced for the earlier visit.
+            self._generation += 1
             if self._worker_agent is None:
                 self._advise_once(game, available)
             else:
                 self._advise_async(game, available, fp)
         self._drain_completed()
         return self._poll(available)
+
+    def _handle_outcome_for_strategy(self, outcome) -> None:
+        """Feed a clear player deviation back into the single-run planner."""
+        if outcome.verdict != "mismatch":
+            return
+        decision_agent = self._worker_agent or self.agent
+        strategic = getattr(decision_agent, "strategic", None)
+        if strategic is None:
+            return
+        advice = outcome.advice
+        advised = advice.candidate_id or advice.label or advice.command
+        actual = outcome.acted_key or outcome.acted_label or "unknown"
+        try:
+            strategic.memory.record_deviation(
+                str(advised), str(actual), state_id=advice.state_id)
+            strategic.request_replan("player_deviation")
+        except Exception:  # strategy feedback is optional observability
+            pass
 
     def _publish_status(self, state_id: str, status: str, label: str,
                         reason: str, source_type: str = "pending",
@@ -189,6 +212,7 @@ class AdviseSession:
                                 source_type=quick.get("source_type", "guide_rule"),
                                 source=quick.get("source", ""),
                                 guide_rules=quick.get("guide_rules", []),
+                                metadata=quick,
                                 provisional=True)
             if quick.get("source_type") == "guide_rule":
                 return  # a hard rule has already settled this decision
@@ -267,6 +291,7 @@ class AdviseSession:
                        source_type: str = "", source: str = "",
                        guide_rules: list[dict] | None = None,
                        history_entry: dict | None = None,
+                       metadata: dict | None = None,
                        provisional: bool = False) -> None:
         game = payload
         if self._worker_agent is not None:
@@ -283,7 +308,9 @@ class AdviseSession:
                                        history_entry=history_entry))
         entry = None if provisional else (history_entry or
             ((getattr(decision_agent, "history", None) or [None])[-1]))
-        detail = entry.get("detail", {}) if entry and entry.get("command") == command else {}
+        detail = dict(metadata or {})
+        if entry and entry.get("command") == command:
+            detail.update(entry.get("detail", {}) or {})
         advice = Advice(
             point=point, screen=screen, command=command,
             key=advice_key(payload, command, point),
@@ -296,6 +323,23 @@ class AdviseSession:
             source_type=source_type or detail.get("source_type", "guide_rule"),
             source=source or detail.get("source", ""),
             guide_rules=guide_rules if guide_rules is not None else detail.get("guide_rules", []),
+            strategic_goal=str(detail.get("strategic_goal", "") or ""),
+            plan_id=str(detail.get("plan_id", "") or ""),
+            brain_source=str(detail.get("brain_source", "") or ""),
+            jev_confidence=float(detail.get("jev_confidence", 0.0) or 0.0),
+            alternative_command=(dict(detail["alternative_command"])
+                                 if isinstance(detail.get("alternative_command"), dict) else None),
+            alternative_label=str(detail.get("alternative_label", "") or ""),
+            alternative_reason=str(detail.get("alternative_reason", "") or ""),
+            alternative_condition=str(detail.get("alternative_condition", "") or ""),
+            uncertain=bool(detail.get("uncertain", False)),
+            candidates=list(detail.get("candidates", []) or []),
+            candidate_id=str(detail.get("candidate_id", "") or ""),
+            long_term_goal=str(detail.get("long_term_goal", "") or ""),
+            brain_backend=str(detail.get("brain_backend", "") or ""),
+            brain_latency_ms=int(detail.get("brain_latency_ms", 0) or 0),
+            brain_request_id=str(detail.get("brain_request_id", "") or ""),
+            brain_error=str(detail.get("brain_error", "") or ""),
         )
         self.tracker.remember_state(game)
         self.tracker.note(advice)
@@ -363,7 +407,22 @@ class AdviseSession:
                           "reason": advice.reason, "confidence": advice.confidence,
                           "fallback": advice.fallback, "state_id": advice.state_id,
                           "source_type": advice.source_type, "source": advice.source,
-                          "guide_rules": advice.guide_rules})
+                          "guide_rules": advice.guide_rules,
+                          "strategic_goal": advice.strategic_goal,
+                          "plan_id": advice.plan_id,
+                          "brain_source": advice.brain_source,
+                          "alternative_command": advice.alternative_command,
+                          "alternative_label": advice.alternative_label,
+                          "alternative_reason": advice.alternative_reason,
+                          "alternative_condition": advice.alternative_condition,
+                          "uncertain": advice.uncertain,
+                          "candidates": advice.candidates,
+                          "candidate_id": advice.candidate_id,
+                          "long_term_goal": advice.long_term_goal,
+                          "brain_backend": advice.brain_backend,
+                          "brain_latency_ms": advice.brain_latency_ms,
+                          "brain_request_id": advice.brain_request_id,
+                          "brain_error": advice.brain_error})
         feed = getattr(self.agent, "feed", None)
         if feed is None:
             return

@@ -12,6 +12,15 @@
     "synergy_weight": 0.6,
     "prefer": []
   },
+  "brain": {
+    "backend": "openai",
+    "model": "gpt-4.1-mini",
+    "timeout_ms": 6000,
+    "max_output_tokens": 900,
+    "max_plan_steps": 5,
+    "memory_events": 20,
+    "fallback": "jev_rules"
+  },
   "jev": {
     "confidence_floor": 0.60,
     "score_acceptance": "argmax",

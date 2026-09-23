@@ -56,8 +56,17 @@ public final class FeedClient {
         /** The source is explicit: guide rule, JEV judgement, or rule fallback. */
         public String adviceSource = "";
         public String adviceSourceAscii = "";
+        /** GPT's strategic objective for the current step. */
+        public String strategicGoal = "";
+        /** A second legal candidate and when to switch to it. */
+        public String alternativeLabel = "";
+        public String alternativeCondition = "";
+        /** State version shared with the Python feed and browser dashboard. */
+        public String stateId = "";
+        public String planId = "";
         public String adviceStatus = "";
         public double adviceConfidence = 0.0;
+        public boolean uncertain = false;
         /** True when confidence is 0: rules answered, the model was not asked. */
         public boolean ruleOnly = false;
         public boolean fallback = false;
@@ -171,6 +180,7 @@ public final class FeedClient {
         }
 
         Snapshot snap = new Snapshot();
+        snap.stateId = state.optString("current_state_id", "");
 
         if (presence != null) {
             snap.agentState = presence.optString("state", "");
@@ -185,6 +195,11 @@ public final class FeedClient {
             snap.adviceAscii = asciiCommand(advice.optString("verb", ""),
                     advice.optJSONObject("command"));
             snap.adviceReason = advice.optString("reason", "");
+            snap.strategicGoal = advice.optString("strategic_goal", "");
+            snap.alternativeLabel = advice.optString("alternative_label", "");
+            snap.alternativeCondition = advice.optString("alternative_condition", "");
+            snap.stateId = advice.optString("state_id", "");
+            snap.planId = advice.optString("plan_id", "");
             snap.adviceStatus = advice.optString("status", "ready");
             String sourceType = advice.optString("source_type", "");
             switch (sourceType) {
@@ -196,6 +211,18 @@ public final class FeedClient {
                     snap.adviceSource = "JEV 判断";
                     snap.adviceSourceAscii = "JEV judgement";
                     break;
+                case "jev_tactical":
+                    snap.adviceSource = "JEV 战术层";
+                    snap.adviceSourceAscii = "JEV tactical";
+                    break;
+                case "gpt_strategy":
+                    snap.adviceSource = "GPT 战略";
+                    snap.adviceSourceAscii = "GPT strategy";
+                    break;
+                case "rule_constraint":
+                    snap.adviceSource = "硬规则约束";
+                    snap.adviceSourceAscii = "hard rule";
+                    break;
                 case "rule_fallback":
                     snap.adviceSource = "规则兜底";
                     snap.adviceSourceAscii = "rule fallback";
@@ -204,17 +231,25 @@ public final class FeedClient {
                     snap.adviceSource = "分析中";
                     snap.adviceSourceAscii = "analysing";
                     break;
+                case "unavailable":
+                    snap.adviceSource = "暂不可用";
+                    snap.adviceSourceAscii = "unavailable";
+                    break;
                 default:
                     snap.adviceSource = "";
                     snap.adviceSourceAscii = "";
                     break;
             }
             snap.adviceConfidence = advice.optDouble("confidence", 0.0);
+            snap.uncertain = advice.optBoolean("uncertain", false);
             snap.ruleOnly = snap.adviceConfidence <= 0.0;
             snap.fallback = advice.optBoolean("fallback", false);
             snap.hasAdvice = !snap.adviceLabel.isEmpty() || !snap.adviceAscii.isEmpty();
             String currentId = state.optString("current_state_id", "");
             String adviceId = advice.optString("state_id", "");
+            if (!currentId.isEmpty()) {
+                snap.stateId = currentId;
+            }
             if (!currentId.isEmpty() && !adviceId.isEmpty() && !currentId.equals(adviceId)) {
                 // A late network response must never put the old hand back on
                 // the game screen. The Python advisor also checks this before
@@ -222,6 +257,9 @@ public final class FeedClient {
                 snap.adviceLabel = "局面已变化，正在更新建议";
                 snap.adviceAscii = "game state changed; updating advice";
                 snap.adviceReason = "";
+                snap.strategicGoal = "";
+                snap.alternativeLabel = "";
+                snap.alternativeCondition = "";
                 snap.adviceSource = "分析中";
                 snap.adviceSourceAscii = "analysing";
                 snap.adviceStatus = "thinking";

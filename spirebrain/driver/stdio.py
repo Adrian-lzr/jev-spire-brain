@@ -82,7 +82,7 @@ READY = "Ready"
 #    JEVBRAIN_MAX_ACTIONS). A confused agent that "plays" 5000 cards is a
 #    runaway, and the cap is what turns that into a visible stop.
 # 3. NAVIGATION WITHOUT THE MODEL lives in agent.py (non-decision screens get
-#    Proceed, shops are asked once per floor) — listed here so the guard names
+#    Proceed, unchanged shops are not re-asked) — listed here so the guard names
 #    stay documented in one place.
 # 4. UNMODELED-SCREEN LADDER (own design, 2026-09-22 evening): a screen whose
 #    available_commands offer no advancing verb cannot be acted on at all.
@@ -572,7 +572,7 @@ class StdioTransport:
 # CLI
 # --------------------------------------------------------------------------- #
 def _build_agent(strategy_path: str | None, backend: str | None, acceptance: str | None,
-                 dashboard_url: str | None = None):
+                 dashboard_url: str | None = None, brain_backend: str | None = None):
     """Construct the router lazily so imports stay cheap for --replay.
 
     With `dashboard_url`, the agent gets a BridgeFeed: every decision is
@@ -589,7 +589,7 @@ def _build_agent(strategy_path: str | None, backend: str | None, acceptance: str
         feed = BridgeFeed(url=dashboard_url)
     return SpireBrainAgent(jev_backend=backend or "mock",
                            strategy_path=strategy_path, acceptance=acceptance,
-                           feed=feed)
+                           feed=feed, brain_backend=brain_backend)
 
 
 def replay(paths: list[Path], agent, *, log_path: str | Path | None = None,
@@ -633,6 +633,7 @@ def main(argv: list[str]) -> int:
     log_path = value("log")
     replay_dir = value("replay")
     dashboard_url = value("dashboard-url") or value("dashboard")
+    brain_backend = value("brain-backend")
     mode = ("play" if "--play" in argv else
             "advise" if "--advise" in argv else (value("mode") or DEFAULT_MODE))
     if mode not in MODES:
@@ -642,7 +643,7 @@ def main(argv: list[str]) -> int:
     poll_frames = int(value("poll-frames") or DEFAULT_POLL_FRAMES)
 
     if replay_dir:
-        agent = _build_agent(strategy_path, backend, acceptance, dashboard_url)
+        agent = _build_agent(strategy_path, backend, acceptance, dashboard_url, brain_backend)
         files = sorted(Path(replay_dir).glob("*.json"))
         if not files:
             print(f"[stdio] no .json messages in {replay_dir}", file=sys.stderr)
@@ -655,7 +656,7 @@ def main(argv: list[str]) -> int:
         return 0
 
     # Live mode: this is what CommunicationMod launches.
-    agent = _build_agent(strategy_path, backend, acceptance, dashboard_url)
+    agent = _build_agent(strategy_path, backend, acceptance, dashboard_url, brain_backend)
     if dashboard_url:
         print(f"[stdio] decisions stream to {dashboard_url} "
               f"(start run_dashboard.py to watch; silent when it is not up)",

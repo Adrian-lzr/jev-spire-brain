@@ -56,6 +56,11 @@
   .advicebox .do { font-size: 19px; font-weight: 600; color: var(--teal); margin: 6px 0 2px; line-height: 1.35; }
   .advicebox .do.idle { font-size: 13px; font-weight: 400; color: var(--dim); }
   .advicebox .why { color: var(--muted); font-size: 12px; line-height: 1.5; margin-top: 4px; }
+  .advicebox .goal { color: var(--blue); font-size: 12px; line-height: 1.45; margin-top: 6px; }
+  .advicebox .alt { color: var(--amber); font-size: 12px; line-height: 1.45; margin-top: 7px; padding-top: 7px; border-top: 1px solid var(--line); }
+  .advicebox .candidate-list { margin-top: 8px; display: flex; flex-direction: column; gap: 3px; }
+  .advicebox .candidate { color: var(--muted); font-size: 11px; display: flex; justify-content: space-between; gap: 8px; }
+  .advicebox .candidate.primary { color: var(--teal); }
   .advicebox .meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
   .vbox { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-top: 10px; background: var(--panel2); }
   .vbox .t { font-size: 12px; color: var(--muted); }
@@ -141,7 +146,10 @@
   <div class="advicebox" id="advicebox">
     <div class="pt" id="advicepoint">等待游戏状态</div>
     <div class="do idle" id="advicedo">还没收到可判断的屏</div>
+    <div class="goal" id="advicegoal"></div>
     <div class="why" id="advicewhy"></div>
+    <div class="alt" id="advicealt"></div>
+    <div class="candidate-list" id="advicecandidates"></div>
     <div class="meta" id="advicemeta"></div>
   </div>
   <div class="vbox" id="vbox" style="display:none">
@@ -207,6 +215,11 @@ const statusEl = document.getElementById("status");
 const counter = document.getElementById("counter");
 const fchip = document.getElementById("fchip");
 let n = 0;
+// The browser receives run_state before the asynchronous advice event. Keep
+// the same state-version boundary as the in-game Java overlay so an old
+// recommendation is never shown while the next one is being computed.
+let currentStateId = "";
+let lastAdviceEvent = null;
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -225,6 +238,22 @@ function fmtCommand(cmd) {
 
 /* ---- run state ---- */
 function renderState(s) {
+  const nextStateId = String(s.state_id || "");
+  if (nextStateId && currentStateId && nextStateId !== currentStateId
+      && lastAdviceEvent && String(lastAdviceEvent.state_id || "") !== nextStateId) {
+    renderAdvice({
+      point: "navigation",
+      label: "局面已变化，正在更新建议",
+      reason: "新的游戏状态已同步，等待当前一步建议。",
+      status: "thinking",
+      source_type: "pending",
+      state_id: nextStateId,
+      strategic_goal: "",
+      plan_id: "",
+      candidates: [],
+    });
+  }
+  if (nextStateId) currentStateId = nextStateId;
   const box = document.getElementById("runstate");
   box.innerHTML = "";
   const rows = [["角色", s.character], ["幕", s.act], ["层", s.floor], ["金块", s.gold], ["卡组", s.deck_size + " 张"]];
@@ -400,15 +429,36 @@ function renderRunEnd(d) {
    the router already publishes a `decision` event for the same judgement, and
    two cards per decision would bury the stream. The panel is the advice. */
 function renderAdvice(ev) {
+  lastAdviceEvent = ev;
+  const adviceStateId = String(ev.state_id || "");
+  if (adviceStateId && currentStateId && adviceStateId !== currentStateId) {
+    ev = {...ev, label: "局面已变化，正在更新建议", reason: "新的游戏状态已同步，等待当前一步建议。",
+      status: "thinking", source_type: "pending", strategic_goal: "", plan_id: "", candidates: []};
+  }
   const meta = POINT_META[ev.point] || { name: ev.point, icon: "•" };
   document.getElementById("advicepoint").textContent = meta.icon + " " + meta.name;
   const doEl = document.getElementById("advicedo");
   doEl.textContent = ev.label || "—";
   doEl.classList.toggle("idle", !ev.label);
+  const goal = document.getElementById("advicegoal");
+  goal.textContent = ev.strategic_goal ? "战略目标：" + ev.strategic_goal : "";
   const why = document.getElementById("advicewhy");
   const conf = Number(ev.confidence || 0);
+  const alt = document.getElementById("advicealt");
+  alt.textContent = ev.alternative_label
+    ? "备用：" + ev.alternative_label + (ev.alternative_condition ? "（" + ev.alternative_condition + "）" : "")
+    : "";
+  const candidates = document.getElementById("advicecandidates");
+  candidates.innerHTML = "";
+  for (const c of (ev.candidates || []).slice(0, 5)) {
+    const row = el("div", "candidate" + (c.candidate_id === ev.candidate_id ? " primary" : ""));
+    row.append(el("span", "", (c.candidate_id === ev.candidate_id ? "▶ " : "") + (c.label || c.candidate_id || "候选")));
+    row.append(el("span", "", c.kind || ""));
+    candidates.append(row);
+  }
   const sourceNames = {guide_rule: "攻略规则", jev: "JEV 判断",
-                       rule_fallback: "规则兜底", pending: "正在分析",
+                       jev_tactical: "JEV 战术层", gpt_strategy: "GPT 战略",
+                       rule_constraint: "硬规则约束", rule_fallback: "规则兜底", pending: "正在分析",
                        unavailable: "暂不可用"};
   const sourceName = sourceNames[ev.source_type] || (conf > 0 ? "JEV 判断" : "规则判断");
   why.textContent = ev.reason || "";
@@ -417,6 +467,10 @@ function renderAdvice(ev) {
   box.append(el("span", "badge", sourceName));
   if (ev.status === "ready" && conf > 0) box.append(el("span", "badge", "置信度 " + conf.toFixed(2)));
   if (ev.source) box.append(el("span", "badge", "依据：" + ev.source));
+  if (ev.state_id) box.append(el("span", "badge", "状态 " + String(ev.state_id).slice(0, 10)));
+  if (ev.plan_id) box.append(el("span", "badge", "计划 " + ev.plan_id));
+  if (ev.brain_latency_ms) box.append(el("span", "badge", "战略耗时 " + ev.brain_latency_ms + "ms"));
+  if (ev.brain_error) box.append(el("span", "badge fb", ev.brain_error));
   if (ev.status === "thinking") box.append(el("span", "badge", "局面变化后自动刷新"));
   // Only worth a second badge when it means something DIFFERENT from the first:
   // with confidence 0 the first badge already says "rules", and "rules + rule

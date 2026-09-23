@@ -3,6 +3,42 @@
 from __future__ import annotations
 
 
+def _shop_item_unavailable(item) -> bool:
+    if item is None:
+        return True
+    if not isinstance(item, dict):
+        return False
+    if item.get("is_available") is False or item.get("available") is False:
+        return True
+    return any(bool(item.get(key)) for key in (
+        "disabled", "purchased", "sold", "removed", "unavailable",
+    ))
+
+
+def _potion_slots_available(game: dict, state: dict) -> bool:
+    capacity = state.get("potion_capacity", state.get("potion_slots"))
+    if capacity is None:
+        capacity = game.get("potion_capacity", game.get("potion_slots"))
+    if isinstance(capacity, dict):
+        capacity = capacity.get("capacity", capacity.get("max", capacity.get("slots")))
+    elif isinstance(capacity, (list, tuple)):
+        capacity = len(capacity)
+    if capacity is None:
+        return True
+    try:
+        capacity = int(capacity)
+    except (TypeError, ValueError):
+        return True
+    occupied = sum(
+        1 for potion in (game.get("potions") or [])
+        if potion is not None and not (
+            isinstance(potion, dict)
+            and (potion.get("empty") or potion.get("is_empty"))
+        )
+    )
+    return occupied < max(0, capacity)
+
+
 def check_action(game: dict, command: dict) -> tuple[bool, str]:
     verb = str(command.get("command", "")).lower()
     offered = {str(x).lower() for x in (game.get("available_commands") or [])}
@@ -15,8 +51,12 @@ def check_action(game: dict, command: dict) -> tuple[bool, str]:
             index = int(command.get("choice", command.get("index", -1)))
         except (TypeError, ValueError):
             return False, "选项序号无效"
-        screen = str(game.get("screen_type", "")).upper()
+        screen = str(game.get("screen_type", game.get("screen", ""))).upper()
+        if screen == "NONE" and str(game.get("room_phase", "")).upper() == "COMBAT":
+            screen = "COMBAT"
         state = game.get("screen_state") or {}
+        if not isinstance(state, dict):
+            state = {}
         if screen == "MAP":
             map_state = game.get("map") or {}
             items = map_state.get("next_nodes", []) if isinstance(map_state, dict) else []
@@ -37,11 +77,26 @@ def check_action(game: dict, command: dict) -> tuple[bool, str]:
         if not isinstance(items, list) or not 0 <= index < len(items):
             return False, "建议的选项不在当前界面中"
         item = items[index]
-        if isinstance(item, dict) and item.get("disabled"):
+        if _shop_item_unavailable(item):
             return False, "建议的选项已被游戏禁用"
-        if screen in {"SHOP", "SHOP_SCREEN"} and isinstance(item, dict):
-            if int(item.get("price", 0) or 0) > int(game.get("gold", 0) or 0):
+        if screen in {"SHOP", "SHOP_SCREEN"}:
+            if not isinstance(item, dict):
+                return False, "商店商品数据不足，无法确认价格"
+            try:
+                raw_price = item.get("price", item.get("cost"))
+                if raw_price is None:
+                    return False, "商店商品价格未知"
+                price = int(raw_price)
+                gold = int(game.get("gold", 0) or 0)
+            except (TypeError, ValueError):
+                return False, "商店价格或金币数据无效"
+            if price > gold:
                 return False, "金币不足以购买建议物品"
+            potion_start = len(state.get("cards") or []) + len(state.get("relics") or [])
+            potion_end = potion_start + len(state.get("potions") or [])
+            if potion_start <= index < potion_end:
+                if not _potion_slots_available(game, state):
+                    return False, "药水槽已满，无法购买药水"
         return True, ""
     if verb == "play":
         combat = game.get("combat") or game.get("combat_state") or {}

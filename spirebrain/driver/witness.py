@@ -179,9 +179,25 @@ class Advice:
     floor: int = 0
     message: int = 0                # transport message index that produced it
     state_id: str = ""               # exact state this recommendation belongs to
-    source_type: str = ""            # guide_rule | jev | rule_fallback
+    source_type: str = ""            # gpt_strategy | jev_tactical | guide_rule | rule_fallback
     source: str = ""                 # human-auditable guide source, when known
     guide_rules: list[dict] = field(default_factory=list)
+    strategic_goal: str = ""
+    plan_id: str = ""
+    brain_source: str = ""
+    jev_confidence: float = 0.0
+    alternative_command: dict | None = None
+    alternative_label: str = ""
+    alternative_reason: str = ""
+    alternative_condition: str = ""
+    uncertain: bool = False
+    candidates: list[dict] = field(default_factory=list)
+    candidate_id: str = ""
+    long_term_goal: str = ""
+    brain_backend: str = ""
+    brain_latency_ms: int = 0
+    brain_request_id: str = ""
+    brain_error: str = ""
 
 
 @dataclass

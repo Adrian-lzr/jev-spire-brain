@@ -85,7 +85,7 @@ public class SpireBrainOverlayMod implements PostInitializeSubscriber, RenderSub
 
     /** Display strings resolved against the game's fonts, cached per snapshot. */
     private static Snapshot resolvedFor;
-    private static String rPoint, rAdvice, rReason, rActed, rVerdict, rTally;
+    private static String rPoint, rAdvice, rGoal, rReason, rAlternative, rActed, rVerdict, rTally;
     private static Color rAdviceColor, rVerdictColor;
 
     /** Called by ModTheSpire via @SpireInitializer (no-arg, reflective). */
@@ -248,8 +248,10 @@ public class SpireBrainOverlayMod implements PostInitializeSubscriber, RenderSub
 
         float yPoint = top - 6f * scale;
         float yAdvice = yPoint - 30f * scale;
-        float yReason = yAdvice - 30f * scale;
-        float yActed = yReason - 34f * scale;
+        float yGoal = yAdvice - 28f * scale;
+        float yReason = yGoal - 24f * scale;
+        float yAlternative = yReason - 24f * scale;
+        float yActed = yAlternative - 34f * scale;
         float yTally = yActed - 26f * scale;
         float yBar = yTally - 26f * scale;
         float bottom = yBar - 18f * scale;
@@ -266,9 +268,17 @@ public class SpireBrainOverlayMod implements PostInitializeSubscriber, RenderSub
         if (snap.hasAdvice) {
             FontHelper.renderFontLeftTopAligned(sb, bigFont(), rAdvice, x, yAdvice,
                     rAdviceColor);
+            if (!rGoal.isEmpty()) {
+                FontHelper.renderFontLeftTopAligned(sb, FontHelper.tipBodyFont, rGoal,
+                        x, yGoal, Color.SKY);
+            }
             if (!rReason.isEmpty()) {
                 FontHelper.renderFontLeftTopAligned(sb, FontHelper.tipBodyFont, rReason,
                         x, yReason, Color.LIGHT_GRAY);
+            }
+            if (!rAlternative.isEmpty()) {
+                FontHelper.renderFontLeftTopAligned(sb, FontHelper.tipBodyFont, rAlternative,
+                        x, yAlternative, Color.GOLD);
             }
         } else if (!snap.headline.isEmpty()) {
             // Play mode: the decision is the content.
@@ -330,12 +340,36 @@ public class SpireBrainOverlayMod implements PostInitializeSubscriber, RenderSub
         resolvedFor = snap;
         BitmapFont big = bigFont();
 
-        String pointZh = snap.pointLabel + (snap.adviceSource.isEmpty() ? "" : "  ·  " + snap.adviceSource);
+        String stateSuffixZh = shortState(snap.stateId, "状态 ");
+        String stateSuffixAscii = shortState(snap.stateId, "state ");
+        String planSuffixZh = shortState(snap.planId, "计划 ");
+        String planSuffixAscii = shortState(snap.planId, "plan ");
+        String pointZh = snap.pointLabel + (snap.adviceSource.isEmpty() ? "" : "  ·  " + snap.adviceSource)
+                + (stateSuffixZh.isEmpty() ? "" : "  ·  " + stateSuffixZh)
+                + (planSuffixZh.isEmpty() ? "" : "  ·  " + planSuffixZh);
         String pointAscii = snap.pointAscii + (snap.adviceSourceAscii.isEmpty()
-                ? "" : "  ·  " + snap.adviceSourceAscii);
+                ? "" : "  ·  " + snap.adviceSourceAscii)
+                + (stateSuffixAscii.isEmpty() ? "" : "  ·  " + stateSuffixAscii)
+                + (planSuffixAscii.isEmpty() ? "" : "  ·  " + planSuffixAscii);
         rPoint = fit(FontHelper.tipBodyFont, pointZh, pointAscii);
         rAdvice = fit(big, snap.adviceLabel, snap.adviceAscii);
-        rReason = fit(FontHelper.tipBodyFont, snap.adviceReason, "");
+        rGoal = fit(FontHelper.tipBodyFont,
+                snap.strategicGoal == null || snap.strategicGoal.isEmpty()
+                        ? "" : "战略目标: " + snap.strategicGoal,
+                snap.strategicGoal == null || snap.strategicGoal.isEmpty()
+                        ? "" : "goal: " + snap.strategicGoal);
+        String reasonZh = snap.adviceReason == null ? "" : snap.adviceReason;
+        String reasonAscii = "";
+        if (snap.uncertain) {
+            reasonZh = reasonZh.isEmpty() ? "效果未完整解析，请以当前牌面确认" : reasonZh + "（效果未完整解析）";
+            reasonAscii = "effect not fully parsed; verify the card text";
+        }
+        rReason = fit(FontHelper.tipBodyFont, reasonZh, reasonAscii);
+        String altZh = snap.alternativeLabel == null || snap.alternativeLabel.isEmpty()
+                ? "" : "备用: " + snap.alternativeLabel
+                + (snap.alternativeCondition == null || snap.alternativeCondition.isEmpty()
+                        ? "" : " (" + snap.alternativeCondition + ")");
+        rAlternative = fit(FontHelper.tipBodyFont, altZh, "alternative: " + snap.alternativeLabel);
         rActed = fit(FontHelper.tipHeaderFont, "你刚才: " + snap.actedLabel,
                 snap.actedAscii.isEmpty() ? "" : "you: " + snap.actedAscii);
         rVerdict = verdictText(snap.verdict);
@@ -349,6 +383,14 @@ public class SpireBrainOverlayMod implements PostInitializeSubscriber, RenderSub
                 : (snap.ruleOnly || snap.fallback) ? Color.ORANGE : Color.SKY;
         rVerdictColor = "match".equals(snap.verdict) ? Color.TEAL
                 : "mismatch".equals(snap.verdict) ? Color.ORANGE : Color.GRAY;
+    }
+
+    private static String shortState(String stateId, String prefix) {
+        if (stateId == null || stateId.isEmpty()) {
+            return "";
+        }
+        String shortId = stateId.length() > 10 ? stateId.substring(0, 10) : stateId;
+        return prefix + shortId;
     }
 
     /** The verdict word, Chinese if the font can, ASCII if it cannot. */

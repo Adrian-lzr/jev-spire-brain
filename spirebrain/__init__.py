@@ -1,4 +1,4 @@
-"""SpireBrain — a JEV-powered external brain for Slay the Spire.
+"""SpireBrain — a GPT strategy brain with JEV tactical execution for Slay the Spire.
 
 Three-layer architecture:
     Strategy  (human-defined goals, risk appetite, HP budget policy)

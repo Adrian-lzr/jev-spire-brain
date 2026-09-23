@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from spirebrain.jev_brain.client import get_client
+from spirebrain.jev_brain.client import ChoiceSpec, NOUL_UNCERTAIN_BAND, get_client
 from spirebrain.jev_brain.decisions import (
     HEAL_WHEN_UNSURE_HP_RATIO,
     BossRelicJudge,
@@ -47,10 +47,14 @@ from spirebrain.jev_brain.state import (
     shop_items,
 )
 from spirebrain.cards import best_removal, best_upgrade
+from spirebrain.brain.action_broker import build_action_candidates, potion_purchase_allowed
+from spirebrain.brain.orchestrator import StrategicOrchestrator
+from spirebrain.brain.planner import stable_state_id
 from spirebrain.guide.rules import GuideAwareClient, GuideBook, GuideResult
 from spirebrain.overlay.feed import DecisionFeed, decision_event, run_state_event
 from spirebrain.tactical.combat_greedy import Card, CombatState, play_order, recommend_action
 from spirebrain.tactical.hp_budget import HPBudget
+from spirebrain.driver.legality import check_action
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -59,6 +63,7 @@ CARD_REWARD_SCREEN = "CARD_REWARD"
 EVENT_SCREEN = "EVENT"
 REST_SCREEN = "REST"
 SHOP_SCREEN = "SHOP_SCREEN"
+SHOP = "SHOP"
 BOSS_REWARD_SCREEN = "BOSS_REWARD"
 COMBAT_SCREEN = "COMBAT"
 # The grid you pick a card from after choosing "smith" at a rest site.
@@ -95,6 +100,13 @@ def _get(obj, *names, default=None):
     return default
 
 
+def _as_int(value, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _unique_labels(items: list[str]) -> tuple[dict[str, str], dict[str, int]]:
     """Label -> description-holder and label -> index, disambiguating duplicates.
 
@@ -119,9 +131,13 @@ class SpireBrainAgent:
     def __init__(self, jev_backend: str = "mock", strategy_path: str | Path | None = None,
                  log_dir: str | Path | None = None,
                  acceptance: str | None = None,
-                 feed: DecisionFeed | None = None) -> None:
+                 feed: DecisionFeed | None = None,
+                 brain_backend: str | None = None,
+                 brain_client=None, async_planning: bool | None = None) -> None:
         self._constructor = {"jev_backend": jev_backend, "strategy_path": strategy_path,
-                             "log_dir": log_dir, "acceptance": acceptance}
+                              "log_dir": log_dir, "acceptance": acceptance,
+                              "brain_backend": brain_backend, "brain_client": brain_client,
+                              "async_planning": async_planning}
         strategy_file = Path(strategy_path) if strategy_path else ROOT / "config" / "strategy.json"
         self.strategy = json.loads(strategy_file.read_text(encoding="utf-8"))
         self.goal = self.strategy.get("goal", "")
@@ -139,6 +155,23 @@ class SpireBrainAgent:
         self.guide_result = GuideResult()
         self.hp: HPBudget | None = None
         self.run: RunContext | None = None
+        brain_cfg = self.strategy.get("brain", {}) or {}
+        self.strategic = StrategicOrchestrator(
+            backend=brain_backend or brain_cfg.get("backend", "openai"),
+            model=brain_cfg.get("model"),
+            timeout_ms=int(brain_cfg.get("timeout_ms", 6000) or 6000),
+            max_plan_steps=int(brain_cfg.get("max_plan_steps", 5) or 5),
+            memory_events=int(brain_cfg.get("memory_events", 20) or 20),
+            max_output_tokens=int(brain_cfg.get("max_output_tokens", 900) or 900),
+            client=brain_client,
+            log_dir=log_dir or ROOT / brain_cfg.get("log_dir", "logs"),
+            async_planning=async_planning,
+        )
+        self._active_game: dict | None = None
+        self._observed_state_id = ""
+        self._active_candidates = []
+        self._active_plan = None
+        self._active_brain_response = None
         # Set when JEV picks an upgrade at a rest site; consumed by the card grid
         # that follows. The protocol is one command per screen, so the intent has
         # to survive across two states.
@@ -151,9 +184,10 @@ class SpireBrainAgent:
         # Guard #3 (ported from Ethics03/jevspire): navigation never costs a JEV
         # call. Two rules, both marked with `reason_source: navigation`:
         #   - non-decision screens get Proceed, not a model question;
-        #   - a shop is *asked* once per floor — the state that comes back after
-        #     a purchase is the same room wanting an exit, not a new decision.
+        #   - a shop state is asked once per unchanged shelf/gold snapshot;
+        #     a real purchase changes the signature and is replanned.
         self._shop_decided_on_floor: int | None = None
+        self._shop_state_signature: tuple | None = None
         self.history: list[dict] = []
         # Phase 1.5, the interaction layer: an optional live feed of everything
         # the brain is thinking. None (the default) changes nothing — the feed
@@ -167,39 +201,56 @@ class SpireBrainAgent:
         the model's mutable run/grid state off that thread and prevents a late
         answer from publishing an old HP snapshot into the game's panel.
         """
-        return SpireBrainAgent(**self._constructor, feed=None)
+        constructor = dict(self._constructor)
+        # AdviseSession already owns a worker thread around choose_action.  Its
+        # clone should synchronously finish the strategic call inside that worker
+        # so the completed recommendation includes the GPT plan rather than an
+        # early local fallback with no later consumer.
+        constructor["async_planning"] = False
+        return SpireBrainAgent(**constructor, feed=None)
 
     def quick_advice(self, game: dict) -> dict:
         """Immediate, model-free advice or a truthful waiting/coverage state."""
         character = str(_get(game, "character", "class", default="")).upper()
-        if character != "IRONCLAD":
+        if character and character != "IRONCLAD":
             return {"status": "unsupported", "label": "当前角色攻略尚未覆盖",
                     "reason": "首版攻略只验证了铁甲战士；不会套用铁甲战士专属规则。",
                     "source_type": "unavailable"}
         self.observe(game)
+        # A provisional answer must not display the previous state's strategic
+        # goal while the background planner is still running.
+        # A valid short plan intentionally spans ordinary combat card steps, so
+        # its state-bound request ID will differ from the latest combat snapshot.
+        # Ask the orchestrator whether the plan is still usable instead of
+        # clearing the strategic goal on every card animation.
+        strategic_detail = self.strategic.detail_for(game)
         guide = self.guide.evaluate(game, self._budget().remaining_budget)
         if guide.command is not None and guide.command_rule is not None:
             rule = guide.command_rule
             return {"status": "ready", "command": guide.command,
                     "reason": rule.reason, "source_type": "guide_rule",
-                    "source": rule.source, "guide_rules": guide.evidence()}
+                    "source": rule.source, "guide_rules": guide.evidence(),
+                    **strategic_detail}
         if str(_get(game, "screen_type", default="")).upper() == COMBAT_SCREEN:
             suggestion = recommend_action(game)
             if suggestion is not None:
                 return {"status": "ready", "command": suggestion.command,
                         "reason": suggestion.reason, "source_type": "rule_fallback",
                         "source": "游戏实时战斗状态；本地战术规则",
+                        **strategic_detail,
                         "guide_rules": guide.evidence()}
         return {"status": "thinking", "label": "正在分析当前局面…",
                 "reason": "结合攻略规则与 JEV 判断，稍后显示当前一步。",
-                "source_type": "pending", "guide_rules": guide.evidence()}
+                "source_type": "pending", "guide_rules": guide.evidence(),
+                **strategic_detail}
 
     # -- lifecycle --------------------------------------------------------- #
     def observe(self, game) -> None:
         """Sync our model of the world (HP budget + run context) from the game."""
-        act = int(_get(game, "act", default=1))
-        max_hp = int(_get(game, "max_hp", default=80))
-        current_hp = int(_get(game, "current_hp", "hp", default=max_hp))
+        self._observed_state_id = stable_state_id(game)
+        act = max(1, _as_int(_get(game, "act", default=1), 1))
+        max_hp = max(1, _as_int(_get(game, "max_hp", default=80), 80))
+        current_hp = max(0, _as_int(_get(game, "current_hp", "hp", default=max_hp), max_hp))
         if self.hp is None or self.hp.act != act:
             self.hp = HPBudget(act=act, max_hp=max_hp, current_hp=current_hp)
         else:
@@ -212,11 +263,11 @@ class SpireBrainAgent:
         deck = self._deck(game)
         self.run = RunContext(
             act=act,
-            floor=int(_get(game, "floor", "floor_num", default=0)),
+            floor=_as_int(_get(game, "floor", "floor_num", default=0)),
             character=str(_get(game, "character", "class", "player_class", default="")).upper(),
             hp=current_hp,
             max_hp=max_hp,
-            gold=int(_get(game, "gold", default=0)),
+            gold=_as_int(_get(game, "gold", default=0)),
             deck=deck,
             relics=[str(r if isinstance(r, str) else _get(r, "name", "relic_id", default=""))
                     for r in (_get(game, "relics", default=[]) or [])],
@@ -224,6 +275,25 @@ class SpireBrainAgent:
                      for p in (_get(game, "potions", default=[]) or [])],
             goal=self.goal,
         ).with_budget(self.hp)
+
+        # Keep the strategic memory in sync with the same state used by JEV.
+        # This is bounded and process-local; it never writes a credential or a
+        # full transcript to disk.
+        try:
+            previous_run = self.strategic.memory.run_id
+            self.strategic.memory.observe(game, state_id=self._observed_state_id)
+            run_changed = bool(previous_run and self.strategic.memory.run_id != previous_run)
+            if run_changed or str(_get(game, "screen_type", default="")).upper() in {
+                    "MENU", "DEATH", "VICTORY", "GAME_OVER"}:
+                self._shop_decided_on_floor = None
+                self._shop_state_signature = None
+                self._pending_upgrade = None
+                self._grid_picked = None
+            if run_changed or not self.strategic.memory.events:
+                self.strategic.reset()
+                self.strategic.memory.observe(game, state_id=self._observed_state_id)
+        except Exception:  # noqa: BLE001 - memory is optional observability
+            pass
 
         self._publish_state()
 
@@ -241,7 +311,19 @@ class SpireBrainAgent:
         self.observe(game)
         self.guide_result = self.guide.evaluate(game, self._budget().remaining_budget)
         self._guide_client.active = self.guide_result.evidence()
+        character = str(_get(game, "character", "class", "player_class", default="")).upper()
         screen = str(_get(game, "screen_type", "screen", default="")).upper()
+        self._active_game = game
+        if character and character != "IRONCLAD":
+            self._active_candidates = []
+            self._active_plan = None
+            self._active_brain_response = None
+            return {"command": "state", "reason_source": "unsupported_character",
+                    "reason": "当前角色尚未覆盖，暂不套用铁甲战士攻略。"}
+        self._active_candidates = build_action_candidates(
+            game, forbidden_indices=set(self.guide_result.forbidden_indices))
+        self._active_plan = None
+        self._active_brain_response = None
         if self.guide_result.command is not None:
             rule = self.guide_result.command_rule
             assert rule is not None
@@ -258,6 +340,7 @@ class SpireBrainAgent:
             EVENT_SCREEN: self._on_event,
             REST_SCREEN: self._on_rest,
             SHOP_SCREEN: self._on_shop,
+            SHOP: self._on_shop,
             BOSS_REWARD_SCREEN: self._on_boss_reward,
             COMBAT_SCREEN: self._on_combat,
         }.get(screen)
@@ -278,11 +361,68 @@ class SpireBrainAgent:
             # the transport's stall guard stops the loop instead of retrying.
             return {"command": "proceed", "reason_source": "navigation",
                     "reason": f"non-decision screen {screen!r}: navigation only, no JEV call"}
+        try:
+            trigger = "combat_start" if screen == COMBAT_SCREEN and self.strategic.last_screen != COMBAT_SCREEN else None
+            self._active_plan, self._active_brain_response = self.strategic.plan_for(
+                game,
+                candidates=self._active_candidates,
+                guide_rules=self.guide_result.evidence(),
+                trigger=trigger,
+            )
+        except Exception as exc:  # strategic planning is a non-fatal side channel
+            self._active_brain_response = None
+            self.history.append({"point": screen.lower(), "fallback": True,
+                                 "detail": {"source_type": "unavailable",
+                                            "reason": f"战略大脑异常：{type(exc).__name__}"}})
         return handler(game)
 
     # -- shared helpers ---------------------------------------------------- #
     def _record(self, decision, command: dict) -> dict:
         detail = dict(decision.detail)
+        # A model may only select an already enumerated, legal candidate.  The
+        # hard guide path and risk-posture probe are intentionally excluded.
+        if (self._active_game is not None
+                and self._active_candidates
+                and str(command.get("command", "")).lower() not in
+                    {"(posture only)", "confirm", "cancel"}
+                and detail.get("source_type") != "guide_rule"):
+            try:
+                original_command = dict(command)
+                command, execution = self.strategic.choose(
+                    self._active_game,
+                    command,
+                    candidates=self._active_candidates,
+                    reason=str(detail.get("reason", "") or ""),
+                    jev_confidence=float(decision.confidence or 0.0),
+                    guide_rules=self.guide_result.evidence(),
+                )
+                execution_detail = execution.detail()
+                detail.update(execution_detail)
+                detail.update(self.strategic.current_detail())
+                detail["source_type"] = execution.source_type
+                if execution.reason:
+                    detail["reason"] = execution.reason
+                if execution.source_type == "gpt_strategy":
+                    detail["source"] = "GPT 战略计划；合法候选执行层"
+                    detail["strategy_overrode"] = command != original_command
+                elif execution.source_type == "jev_tactical":
+                    detail.setdefault("source", "JEV 局部判断；GPT 战略约束")
+                decision.detail = detail
+            except Exception as exc:  # noqa: BLE001 - preserve the old decision
+                detail.setdefault("source_type", "rule_fallback")
+                detail.setdefault("reason", f"战略层未接管：{type(exc).__name__}")
+        # The broker should already have filtered the command, but this final
+        # check is intentionally redundant: guide rules, stale plans, and
+        # legacy handlers must never put an illegal index or target on the wire.
+        verb = str(command.get("command", "")).lower()
+        if (self._active_game is not None and verb not in {"state", "wait", "(posture only)"}):
+            legal, why_not = check_action(self._active_game, command)
+            if not legal:
+                detail["source_type"] = "rule_constraint"
+                detail["constraint_reason"] = why_not
+                detail["reason"] = f"硬规则拦截当前动作：{why_not}"
+                command = {"command": "state", "reason_source": "rule_constraint",
+                           "reason": why_not}
         detail.setdefault("guide_rules", self.guide_result.evidence())
         detail.setdefault("source_type", "rule_fallback" if decision.used_fallback else "jev")
         decision.detail = detail
@@ -294,6 +434,12 @@ class SpireBrainAgent:
             "detail": decision.detail,
             "command": command,
         })
+        try:
+            self.strategic.memory.record_action(command, state_id=stable_state_id(self._active_game)
+                                                if self._active_game is not None else self.strategic.last_state_id,
+                                                result=detail.get("reason", ""))
+        except Exception:  # noqa: BLE001
+            pass
         if self.feed is not None:
             try:
                 self.feed.publish("decision", decision_event(decision, command))
@@ -399,6 +545,9 @@ class SpireBrainAgent:
         """
         screen = _get(game, "screen_state", "screen", default=game)
         options = [str(o) for o in (_get(screen, "rest_options", default=[]) or [])]
+        if not options:
+            return {"command": "state", "reason_source": "insufficient_state",
+                    "reason": "篝火选项尚未同步，等待游戏状态更新。"}
         rest_i = next((i for i, o in enumerate(options) if "rest" in o.lower()), 0)
         smith_i = next((i for i, o in enumerate(options)
                         if "smith" in o.lower() or "upgrade" in o.lower()), None)
@@ -527,12 +676,25 @@ class SpireBrainAgent:
         if confirm_offered and self._grid_picked is not None:
             # Finalize the pick we made one state ago.
             self._grid_picked = None
-            return {"command": "confirm"}
+            return self._record(
+                Decision("grid", "confirm", 0.0, True,
+                         {"reason": "已选定卡牌，确认当前选择。", "source_type": "rule_fallback"}),
+                {"command": "confirm"})
         if confirm_offered:
             # A confirm-only grid we did not pick (opened by the player?).
             # Confirm is still the only way through; keep it honest in history.
-            return {"command": "confirm",
-                    "reason": "confirm offered with no pending pick; confirming to advance"}
+            confirmed = self._record(
+                Decision("grid", "confirm", 0.0, True,
+                         {"reason": "当前界面只提供确认，继续完成选择。",
+                          "source_type": "rule_fallback"}),
+                {"command": "confirm"})
+            confirmed.setdefault("reason", "confirm offered with no pending pick; confirming to advance")
+            return confirmed
+
+        cards = _get(_get(game, "screen_state", "screen", default={}), "cards", default=[]) or []
+        if not cards:
+            return {"command": "state", "reason_source": "insufficient_state",
+                    "reason": "选卡列表尚未同步，等待游戏状态更新。"}
 
         if self._pending_upgrade is not None:
             choice, self._pending_upgrade = self._pending_upgrade, None
@@ -558,16 +720,77 @@ class SpireBrainAgent:
             out = {"command": "choose", "choice": choice, "reason": reason}
             if detail_note:
                 out["local_removal"] = detail_note
-            return out
+            picked = self._record(
+                Decision("grid", choice, 0.0, True,
+                         {"reason": reason, "source_type": "rule_fallback",
+                          "local_removal": detail_note} if detail_note else
+                         {"reason": reason, "source_type": "rule_fallback"}),
+                out)
+            if picked.get("command") == "choose" and picked.get("choice") == choice:
+                picked.setdefault("reason", reason)
+                if detail_note:
+                    picked.setdefault("local_removal", detail_note)
+            self._grid_picked = picked.get("choice") if picked.get("command") == "choose" else None
+            return picked
         self._grid_picked = choice
         out = {"command": "choose", "choice": choice}
         if reason:
             out["reason"] = reason
-        return out
+        picked = self._record(
+            Decision("grid", choice, 0.0, True,
+                     {"reason": reason or "按当前选卡意图执行。", "source_type": "rule_fallback"}),
+            out)
+        if reason and picked.get("command") == "choose" and picked.get("choice") == choice:
+            picked.setdefault("reason", reason)
+        self._grid_picked = picked.get("choice") if picked.get("command") == "choose" else None
+        return picked
 
     def _hp_ratio(self) -> float:
         hp = self._budget()
         return hp.current_hp / hp.max_hp if hp.max_hp else 0.0
+
+    def _jev_tactical_pick(self, game: dict):
+        """Let JEV rank a small, GPT-compatible candidate set in combat.
+
+        JEV still receives labels, never protocol commands.  A low-confidence
+        answer is deliberately ignored so the local combat policy or GPT's
+        explicit preference remains the safe fallback.
+        """
+        if self._active_plan is None or not self._active_candidates or self.run is None:
+            return None
+        candidates = [c for c in self._active_candidates
+                      if c.candidate_id not in self._active_plan.avoid_candidates]
+        preferred = set(self._active_plan.preferred_candidates)
+        if preferred:
+            preferred_candidates = [c for c in candidates if c.candidate_id in preferred]
+            others = [c for c in candidates if c.candidate_id not in preferred]
+            candidates = preferred_candidates + others[:2]
+        candidates = candidates[:6]
+        if len(candidates) < 2:
+            return None
+        criteria = {c.candidate_id: c.label for c in candidates}
+        try:
+            state = self.run.digest({
+                "tactical_goal": self._active_plan.current_objective,
+                "candidates": [c.model_dict() for c in candidates],
+                "screen": "COMBAT",
+            })
+            response = self.jev.ask(state, {
+                "tactical": ChoiceSpec(
+                    instructions=(
+                        "Within the already legal candidates, which single action best serves "
+                        "the strategic goal this combat turn? Choose only a candidate_id."
+                    ),
+                    criteria=criteria,
+                )
+            })
+            answer = response.answers.get("tactical")
+            if answer is None or float(answer.confidence or 0.0) < NOUL_UNCERTAIN_BAND[1]:
+                return None
+            candidate = next((c for c in candidates if c.candidate_id == str(answer.value)), None)
+            return (candidate, float(answer.confidence or 0.0)) if candidate is not None else None
+        except Exception:
+            return None
 
     # -- 5. shop ----------------------------------------------------------- #
     def _on_shop(self, game) -> dict:
@@ -579,25 +802,53 @@ class SpireBrainAgent:
         pipe — if the ordering differs, we buy the wrong item, which is visible
         and recoverable, so this stays a flagged assumption rather than a blocker.
         """
-        floor = int(_get(game, "floor", "floor_num", default=0))
-        if self._shop_decided_on_floor == floor:
-            # Guard #3 (jespire): the decision for this room already happened;
-            # the state that comes back after a purchase is the same room
-            # wanting an exit, not a new question. Re-asking JEV against a
-            # half-empty shelf spends a call to re-derive "leave".
-            return {"command": "return", "reason_source": "navigation",
-                    "reason": "second visit to the same shop this floor: leaving, no JEV call"}
-        self._shop_decided_on_floor = floor
+        floor = _as_int(_get(game, "floor", "floor_num", default=0))
         screen = _get(game, "screen_state", "screen", default=game)
-        gold = int(_get(game, "gold", default=0))
+        gold = _as_int(_get(game, "gold", default=0))
         raw = []
         for kind, key in (("card", "cards"), ("relic", "relics"), ("potion", "potions")):
             for item in (_get(screen, key, default=[]) or []):
-                raw.append({"name": str(_get(item, "id", "card_id", "name", default=kind)),
-                            "price": int(_get(item, "price", default=0)),
-                            "description": str(_get(item, "description", default=""))})
-        items = shop_items(raw)
-        purge_cost = int(_get(screen, "purge_cost", default=0)) or None
+                price_valid = True
+                try:
+                    raw_price = _get(item, "price", "cost", default=None)
+                    price = int(raw_price) if raw_price is not None else -1
+                except (TypeError, ValueError):
+                    price = -1
+                    price_valid = False
+                unavailable = item is None or not price_valid or any(bool(_get(item, flag, default=False)) for flag in (
+                    "disabled", "purchased", "sold", "removed", "unavailable"))
+                unavailable = unavailable or _get(item, "available", default=True) is False \
+                    or _get(item, "is_available", default=True) is False
+                raw.append({"kind": kind,
+                            "name": str(_get(item, "id", "card_id", "relic_id", "name", default=kind)),
+                            "price": price,
+                            "description": str(_get(item, "description", default="")),
+                            "disabled": unavailable,
+                            "potion_full": bool(_get(item, "potion_full", "potion_slots_full", default=False))})
+        try:
+            purge_cost = int(_get(screen, "purge_cost", default=0) or 0) or None
+        except (TypeError, ValueError):
+            purge_cost = None
+        signature = (
+            floor, gold,
+            tuple((item["kind"], item["name"], item["price"], item["disabled"], item["potion_full"])
+                  for item in raw),
+            purge_cost,
+        )
+        if self._shop_decided_on_floor == floor and self._shop_state_signature == signature:
+            # The exact same state is a navigation/confirmation revisit. A
+            # changed shelf or gold amount is a real purchase and is replanned.
+            return {"command": "return", "reason_source": "navigation",
+                    "reason": "商店状态未变化，保持上次建议并等待玩家操作"}
+        self._shop_decided_on_floor = floor
+        self._shop_state_signature = signature
+        # `shop_items` disambiguates duplicate labels; keep only affordable
+        # objects so JEV cannot select a purchase the legality layer will reject.
+        affordable = [item for item in raw
+                      if not item["disabled"] and item["price"] <= gold
+                      and (item["kind"] != "potion"
+                           or potion_purchase_allowed(game, item, screen))]
+        items = shop_items(affordable)
         d = ShopDecider(self.jev, goal=self.goal, run=self.run).decide(
             gold=gold, items=items,
             removal_cost=purge_cost,
@@ -608,16 +859,24 @@ class SpireBrainAgent:
         if d.value == "remove":
             # The purge service sits after the shelves; PURGE is not a verb.
             return self._record(d, {"command": "choose", "choice": len(raw)})
-        choice = next((i for i, r in enumerate(raw) if r["name"] == str(d.value)), None)
+        choice = next((i for i, r in enumerate(raw)
+                       if not r["disabled"] and r["price"] <= gold
+                       and r["name"] == str(d.value)), None)
         if choice is None:  # label came from a disambiguated duplicate
             choice = next((i for i, r in enumerate(raw)
-                           if str(d.value).startswith(r["name"])), 0)
+                           if not r["disabled"] and r["price"] <= gold
+                           and str(d.value).startswith(r["name"])), 0)
         return self._record(d, {"command": "choose", "choice": choice})
 
     # -- 6. boss relic ----------------------------------------------------- #
     def _on_boss_reward(self, game) -> dict:
         screen = _get(game, "screen_state", "screen", default=game)
         raw = _get(screen, "relics", default=[]) or []
+        if not raw:
+            # Some CommunicationMod versions expose an empty boss-reward list
+            # while the reward animation is still resolving; CHOOSE 0 is the
+            # historical harmless acknowledgement for that state.
+            return {"command": "choose", "choice": 0}
         names = [str(_get(r, "id", "relic_id", "name", default=f"relic {i}"))
                  for i, r in enumerate(raw)]
         labels, index = _unique_labels(names)
@@ -633,25 +892,31 @@ class SpireBrainAgent:
 
     # -- 7. combat --------------------------------------------------------- #
     def _on_combat(self, game) -> dict:
+        def _int_value(value, default: int = 0) -> int:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
         combat = _get(game, "combat", default=game)
         player = _get(combat, "player", default=combat)
         monsters = _get(combat, "monsters", default=[]) or []
         hand_raw = _get(combat, "hand", default=[]) or []
 
         state = CombatState(
-            player_hp=int(_get(player, "current_hp", "hp", default=1)),
-            player_block=int(_get(player, "block", default=0)),
-            energy=int(_get(player, "energy", default=3)),
+            player_hp=_int_value(_get(player, "current_hp", "hp", default=1), 1),
+            player_block=_int_value(_get(player, "block", default=0)),
+            energy=_int_value(_get(player, "energy", default=3), 3),
             hand=[Card(name=str(_get(c, "name", "card_id", default="card")),
                        type=str(_get(c, "type", default="skill")).lower(),
-                       damage=int(_get(c, "damage", default=0)),
-                       block=int(_get(c, "block", default=0)),
-                       energy=int(_get(c, "cost", default=1)) if int(_get(c, "cost", default=1)) >= 0 else 0)
+                       damage=_int_value(_get(c, "damage", default=0)),
+                       block=_int_value(_get(c, "block", default=0)),
+                       energy=max(0, _int_value(_get(c, "cost", default=1), 1)))
                   for c in hand_raw],
             enemies=[{"name": str(_get(m, "name", default="enemy")),
-                      "hp": int(_get(m, "current_hp", "hp", default=0)),
+                      "hp": _int_value(_get(m, "current_hp", "hp", default=0)),
                       "intent": str(_get(m, "intent", default="unknown")).lower(),
-                      "damage": int(_get(m, "move_adjusted_damage", "damage", default=0))}
+                      "damage": _int_value(_get(m, "move_adjusted_damage", "damage", default=0))}
                      for m in monsters],
         )
 
@@ -659,14 +924,48 @@ class SpireBrainAgent:
         # consulted when the incoming damage threatens the act's HP budget, so a
         # routine turn costs zero JEV calls.
         incoming = sum(max(0, e["damage"]) for e in state.enemies if "attack" in e["intent"])
+        defensive_posture = False
         if incoming > self._budget().remaining_budget:
             gate = CombatRiskGate(self.jev, self._budget(), run=self.run)
             d = gate.decide(str(_get(combat, "encounter_name", default="a fight")), incoming)
             self._record(d, {"command": "(posture only)"})
+            defensive_posture = str(d.detail.get("posture", "")) == "defensive"
+            if defensive_posture:
+                # A risk gate is a hard constraint, not merely a dashboard
+                # annotation.  Remove attacks from the candidate set before
+                # the strategic plan/JEV reconciliation can see them.
+                safe = [candidate for candidate in self._active_candidates
+                        if candidate.kind in {"end", "potion"}
+                        or "block" in candidate.goal_tags]
+                if safe:
+                    self._active_candidates = safe
 
         suggestion = recommend_action(game)
         if suggestion is not None:
-            return self._record(Decision("combat", suggestion.command, 0.0, True,
+            if defensive_posture and str(suggestion.command.get("command", "")).lower() == "play":
+                safe = next((candidate for candidate in self._active_candidates
+                             if "block" in candidate.goal_tags), None)
+                safe = safe or next((candidate for candidate in self._active_candidates
+                                     if candidate.kind == "potion"), None)
+                safe = safe or next((candidate for candidate in self._active_candidates
+                                     if candidate.kind == "end"), None)
+                if safe is not None:
+                    suggestion = type(suggestion)(
+                        command=dict(safe.command),
+                        reason="硬规则要求优先防守，避免本回合明确超出生命预算。",
+                        uncertain=bool(safe.uncertainty),
+                    )
+            tactical = self._jev_tactical_pick(game)
+            tactical_confidence = 0.0
+            if tactical is not None:
+                tactical_candidate, tactical_confidence = tactical
+                suggestion = type(suggestion)(
+                    command=dict(tactical_candidate.command),
+                    reason=f"JEV 在 GPT 战略目标内选择：{tactical_candidate.label}。",
+                    uncertain=bool(tactical_candidate.uncertainty),
+                )
+            return self._record(Decision("combat", suggestion.command, tactical_confidence,
+                                         tactical is None,
                                          {"reason": suggestion.reason,
                                           "source_type": "rule_fallback",
                                           "uncertain": suggestion.uncertain}),

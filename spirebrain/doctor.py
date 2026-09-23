@@ -575,6 +575,24 @@ def check_brain_config(rep: Report) -> None:
     else:
         rep.add(PASS, "Score gate", f"{configured} (the experimentally selected one)")
 
+    brain = strategy.get("brain", {}) or {}
+    strategic_backend = os.environ.get("BRAIN_BACKEND") or brain.get("backend", "openai")
+    if str(strategic_backend).lower() in {"openai", "gpt"}:
+        env_file = ROOT / ".env"
+        has_key = bool(os.environ.get("OPENAI_API_KEY"))
+        if not has_key and env_file.exists():
+            has_key = any(line.strip().startswith("OPENAI_API_KEY=")
+                          and line.split("=", 1)[1].strip().strip('"').strip("'")
+                          for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines()
+                          if "=" in line)
+        if has_key:
+            rep.add(PASS, "Strategic GPT brain", f"backend={strategic_backend}")
+        else:
+            rep.add(WARN, "Strategic GPT brain", "no OPENAI_API_KEY; JEV/rules fallback will be used",
+                    "put OPENAI_API_KEY=... in .env, or set BRAIN_BACKEND=mock/disabled")
+    else:
+        rep.add(PASS, "Strategic brain", f"backend={strategic_backend}")
+
 
 def check_backend(rep: Report, live: bool) -> None:
     env_file = ROOT / ".env"

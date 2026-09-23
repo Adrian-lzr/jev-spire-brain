@@ -1,8 +1,8 @@
 ﻿# Jev Spire Brain
 
-> A JEV-powered external brain for [Slay the Spire](https://store.steampowered.com/app/646570/Slay_the_Spire/) — letting a TypeSafe **System One model** make the strategy calls while deterministic code handles the tactics.
+> A GPT + JEV external coach for [Slay the Spire](https://store.steampowered.com/app/646570/Slay_the_Spire/) — GPT owns the run strategy, JEV ranks local choices, and deterministic code handles legality and execution.
 
-JEV (the TypeSafe System One decision model) plays as the external brain: semantic judgement goes to JEV, exact arithmetic to the code.
+GPT is the strategic brain, JEV is the tactical layer, and CommunicationMod is only reached through the local legal-action broker. Without an OpenAI key the existing JEV + guide-rule path remains available.
 
 ## What it is
 
@@ -10,9 +10,9 @@ Jev Spire Brain is a three-layer agent architecture for Slay the Spire:
 
 | Layer | Responsibility | Implementation |
 |---|---|---|
-| Strategy | goals, risk appetite, HP budget policy | `config/strategy.json` (human-defined) |
-| Semantic judgment | "which option serves the strategy" | JEV primitives (`Choice` / `Score` / `Noul`) |
-| Tactics & execution | combat search, HP arithmetic, I/O | deterministic code (spirecomm) |
+| Strategic brain | run goals, build direction, resource budget, replanning | `spirebrain/brain/` (`StrategicPlan`, OpenAI/mock providers) |
+| Tactical layer | rank a small legal candidate set and translate intent | JEV primitives (`Choice` / `Score` / `Noul`) |
+| Legality & execution | enumerate candidates, enforce hard rules, emit one protocol command | `ActionBroker` + deterministic code (spirecomm) |
 
 The agent observes the full game state via [CommunicationMod](https://github.com/ForgottenArbiter/CommunicationMod) (JSON state stream), decides with calibrated probabilistic judgments, and sends actions back through the same pipe.
 
@@ -73,7 +73,7 @@ python run_dashboard.py --advise-demo          # scripted ascent, mock brain, no
 python run_dashboard.py --advise-demo --backend openrouter   # real JEV advice
 ```
 
-## Decision points owned by JEV
+## Decision points supported by JEV
 
 All seven are implemented in `spirebrain/jev_brain/decisions.py` and covered by tests.
 
@@ -85,7 +85,7 @@ All seven are implemented in `spirebrain/jev_brain/decisions.py` and covered by 
 - **Boss relics** — `Score` × 3; the pick is mandatory, so an unsure pick is flagged rather than skipped (`BossRelicJudge`)
 - **Combat risk** — `Noul` (will predicted damage exceed the HP budget?) →tactical posture (`CombatRiskGate`)
 
-Combat card play itself stays in code (search/greedy), per the drone-rule: *JEV cannot be the perception layer and cannot run at control rate.*
+GPT is called at strategic boundaries (new run/act, map, rewards, shop, combat start and major resource changes). Ordinary combat steps do not call GPT again: local combat rules enumerate the next legal card, target, potion or end-turn action, and JEV can rank only that bounded set. No model can emit a raw CommunicationMod command.
 
 ## Two conventions that shape every decision module
 
@@ -127,8 +127,9 @@ commands, **per run** — refilled on every menu→in-game edge,
 `JEVBRAIN_MAX_ACTIONS` to change, <=0 unlimited; unlimited by default in advise
 mode, where every command is a poll and the count is a clock, not a budget) that
 stops a confused run loudly instead of quietly; **navigation without the model** —
-non-decision screens get Proceed and a shop is asked once per floor, so no JEV
-call is ever spent re-deriving "leave"; and the **unmodeled-screen ladder**
+non-decision screens get Proceed and an unchanged shop shelf/gold snapshot is
+not re-asked, while a changed shelf or purchase can trigger a new strategic
+plan; and the **unmodeled-screen ladder**
 (own design, 2026-09-22 evening): a screen whose `available_commands` offer no
 advancing verb gets two waits, SPACE, ESCAPE, a centre click — three cycles at
 most — then a loud pause with a reason, auto-resuming the moment a known
@@ -177,6 +178,19 @@ python start.py --setup     # also writes the game's mod config (backs up the ol
 
 `--setup` is remembered — after the first time, plain `python start.py` is the
 whole routine.
+
+The advisor now has an optional strategic GPT layer above JEV. Put
+`OPENAI_API_KEY=...` in `.env` to enable it (the default model is configured by
+`OPENAI_MODEL`, currently `gpt-4.1-mini`). GPT creates a short run plan and
+resource goal; JEV and the local legality layer choose the concrete candidate.
+Network-backed strategic requests run in a bounded background worker in both
+advisor and play modes, so a slow API cannot stall the CommunicationMod pipe;
+the current JEV/rule candidate is used until a state-matched plan arrives.
+The game overlay shows the current step, GPT goal and a legal alternative. A
+missing key, timeout or malformed response falls back to the existing JEV and
+guide rules without blocking the game. Set `BRAIN_BACKEND=mock` for an offline
+strategic-brain demo, or `BRAIN_BACKEND=jev`/`disabled` to keep the old path.
+Strategic calls are recorded separately in `logs/brain_calls.jsonl`.
 
 Everything start.py does, done manually:
 
@@ -302,6 +316,11 @@ export JEV_BACKEND=cloudflare       # Cloudflare AI
 export CLOUDFLARE_ACCOUNT_ID=... CLOUDFLARE_API_TOKEN=...
 export JEV_BACKEND=llm              # labelled stand-in, NOT JEV: a schema-constrained
                                     # chat model through the same three primitives
+
+# strategic GPT brain (independent of JEV_BACKEND)
+export BRAIN_BACKEND=openai         # openai | mock | disabled
+export OPENAI_API_KEY=...
+export OPENAI_MODEL=gpt-4.1-mini
 ```
 
 The verified request/response shapes, the confidence conventions, and what is
