@@ -4,6 +4,14 @@
 
 GPT is the strategic brain, JEV is the tactical layer, and CommunicationMod is only reached through the local legal-action broker. Without an OpenAI key the existing JEV + guide-rule path remains available.
 
+Ironclad is no longer driven by one fixed draft heuristic. The editable
+`config/archetypes.json` profiles cover adaptive port-filling, Strength,
+Exhaust, Block, self-damage and Status-conversion lines. The selector commits
+only after enough deck evidence, returns to adaptive survival play at low HP,
+and sends the selected profile to both GPT and JEV. See
+[`docs/STRATEGY_PROFILES.md`](docs/STRATEGY_PROFILES.md) for the source-backed
+rules.
+
 ## What it is
 
 Jev Spire Brain is a three-layer agent architecture for Slay the Spire:

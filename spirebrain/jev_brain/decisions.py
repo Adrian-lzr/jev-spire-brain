@@ -422,7 +422,19 @@ class CardRewardJudge:
         prof = profile(list(self.deck_cards), self.effects)
         if len(prof.unknown) > max(1, len(prof.cards) // 2):
             return {}
-        return {name: grade(prof, name, self.act, self.effects) for name in candidates}
+        strategy_id = "adaptive"
+        try:
+            from spirebrain.strategy import profile_for_run
+            selection = profile_for_run(
+                list(self.deck_cards), act=self.act,
+                hp=self.run.hp if self.run else None,
+                max_hp=self.run.max_hp if self.run else None,
+            )
+            strategy_id = selection.profile.id
+        except Exception:  # strategy selection is optional enrichment
+            pass
+        return {name: grade(prof, name, self.act, self.effects, strategy_id)
+                for name in candidates}
 
     def _local_note(self, grades: dict, chosen: str | None) -> str:
         """The one-line, player-facing justification for the local layer."""

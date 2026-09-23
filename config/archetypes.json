@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "source": "docs/CARD_STRATEGY.md; JEV策略游戏应用与杀戮尖塔攻略-扩检报告.html",
+  "profiles": [
+    {
+      "id": "adaptive",
+      "label": "自适应端口",
+      "aliases": ["balanced", "adaptive"],
+      "signal_cards": [],
+      "payoff_cards": [],
+      "min_signal": 0,
+      "focus": ["damage", "block", "draw", "energy", "aoe", "scaling"],
+      "avoid": ["盲目凑流派", "卡组稀释"],
+      "resource_policy": "先解决当前卡组最弱端口，不为尚未出现的流派预留过多资源。",
+      "source_note": "攻略共识：play to the run；玩拿到的牌，不硬凑流派。"
+    },
+    {
+      "id": "strength",
+      "label": "力量成长",
+      "aliases": ["strength", "scaling"],
+      "signal_cards": ["Inflame", "Spot Weakness", "Demon Form", "Limit Break"],
+      "payoff_cards": ["Heavy Blade", "Whirlwind", "Twin Strike", "Sword Boomerang", "Pummel", "Reaper"],
+      "min_signal": 2,
+      "focus": ["scaling", "damage", "energy", "draw"],
+      "avoid": ["无力量来源的力量收益牌", "第一幕高费慢牌"],
+      "resource_policy": "先保证本回合生存，再保留力量来源和多段攻击的组合窗口。",
+      "source_note": "docs/CARD_STRATEGY.md：先有力量来源，再拿倍数与多段攻击。"
+    },
+    {
+      "id": "exhaust",
+      "label": "消耗引擎",
+      "aliases": ["exhaust", "corruption"],
+      "signal_cards": ["Corruption", "Feel No Pain", "Dark Embrace"],
+      "payoff_cards": ["Fiend Fire", "Sever Soul", "Second Wind", "Burning Pact", "True Grit", "Exhume", "Sentinel"],
+      "min_signal": 2,
+      "focus": ["utility", "block", "draw", "damage"],
+      "avoid": ["没有消耗收益的随机消耗", "过早堆高卡组"],
+      "resource_policy": "优先保留能消耗牌并获得格挡、抽牌或伤害的节点；不为单张消耗牌强行买配件。",
+      "source_note": "docs/CARD_STRATEGY.md：消耗引擎成型后用小卡组和过牌完成循环。"
+    },
+    {
+      "id": "block",
+      "label": "格挡堆叠",
+      "aliases": ["block", "barricade"],
+      "signal_cards": ["Barricade", "Entrench", "Metallicize", "Feel No Pain"],
+      "payoff_cards": ["Body Slam", "Juggernaut", "Impervious", "Power Through"],
+      "min_signal": 2,
+      "focus": ["block", "scaling", "draw", "damage"],
+      "avoid": ["只有格挡上限牌而没有格挡产量", "为堆格挡放弃当前生存"],
+      "resource_policy": "先建立稳定格挡产量，再选择保留格挡或转化为伤害；面对致命意图优先防守。",
+      "source_note": "docs/CARD_STRATEGY.md：Barricade/Entrench 需要稳定格挡产量。"
+    },
+    {
+      "id": "self_damage",
+      "label": "自伤收益",
+      "aliases": ["self_damage", "rupture"],
+      "signal_cards": ["Rupture", "Blood for Blood"],
+      "payoff_cards": ["Bloodletting", "Hemokinesis", "Offering", "Combust", "Brutality"],
+      "min_signal": 2,
+      "focus": ["scaling", "damage", "energy", "draw"],
+      "avoid": ["没有回复/防御时重复自伤", "低血量继续换血"],
+      "resource_policy": "自伤只在生命预算允许且能换来力量、能量或大量输出时使用。",
+      "source_note": "docs/CARD_STRATEGY.md：没有 Rupture/Blood for Blood 时自伤只是代价。"
+    },
+    {
+      "id": "status",
+      "label": "异常牌转化",
+      "aliases": ["status", "evolve"],
+      "signal_cards": ["Evolve", "Fire Breathing"],
+      "payoff_cards": ["Wild Strike", "Reckless Charge", "Power Through", "Immolate"],
+      "min_signal": 2,
+      "focus": ["draw", "damage", "aoe", "utility"],
+      "avoid": ["没有异常收益时主动塞状态牌", "状态牌过多导致卡手"],
+      "resource_policy": "只有异常收益牌已在线时才提高状态牌价值，并保留足够过牌处理污染。",
+      "source_note": "docs/CARD_STRATEGY.md：Evolve/Fire Breathing 把 Wound/Burn/Dazed 转成收益。"
+    }
+  ]
+}

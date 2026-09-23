@@ -258,16 +258,23 @@ def synergy(deck_ids: list[str], card_id: str,
 
 def _archetype_reasons(deck_ids: list[str], card_id: str) -> tuple[list[str], float]:
     """Bonus for deepening the archetype the deck already committed to."""
-    present = set(deck_ids)
+    present: set[str] = set()
+    for value in deck_ids or []:
+        if not isinstance(value, str):
+            continue
+        info = meta.card(value)
+        present.add(str(info.get("game_id") or value))
+    card_info = meta.card(card_id)
+    normalized_card = str(card_info.get("game_id") or card_id)
     reasons: list[str] = []
     bonus = 0.0
     for arch in IRONCLAD_ARCHETYPES:
         if len(present & (arch.core | arch.payoff)) < 2:
             continue          # one card is not a commitment
-        if card_id in arch.core:
+        if normalized_card in arch.core:
             bonus += 0.30
             reasons.append(f"推进「{arch.label}」（核心）")
-        elif card_id in arch.payoff:
+        elif normalized_card in arch.payoff:
             bonus += 0.18
             reasons.append(f"配合「{arch.label}」")
     return reasons, bonus
@@ -331,7 +338,8 @@ class PickGrade:
 
 
 def grade(prof: DeckProfile, card_id: str, act: int = 1,
-          effects: dict[str, str] | None = None) -> PickGrade:
+          effects: dict[str, str] | None = None,
+          strategy_id: str = "") -> PickGrade:
     """Score one candidate against this deck and this act.
 
     Shape of the number: covering a real need dominates (the community's own
@@ -371,6 +379,25 @@ def grade(prof: DeckProfile, card_id: str, act: int = 1,
     # deck's needs happened to sit elsewhere, which is not how drafting works.
     score += (max(know.acts) / 3.0) * 0.15
 
+    # The selected profile is a soft preference, never a ban.  It makes the
+    # local fallback distinguish a committed Strength or Exhaust run from a
+    # generic "best card" draft while still allowing a card that solves an
+    # urgent missing port to win.
+    profile_reason = ""
+    if strategy_id and strategy_id != "adaptive":
+        try:
+            from spirebrain.strategy import load_profiles
+            profile = next((p for p in load_profiles() if p.id == strategy_id), None)
+            if profile is not None:
+                if card_id in profile.signal_cards:
+                    score += 0.12
+                    profile_reason = f"符合当前「{profile.label}」主轴"
+                elif card_id in profile.payoff_cards:
+                    score += 0.08
+                    profile_reason = f"配合当前「{profile.label}」"
+        except Exception:  # editable strategy data must never break drafting
+            pass
+
     oversize = max(0, prof.size - COMFORTABLE_SIZE)
     dilution = min(0.30, oversize * 0.02) + (0.10 if prof.size >= 28 else 0.0)
     score -= dilution
@@ -389,6 +416,8 @@ def grade(prof: DeckProfile, card_id: str, act: int = 1,
         head = "、".join(fills[:2])
         reasons.append(f"补足{head}" if need_fit >= 0.45 else f"{head}已有基础")
     reasons.extend(arch_reasons)
+    if profile_reason:
+        reasons.append(profile_reason)
     reasons.extend(reason for reason, _ in syn)
     if prof.size >= 22:
         reasons.append(f"卡组已 {prof.size} 张，只拿明显更好的")

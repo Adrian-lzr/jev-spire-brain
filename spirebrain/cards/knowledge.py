@@ -354,7 +354,19 @@ IRONCLAD_ARCHETYPES: tuple[Archetype, ...] = (
 def archetype_signal(deck_ids: list[str]) -> dict[str, int]:
     """How invested the deck already is in each archetype (core+payoff cards)."""
     counts: dict[str, int] = {}
-    present = set(deck_ids)
+    # Live state commonly uses class ids (``HeavyBlade``), while the authored
+    # guide uses display/game ids (``Heavy Blade``).  Metadata is local and
+    # authoritative, so normalize both spellings before matching signals.
+    present: set[str] = set()
+    for card_id in deck_ids or []:
+        if not isinstance(card_id, str):
+            continue
+        try:
+            from spirebrain.cards import meta
+            info = meta.card(card_id)
+            present.add(str(info.get("game_id") or card_id))
+        except Exception:  # optional metadata must never block advice
+            present.add(card_id)
     for arch in IRONCLAD_ARCHETYPES:
         hits = len(present & (arch.core | arch.payoff))
         core_hits = len(present & arch.core)

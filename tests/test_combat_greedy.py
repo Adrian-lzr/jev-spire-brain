@@ -13,6 +13,7 @@ from spirebrain.tactical.combat_greedy import (
     incoming_damage,
     play_order,
     should_use_potion,
+    recommend_action,
 )
 
 
@@ -57,6 +58,42 @@ def test_potion_rule():
     assert should_use_potion(_state([], hp=25, block=0, enemies=enemies), 20)
     assert not should_use_potion(_state([], hp=50, block=0, enemies=enemies), 20)
     assert incoming_damage(_state([], enemies=enemies)) == 18
+
+
+def test_strength_profile_prefers_setup_when_survival_is_covered():
+    game = {
+        "act": 2, "deck": ["Inflame", "HeavyBlade"],
+        "combat": {
+            "player": {"energy": 3, "current_hp": 70, "max_hp": 80, "block": 0},
+            "monsters": [{"current_hp": 40, "intent": "block"}],
+            "hand": [
+                {"id": "Inflame", "type": "POWER", "cost": 1, "is_playable": True},
+                {"id": "HeavyBlade", "type": "ATTACK", "cost": 2, "damage": 14, "is_playable": True},
+            ],
+        },
+        "available_commands": ["play", "end"],
+    }
+    suggestion = recommend_action(game)
+    assert suggestion is not None
+    assert suggestion.command["card"] == 0
+
+
+def test_low_hp_does_not_force_slow_archetype_setup():
+    game = {
+        "act": 2, "deck": ["Corruption", "FeelNoPain"],
+        "combat": {
+            "player": {"energy": 3, "current_hp": 10, "max_hp": 80, "block": 0},
+            "monsters": [{"current_hp": 40, "intent": "block"}],
+            "hand": [
+                {"id": "Corruption", "type": "POWER", "cost": 3, "is_playable": True},
+                {"id": "Strike_R", "type": "ATTACK", "cost": 1, "damage": 6, "is_playable": True},
+            ],
+        },
+        "available_commands": ["play", "end"],
+    }
+    suggestion = recommend_action(game)
+    assert suggestion is not None
+    assert suggestion.command["card"] == 1
 
 
 if __name__ == "__main__":

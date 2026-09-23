@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from spirebrain.strategy import select_strategy
+
 
 @dataclass
 class Card:
@@ -93,11 +95,19 @@ def recommend_action(game: dict) -> ActionSuggestion | None:
     """
     combat = game.get("combat") or game.get("combat_state") or {}
     player = combat.get("player") or {}
+    def number(value, default=0):
+        if isinstance(value, dict):
+            value = value.get("current", value.get("value", default))
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
     try:
-        energy = int(player.get("energy", 0))
-        hp = int(player.get("current_hp", game.get("current_hp", 0)))
-        block = int(player.get("block", 0))
-        max_hp = int(player.get("max_hp", game.get("max_hp", max(hp, 1))))
+        energy = number(player.get("energy", 0))
+        hp = number(player.get("current_hp", game.get("current_hp", 0)))
+        block = number(player.get("block", 0))
+        max_hp = number(player.get("max_hp", game.get("max_hp", max(hp, 1))), max(hp, 1))
     except (TypeError, ValueError):
         return None
     offered = {str(x).lower() for x in game.get("available_commands", [])}
@@ -106,16 +116,21 @@ def recommend_action(game: dict) -> ActionSuggestion | None:
     for i, monster in enumerate(combat.get("monsters") or []):
         if not isinstance(monster, dict) or monster.get("is_gone") or monster.get("half_dead"):
             continue
-        enemy_hp = int(monster.get("current_hp", 0) or 0)
+        enemy_hp = number(monster.get("current_hp", 0))
         if enemy_hp <= 0:
             continue
-        effective_hp = enemy_hp + int(monster.get("block", 0) or 0)
+        effective_hp = enemy_hp + number(monster.get("block", 0))
         monsters.append((i, monster, effective_hp))
         if "ATTACK" in str(monster.get("intent", "")).upper():
-            damage = int(monster.get("move_adjusted_damage", monster.get("damage", -1)) or -1)
-            hits = int(monster.get("move_hits", 1) or 1)
+            damage = number(monster.get("move_adjusted_damage", monster.get("damage", -1)), -1)
+            hits = max(1, number(monster.get("move_hits", 1), 1))
             if damage >= 0:
                 incoming += damage * max(1, hits)
+
+    selection = select_strategy(
+        game.get("deck") or [], act=number(game.get("act", 1), 1),
+        hp=hp, max_hp=max_hp)
+    strategy = selection.profile
 
     # Known healing potions can prevent a lethal turn without spending energy.
     # Potion Slot is an empty slot in CommunicationMod, never a consumable.
@@ -167,17 +182,22 @@ def recommend_action(game: dict) -> ActionSuggestion | None:
 
     def command_for(index: int, card: dict, damage: int | None) -> dict:
         cmd = {"command": "play", "card": index}
-        if card.get("has_target", str(card.get("type", "")).upper() == "ATTACK"):
+        target_required = card.get("has_target", str(card.get("type", "")).upper() == "ATTACK")
+        is_aoe = str(card.get("target", card.get("target_type", ""))).upper() in {
+            "ALL_ENEMY", "ALL_ENEMIES", "AOE"
+        }
+        if target_required and not is_aoe:
             viable = sorted(monsters, key=lambda m: (m[2], m[0]))
+            attacking = [m for m in viable if "ATTACK" in str(m[1].get("intent", "")).upper()]
             lethal = next((m for m in viable if damage is not None and damage >= m[2]), None)
             if viable:
-                cmd["target"] = (lethal or viable[0])[0]
+                cmd["target"] = (lethal or (attacking[0] if attacking else viable[0]))[0]
         return cmd
 
     # A known kill on the only live attacker ends its damage; take it first.
     if len(monsters) == 1:
         lethal = [(i, c, d) for i, c, typ, d, _ in cards
-                  if typ == "ATTACK" and c.get("damage") is not None
+                  if typ == "ATTACK"
                   and not player.get("powers") and not monsters[0][1].get("powers")
                   and d is not None and d >= monsters[0][2]]
         if lethal:
@@ -191,6 +211,32 @@ def recommend_action(game: dict) -> ActionSuggestion | None:
         i, card, value = max(blockers, key=lambda x: (min(uncovered, x[2]), -int(x[1].get("cost", 0) or 0)))
         return ActionSuggestion(command_for(i, card, None),
                                 f"已知将受到约 {incoming} 点攻击，当前格挡 {block}；先补格挡。")
+
+    # Once the defensive requirement is covered, use the selected build's
+    # setup cards before defaulting to the largest printed damage.  This is a
+    # soft preference: a lethal attack was handled above, and unknown cards
+    # never become a forced play.  It is what makes two otherwise identical
+    # hands produce different advice for Strength vs Exhaust runs.
+    def key(value: str) -> str:
+        return "".join(ch.lower() for ch in value if ch.isalnum())
+
+    signal = {key(card) for card in strategy.signal_cards}
+    payoff = {key(card) for card in strategy.payoff_cards}
+    setup = []
+    for i, card, typ, damage, block_value in cards:
+        identity = key(str(card.get("id") or card.get("name") or ""))
+        if identity in signal or identity in payoff:
+            # A payoff is useful only after the profile is established; the
+            # selector already keeps an uncommitted run in adaptive mode.
+            rank = 0 if identity in signal else 1
+            setup.append((rank, int(card.get("cost", 0) or 0), i, card, damage))
+    if setup and strategy.id != "adaptive" and uncovered <= 0:
+        _, _, i, card, damage = min(setup, key=lambda row: (row[0], row[1], row[2]))
+        return ActionSuggestion(
+            command_for(i, card, damage),
+            f"当前打法为「{strategy.label}」，先执行其核心/配合牌，避免只按面板伤害出牌。",
+            card.get("damage") is None or card.get("block") is None,
+        )
 
     attacks = [(i, c, d) for i, c, typ, d, _ in cards if typ == "ATTACK"]
     if attacks:

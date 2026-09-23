@@ -423,6 +423,17 @@ class RunContext:
             budget_reserved=self.budget_reserved,
             goal=self.goal,
         )
+        # Keep the strategic profile visible to JEV without letting it invent a
+        # new build.  The selector is conservative and returns "adaptive" until
+        # the deck contains a real signal, so this improves variety without
+        # turning one lucky card into a hard commitment.
+        try:
+            from spirebrain.strategy import profile_for_run
+            selection = profile_for_run(
+                self.deck, act=self.act, hp=self.hp, max_hp=self.max_hp)
+            state["strategy"] = selection.model_dict()
+        except Exception:  # strategy context is enrichment, never a blocker
+            pass
         if extra:
             state.update(extra)
         return state

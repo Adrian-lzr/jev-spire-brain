@@ -9,6 +9,7 @@ from typing import Any
 
 from .memory import RunMemory
 from .protocol import BrainResponse, ActionCandidate, StrategicPlan
+from spirebrain.strategy import strategy_context
 
 
 def stable_state_id(game: dict) -> str:
@@ -85,6 +86,7 @@ class StrategicPlanner:
             "trigger": trigger,
             "max_plan_steps": self.max_plan_steps,
             "state": compact_state(game),
+            "strategy_context": strategy_context(game),
             "memory": memory.digest(self.memory_events) if memory else {},
             "guide_rules": list(guide_rules or [])[:20],
             "candidates": [candidate.model_dict() for candidate in candidates if candidate.legal],
