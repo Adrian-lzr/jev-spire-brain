@@ -23,11 +23,14 @@ no advice, which is why every publish and every router call is fenced.
 from __future__ import annotations
 
 import json
+import queue
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
 
 from spirebrain.driver.modes import ADVISE_POLL_VERBS
+from spirebrain.driver.legality import check_action
 from spirebrain.driver.witness import (
     SCREEN_POINT,
     Advice,
@@ -86,7 +89,15 @@ class AdviseSession:
         self.advised_fp: str | None = None
         #: Recommendations made; counted here because this is where they happen.
         self.issued = 0
+        self._issued_state_ids: set[str] = set()
         self.tracker = tracker if tracker is not None else PlayerTracker()
+        self._worker_agent = agent.clone_for_advice() if hasattr(agent, "clone_for_advice") else None
+        self._latest_fp: str | None = None
+        self._generation = 0
+        self._work_lock = threading.Lock()
+        self._work_running = False
+        self._queued_work: tuple | None = None
+        self._completed: queue.Queue = queue.Queue()
 
     def reset_run(self) -> None:
         """A new run invalidates any advice pending from the old one.
@@ -99,6 +110,11 @@ class AdviseSession:
         self.tracker.pending = None
         self.tracker.remember_state(None)
         self.advised_fp = None
+        self._issued_state_ids.clear()
+        self._latest_fp = None
+        self._generation += 1
+        with self._work_lock:
+            self._queued_work = None
 
     def advise(self, game: dict, available: Any, modeled: bool) -> str | None:
         """Recommend, never act. Returns the poll command to send.
@@ -114,6 +130,7 @@ class AdviseSession:
         every ~1/3 second, and re-asking JEV on each one would turn a $0.001
         decision into a per-second bill for a player who is simply thinking.
         """
+        fp = self._fingerprint(game)
         outcome = self.tracker.resolve(game)
         if outcome is not None:
             self._publish_outcome(outcome)
@@ -121,13 +138,114 @@ class AdviseSession:
         if not modeled:
             # A screen we cannot read: no advice is possible, and pressing its
             # keys/click is forbidden. Keep the pipe alive and stay quiet.
+            if fp != self.advised_fp:
+                self.advised_fp = fp
+                self._latest_fp = fp
+                self._publish_status(fp, "unavailable", "当前界面暂无可判断的操作",
+                                     "请继续手动操作，进入可识别界面后建议会自动恢复。",
+                                     point=SCREEN_POINT.get(screen_of(game), "navigation"))
+            self._drain_completed()
             return self._poll(available)
 
-        fp = self._fingerprint(game)
         if fp != self.advised_fp:
             self.advised_fp = fp
-            self._advise_once(game, available)
+            self._latest_fp = fp
+            if self._worker_agent is None:
+                self._advise_once(game, available)
+            else:
+                self._advise_async(game, available, fp)
+        self._drain_completed()
         return self._poll(available)
+
+    def _publish_status(self, state_id: str, status: str, label: str,
+                        reason: str, source_type: str = "pending",
+                        guide_rules: list[dict] | None = None,
+                        point: str = "navigation") -> None:
+        feed = getattr(self.agent, "feed", None)
+        if feed is not None:
+            try:
+                feed.publish("advice", {"point": point, "label": label,
+                                        "reason": reason, "state_id": state_id,
+                                        "status": status, "source_type": source_type,
+                                        "source": "", "guide_rules": guide_rules or [],
+                                        "confidence": 0.0, "fallback": False})
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _advise_async(self, game: dict, available: Any, fp: str) -> None:
+        payload = dict(game, available_commands=available)
+        try:
+            quick = self.agent.quick_advice(payload)
+        except Exception as exc:  # noqa: BLE001
+            quick = {"status": "thinking", "reason": f"本地规则暂不可用：{type(exc).__name__}"}
+        if quick.get("status") == "unsupported":
+            self._publish_status(fp, "unsupported", quick.get("label", "角色未覆盖"),
+                                 quick.get("reason", ""), "unavailable",
+                                 point=SCREEN_POINT.get(screen_of(game), "navigation"))
+            return
+        if quick.get("command"):
+            self._record_action(payload, quick["command"], self.agent, fp,
+                                reason_override=quick.get("reason", ""),
+                                source_type=quick.get("source_type", "guide_rule"),
+                                source=quick.get("source", ""),
+                                guide_rules=quick.get("guide_rules", []),
+                                provisional=True)
+            if quick.get("source_type") == "guide_rule":
+                return  # a hard rule has already settled this decision
+        else:
+            self._publish_status(fp, "thinking", quick.get("label", "正在分析当前局面…"),
+                                 quick.get("reason", ""), "pending",
+                                 quick.get("guide_rules", []),
+                                 point=SCREEN_POINT.get(screen_of(game), "navigation"))
+        with self._work_lock:
+            self._queued_work = (fp, payload, self._generation)
+            if not self._work_running:
+                self._work_running = True
+                threading.Thread(target=self._work_loop, daemon=True,
+                                 name="SpireBrainAdvice").start()
+
+    def _work_loop(self) -> None:
+        while True:
+            with self._work_lock:
+                job = self._queued_work
+                self._queued_work = None
+                if job is None:
+                    self._work_running = False
+                    return
+            fp, payload, generation = job
+            try:
+                command = self._worker_agent.choose_action(payload)
+                entry = dict(self._worker_agent.history[-1]) if self._worker_agent.history else None
+                self._completed.put((fp, generation, payload, command, entry, None))
+            except Exception as exc:  # noqa: BLE001 - failure becomes a panel status
+                self._completed.put((fp, generation, payload, None, None, exc))
+
+    def _drain_completed(self) -> None:
+        while True:
+            try:
+                fp, generation, payload, command, entry, error = self._completed.get_nowait()
+            except queue.Empty:
+                return
+            if generation != self._generation or fp != self._latest_fp:
+                continue  # the player already changed the game state
+            if error is not None or command is None:
+                # An immediate hard-rule recommendation remains visible on API
+                # failure. Otherwise show a clear unavailable status.
+                if self.tracker.pending is None or self.tracker.pending.state_id != fp:
+                    self._publish_status(fp, "unavailable", "当前建议暂不可用",
+                                         f"模型调用失败：{type(error).__name__ if error else 'unknown'}",
+                                         "unavailable",
+                                         point=SCREEN_POINT.get(screen_of(payload), "navigation"))
+                continue
+            if entry and entry.get("command") == command:
+                feed = getattr(self.agent, "feed", None)
+                if feed is not None:
+                    try:
+                        feed.publish("decision", dict(entry))
+                    except Exception:  # noqa: BLE001 - diagnostics are optional
+                        pass
+            self._record_action(payload, command, self._worker_agent, fp,
+                                history_entry=entry)
 
     def _advise_once(self, game: dict, available: Any) -> None:
         """Ask the brain once for this state and publish what it says."""
@@ -142,21 +260,48 @@ class AdviseSession:
                   file=self.warn_stream, flush=True)
             return
 
+        self._record_action(payload, command, self.agent, self._fingerprint(game))
+
+    def _record_action(self, payload: dict, command: dict, decision_agent: Any,
+                       state_id: str, *, reason_override: str = "",
+                       source_type: str = "", source: str = "",
+                       guide_rules: list[dict] | None = None,
+                       history_entry: dict | None = None,
+                       provisional: bool = False) -> None:
+        game = payload
+        if self._worker_agent is not None:
+            legal, why_not = check_action(game, command)
+            if not legal:
+                self._publish_status(state_id, "unavailable", "当前一步暂无法确认",
+                                     why_not, "unavailable",
+                                     point=SCREEN_POINT.get(screen_of(game), "navigation"))
+                return
         screen = screen_of(game)
         point = SCREEN_POINT.get(screen, "navigation")
-        confidence, fallback, reason = self._last_decision_fields(command)
+        confidence, fallback, reason = ((0.0, True, "") if provisional else
+            self._last_decision_fields(command, agent=decision_agent,
+                                       history_entry=history_entry))
+        entry = None if provisional else (history_entry or
+            ((getattr(decision_agent, "history", None) or [None])[-1]))
+        detail = entry.get("detail", {}) if entry and entry.get("command") == command else {}
         advice = Advice(
             point=point, screen=screen, command=command,
             key=advice_key(payload, command, point),
             label=label_for(payload, command, point),
-            reason=reason or str(command.get("reason", "") or ""),
+            reason=reason_override or reason or str(command.get("reason", "") or ""),
             confidence=confidence, fallback=fallback,
             act=int(game.get("act", 0) or 0), floor=int(game.get("floor", 0) or 0),
             message=self.message_count(),
+            state_id=state_id,
+            source_type=source_type or detail.get("source_type", "guide_rule"),
+            source=source or detail.get("source", ""),
+            guide_rules=guide_rules if guide_rules is not None else detail.get("guide_rules", []),
         )
         self.tracker.remember_state(game)
         self.tracker.note(advice)
-        self.issued += 1
+        if state_id not in self._issued_state_ids:
+            self._issued_state_ids.add(state_id)
+            self.issued += 1
         self._publish_advice(advice)
         # One ASCII line on stderr: the live console and the mod's error log have
         # no reliable encoding for the Chinese label, so the sentence the player
@@ -184,7 +329,8 @@ class AdviseSession:
                                     safe=ADVISE_POLL_VERBS)
         return line or None
 
-    def _last_decision_fields(self, command: dict) -> tuple[float, bool, str]:
+    def _last_decision_fields(self, command: dict, *, agent: Any = None,
+                              history_entry: dict | None = None) -> tuple[float, bool, str]:
         """Confidence, fallback flag and *reason* of the decision behind `command`.
 
         Screens answered by navigation rules (non-decision screens, a grid with no
@@ -199,9 +345,9 @@ class AdviseSession:
         measured 2026-09-22 with the overlay's own poller, which showed a "why"
         line that was blank on every screen that had a reason.
         """
-        history = getattr(self.agent, "history", None) or []
-        if history and history[-1].get("command") == command:
-            entry = history[-1]
+        history = getattr(agent or self.agent, "history", None) or []
+        entry = history_entry or (history[-1] if history else None)
+        if entry and entry.get("command") == command:
             detail = entry.get("detail") or {}
             gate = detail.get("gate") or {}
             reason = str(detail.get("reason") or gate.get("reason") or "")
@@ -215,7 +361,9 @@ class AdviseSession:
                           "verb": str(advice.command.get("command", "")),
                           "command": advice.command, "key": list(advice.key or ()),
                           "reason": advice.reason, "confidence": advice.confidence,
-                          "fallback": advice.fallback})
+                          "fallback": advice.fallback, "state_id": advice.state_id,
+                          "source_type": advice.source_type, "source": advice.source,
+                          "guide_rules": advice.guide_rules})
         feed = getattr(self.agent, "feed", None)
         if feed is None:
             return

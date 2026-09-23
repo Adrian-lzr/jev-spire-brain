@@ -19,6 +19,7 @@ package io.github.adrianlzr.spirebrain;
 public final class ParseCheck {
 
     public static void main(String[] args) throws Exception {
+        System.setOut(new java.io.PrintStream(System.out, true, "UTF-8"));
         String url = args.length > 0 ? args[0] : "http://127.0.0.1:8787";
         long seconds = args.length > 1 ? Long.parseLong(args[1]) : 6L;
 
@@ -32,6 +33,8 @@ public final class ParseCheck {
                         System.out.println("  advice ZH  : " + snapshot.adviceLabel);
                         System.out.println("  advice ASC : " + snapshot.adviceAscii);
                         System.out.println("  reason     : " + snapshot.adviceReason);
+                        System.out.println("  source     : " + snapshot.adviceSource);
+                        System.out.println("  status     : " + snapshot.adviceStatus);
                         System.out.println("  confidence : " + snapshot.adviceConfidence
                                 + (snapshot.ruleOnly ? "  (rules, model not asked)" : ""));
                     } else {

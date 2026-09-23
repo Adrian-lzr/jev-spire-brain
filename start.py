@@ -6,7 +6,7 @@ who skip READMEs.
 That is the whole interface. It:
 
   1. runs the environment doctor (and says exactly what to fix, if anything);
-  2. starts the local dashboard and opens your browser;
+  2. starts the local event server for the in-game panel;
   3. prints the one line to paste into CommunicationMod's config (or writes it
      with --setup), so the game spawns the agent with the dashboard already
      wired — every decision streams to the page with no further steps.
@@ -29,7 +29,7 @@ Everything is optional:
     python start.py --play             # auto-play instead of advising
     python start.py --backend mock     # force the offline brain (default auto)
     python start.py --port 9000        # move the dashboard
-    python start.py --no-browser       # do not open a browser tab
+    python start.py --browser          # optionally open the detailed browser log
     python start.py --demo             # no game needed: a simulated run plays
 
 Design rule for a mass audience: every failure must name its fix in one line,
@@ -69,7 +69,7 @@ def run_doctor(live: bool = False) -> bool:
 
 
 def start_dashboard(port: int, open_browser: bool) -> tuple[object, str]:
-    """Start the dashboard server, open a browser, return (server, url)."""
+    """Start the event server; the browser view is optional."""
     from spirebrain.overlay.feed import DecisionFeed
     from spirebrain.overlay.server import DashboardServer, PortInUse
 
@@ -95,7 +95,7 @@ def start_dashboard(port: int, open_browser: bool) -> tuple[object, str]:
         webbrowser.open(url)
         print("      opened it in your browser (it reconnects by itself, refresh anytime)")
     else:
-        print(f"      open {url} in your browser")
+        print("      advice appears in the in-game overlay; browser log is optional")
     return server, url
 
 
@@ -145,7 +145,7 @@ def main(argv: list[str] | None = None) -> int:
 
     demo = "--demo" in argv
     do_setup = "--setup" in argv or do_setup_saved()
-    open_browser = "--no-browser" not in argv
+    open_browser = "--browser" in argv and "--no-browser" not in argv
     port = int(_value(argv, "port") or DEFAULT_PORT)
     backend = _value(argv, "backend") or detect_backend()
     mode = ("play" if "--play" in argv else
@@ -162,7 +162,7 @@ def main(argv: list[str] | None = None) -> int:
     if mode == "advise":
         print("mode: ADVISE (军师模式) - the agent will recommend, never play:")
         print("      it sends the game only polls, and it will not start a run for you.")
-        print("      Your advice appears on the dashboard; what you did lands in")
+        print("      Your advice appears in the game; what you did lands in")
         print("      logs/advice.jsonl. Use --play for the auto-player.\n")
     else:
         print("mode: PLAY (代打模式) - the agent plays the run itself.\n")

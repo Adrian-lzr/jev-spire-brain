@@ -420,7 +420,7 @@ def test_state_snapshot_is_empty_but_shaped_before_anything_happens():
     snap = _state_snapshot(DecisionFeed())
     assert snap == {"last_decision": None, "last_advice": None,
                     "last_outcome": None, "run_state": None,
-                    "agent_state": None}
+                    "agent_state": None, "current_state_id": None}
 
 
 def test_state_snapshot_finds_the_outcome_past_the_agents_own_run_state():

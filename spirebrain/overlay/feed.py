@@ -205,6 +205,11 @@ def advice_event(advice, tally: dict | None = None,
         "floor": advice.floor,
         "tally": dict(tally or {}),
         "agreement": agreement,
+        "state_id": advice.state_id,
+        "status": "ready",
+        "source_type": advice.source_type,
+        "source": advice.source,
+        "guide_rules": advice.guide_rules,
     }
 
 

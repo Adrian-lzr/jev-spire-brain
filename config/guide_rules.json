@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "rules": [
+    {"id":"ironclad.rest.low_hp","scenes":["REST"],"characters":["IRONCLAD"],"priority":100,"when":{"hp_ratio__lt":0.5},"effect":"rest","reason":"生命低于一半，优先在篝火恢复生命。","source":"docs/CARD_STRATEGY.md · 篝火优先级"},
+    {"id":"ironclad.card.deck_cap","scenes":["CARD_REWARD"],"characters":["IRONCLAD"],"priority":95,"when":{"deck_size__gte":25},"effect":"skip_card","reason":"卡组已达到策略上限；跳过普通补强，避免继续稀释关键牌。","source":"config/strategy.json · deck_policy.max_cards"},
+    {"id":"ironclad.map.hp_budget","scenes":["MAP"],"characters":["IRONCLAD"],"priority":90,"when":{},"effect":"safe_map","reason":"可选路线中有预算内的路径时，排除预计损血超过剩余预算的路线；损血是粗略估计。","source":"config/strategy.json · hp_budget；spirebrain/jev_brain/state.py · NODE_DAMAGE_HINT"},
+    {"id":"ironclad.event.lethal","scenes":["EVENT"],"characters":["IRONCLAD"],"priority":100,"when":{},"effect":"avoid_lethal_event","reason":"排除游戏状态明确标出会造成致命伤害的事件选项。","source":"CommunicationMod 实时事件选项与当前生命"},
+    {"id":"ironclad.card.role","scenes":["CARD_REWARD"],"characters":["IRONCLAD"],"priority":20,"when":{},"effect":"inform","reason":"比较卡牌是否补足当前卡组缺少的输出、防御、过牌或成长能力；允许跳过。","source":"docs/CARD_STRATEGY.md；spirebrain/cards/knowledge.py"},
+    {"id":"ironclad.rest.upgrade","scenes":["REST","GRID","CARD_SELECT"],"characters":["IRONCLAD"],"priority":20,"when":{},"effect":"inform","reason":"血量充足时优先升级对当前卡组影响最大的牌。","source":"docs/CARD_STRATEGY.md；spirebrain/cards/deck.py"},
+    {"id":"ironclad.shop.remove","scenes":["SHOP_SCREEN","SHOP","GRID","CARD_SELECT"],"characters":["IRONCLAD"],"priority":20,"when":{},"effect":"inform","reason":"评估删牌的长期收益，优先处理诅咒及已经被替代的基础牌。","source":"docs/CARD_STRATEGY.md；spirebrain/cards/knowledge.py"},
+    {"id":"ironclad.event.tradeoff","scenes":["EVENT"],"characters":["IRONCLAD"],"priority":15,"when":{},"effect":"inform","reason":"根据当前生命、卡组与目标比较事件收益和代价。","source":"JEV策略游戏应用与杀戮尖塔攻略-扩检报告.html"},
+    {"id":"ironclad.boss.relic","scenes":["BOSS_REWARD"],"characters":["IRONCLAD"],"priority":15,"when":{},"effect":"inform","reason":"比较遗物对当前卡组的收益和副作用；此处必须选一个。","source":"docs/CARD_STRATEGY.md；游戏遗物文本"},
+    {"id":"ironclad.combat.turn","scenes":["COMBAT"],"characters":["IRONCLAD"],"priority":15,"when":{},"effect":"inform","reason":"先核对本回合已知威胁、能量、可打出的牌与药水，再建议当前一步。","source":"游戏实时战斗状态；spirebrain/tactical/combat_greedy.py"}
+  ]
+}

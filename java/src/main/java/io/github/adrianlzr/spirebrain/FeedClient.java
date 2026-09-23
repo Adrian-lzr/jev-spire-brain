@@ -53,6 +53,10 @@ public final class FeedClient {
         public String pointAscii = "";
         /** Why (the router's own reason — English, so ASCII-safe). */
         public String adviceReason = "";
+        /** The source is explicit: guide rule, JEV judgement, or rule fallback. */
+        public String adviceSource = "";
+        public String adviceSourceAscii = "";
+        public String adviceStatus = "";
         public double adviceConfidence = 0.0;
         /** True when confidence is 0: rules answered, the model was not asked. */
         public boolean ruleOnly = false;
@@ -181,10 +185,48 @@ public final class FeedClient {
             snap.adviceAscii = asciiCommand(advice.optString("verb", ""),
                     advice.optJSONObject("command"));
             snap.adviceReason = advice.optString("reason", "");
+            snap.adviceStatus = advice.optString("status", "ready");
+            String sourceType = advice.optString("source_type", "");
+            switch (sourceType) {
+                case "guide_rule":
+                    snap.adviceSource = "攻略规则";
+                    snap.adviceSourceAscii = "guide rule";
+                    break;
+                case "jev":
+                    snap.adviceSource = "JEV 判断";
+                    snap.adviceSourceAscii = "JEV judgement";
+                    break;
+                case "rule_fallback":
+                    snap.adviceSource = "规则兜底";
+                    snap.adviceSourceAscii = "rule fallback";
+                    break;
+                case "pending":
+                    snap.adviceSource = "分析中";
+                    snap.adviceSourceAscii = "analysing";
+                    break;
+                default:
+                    snap.adviceSource = "";
+                    snap.adviceSourceAscii = "";
+                    break;
+            }
             snap.adviceConfidence = advice.optDouble("confidence", 0.0);
             snap.ruleOnly = snap.adviceConfidence <= 0.0;
             snap.fallback = advice.optBoolean("fallback", false);
             snap.hasAdvice = !snap.adviceLabel.isEmpty() || !snap.adviceAscii.isEmpty();
+            String currentId = state.optString("current_state_id", "");
+            String adviceId = advice.optString("state_id", "");
+            if (!currentId.isEmpty() && !adviceId.isEmpty() && !currentId.equals(adviceId)) {
+                // A late network response must never put the old hand back on
+                // the game screen. The Python advisor also checks this before
+                // publishing; the panel guards its own boundary independently.
+                snap.adviceLabel = "局面已变化，正在更新建议";
+                snap.adviceAscii = "game state changed; updating advice";
+                snap.adviceReason = "";
+                snap.adviceSource = "分析中";
+                snap.adviceSourceAscii = "analysing";
+                snap.adviceStatus = "thinking";
+                snap.hasAdvice = true;
+            }
         }
 
         if (outcome != null) {
@@ -196,7 +238,7 @@ public final class FeedClient {
             snap.hasOutcome = !snap.verdict.isEmpty();
         }
 
-        if (!snap.hasAdvice && last != null) {
+        if (advice == null && !snap.hasAdvice && last != null) {
             // Play mode (or a screen the router could not advise on): show the
             // decision headline exactly as this mod always did.
             String point = last.optString("point", "?");

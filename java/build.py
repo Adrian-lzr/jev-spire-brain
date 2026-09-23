@@ -312,7 +312,7 @@ def check_against_dashboard(javac: Path, java_tool: Path | None, url: str) -> in
         print("[check] could not compile the check tool")
         return result.returncode
     run = subprocess.run(
-        [str(java_tool), "-cp", os.pathsep.join([str(OUT_JAR), str(tools_out)]),
+        [str(java_tool), "-Dfile.encoding=UTF-8", "-cp", os.pathsep.join([str(OUT_JAR), str(tools_out)]),
          "io.github.adrianlzr.spirebrain.ParseCheck", url, "5"],
         capture_output=True, text=True, encoding="utf-8", errors="replace")
     print(run.stdout or "")

@@ -47,8 +47,9 @@ from spirebrain.jev_brain.state import (
     shop_items,
 )
 from spirebrain.cards import best_removal, best_upgrade
+from spirebrain.guide.rules import GuideAwareClient, GuideBook, GuideResult
 from spirebrain.overlay.feed import DecisionFeed, decision_event, run_state_event
-from spirebrain.tactical.combat_greedy import Card, CombatState, play_order
+from spirebrain.tactical.combat_greedy import Card, CombatState, play_order, recommend_action
 from spirebrain.tactical.hp_budget import HPBudget
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -119,6 +120,8 @@ class SpireBrainAgent:
                  log_dir: str | Path | None = None,
                  acceptance: str | None = None,
                  feed: DecisionFeed | None = None) -> None:
+        self._constructor = {"jev_backend": jev_backend, "strategy_path": strategy_path,
+                             "log_dir": log_dir, "acceptance": acceptance}
         strategy_file = Path(strategy_path) if strategy_path else ROOT / "config" / "strategy.json"
         self.strategy = json.loads(strategy_file.read_text(encoding="utf-8"))
         self.goal = self.strategy.get("goal", "")
@@ -128,8 +131,12 @@ class SpireBrainAgent:
         self.acceptance = acceptance or self.strategy.get("jev", {}).get("score_acceptance")
 
         client = get_client(jev_backend)
-        self.jev = LoggingJevClient(
+        self.guide = GuideBook()
+        logged_client = LoggingJevClient(
             client, log_dir=log_dir or ROOT / self.strategy.get("jev", {}).get("log_dir", "logs"))
+        self._guide_client = GuideAwareClient(logged_client)
+        self.jev = self._guide_client
+        self.guide_result = GuideResult()
         self.hp: HPBudget | None = None
         self.run: RunContext | None = None
         # Set when JEV picks an upgrade at a rest site; consumed by the card grid
@@ -152,6 +159,40 @@ class SpireBrainAgent:
         # the brain is thinking. None (the default) changes nothing — the feed
         # is an observability side-channel, never a dependency.
         self.feed = feed
+
+    def clone_for_advice(self) -> "SpireBrainAgent":
+        """A private router for the background model worker, with no live feed.
+
+        The polling thread owns the panel and player tracker. This clone keeps
+        the model's mutable run/grid state off that thread and prevents a late
+        answer from publishing an old HP snapshot into the game's panel.
+        """
+        return SpireBrainAgent(**self._constructor, feed=None)
+
+    def quick_advice(self, game: dict) -> dict:
+        """Immediate, model-free advice or a truthful waiting/coverage state."""
+        character = str(_get(game, "character", "class", default="")).upper()
+        if character != "IRONCLAD":
+            return {"status": "unsupported", "label": "当前角色攻略尚未覆盖",
+                    "reason": "首版攻略只验证了铁甲战士；不会套用铁甲战士专属规则。",
+                    "source_type": "unavailable"}
+        self.observe(game)
+        guide = self.guide.evaluate(game, self._budget().remaining_budget)
+        if guide.command is not None and guide.command_rule is not None:
+            rule = guide.command_rule
+            return {"status": "ready", "command": guide.command,
+                    "reason": rule.reason, "source_type": "guide_rule",
+                    "source": rule.source, "guide_rules": guide.evidence()}
+        if str(_get(game, "screen_type", default="")).upper() == COMBAT_SCREEN:
+            suggestion = recommend_action(game)
+            if suggestion is not None:
+                return {"status": "ready", "command": suggestion.command,
+                        "reason": suggestion.reason, "source_type": "rule_fallback",
+                        "source": "游戏实时战斗状态；本地战术规则",
+                        "guide_rules": guide.evidence()}
+        return {"status": "thinking", "label": "正在分析当前局面…",
+                "reason": "结合攻略规则与 JEV 判断，稍后显示当前一步。",
+                "source_type": "pending", "guide_rules": guide.evidence()}
 
     # -- lifecycle --------------------------------------------------------- #
     def observe(self, game) -> None:
@@ -198,7 +239,19 @@ class SpireBrainAgent:
     def choose_action(self, game) -> dict:
         """Return ONE CommunicationMod command for the current screen."""
         self.observe(game)
+        self.guide_result = self.guide.evaluate(game, self._budget().remaining_budget)
+        self._guide_client.active = self.guide_result.evidence()
         screen = str(_get(game, "screen_type", "screen", default="")).upper()
+        if self.guide_result.command is not None:
+            rule = self.guide_result.command_rule
+            assert rule is not None
+            decision = Decision(
+                {"REST": "rest", "CARD_REWARD": "card_reward"}.get(screen, screen.lower()),
+                "rest" if screen == "REST" else "skip", 0.0, True,
+                {"reason": rule.reason, "guide_rules": self.guide_result.evidence(),
+                 "source_type": "guide_rule", "rule_id": rule.id, "source": rule.source},
+            )
+            return self._record(decision, dict(self.guide_result.command))
         handler = {
             MAP_SCREEN: self._on_map,
             CARD_REWARD_SCREEN: self._on_card_reward,
@@ -229,6 +282,10 @@ class SpireBrainAgent:
 
     # -- shared helpers ---------------------------------------------------- #
     def _record(self, decision, command: dict) -> dict:
+        detail = dict(decision.detail)
+        detail.setdefault("guide_rules", self.guide_result.evidence())
+        detail.setdefault("source_type", "rule_fallback" if decision.used_fallback else "jev")
+        decision.detail = detail
         self.history.append({
             "point": decision.point,
             "value": decision.value,
@@ -258,18 +315,23 @@ class SpireBrainAgent:
         raw = _get(_get(game, "map", default=game), "next_nodes", default=[]) or []
         nodes = []
         for i, n in enumerate(raw):
+            if i in self.guide_result.forbidden_indices:
+                continue
             nodes.append({
                 "id": str(_get(n, "x", default=i)) + "," + str(_get(n, "y", default=0)),
                 "symbol": str(_get(n, "symbol", default="?")),
                 "y": _get(n, "y", default=None),
+                "original_index": i,
             })
         if not nodes:
-            return {"command": "choose", "choice": 0}
+            # No reachable node is known.  Inventing index zero could point at
+            # an unreachable or explicitly forbidden route.
+            return {"command": "state", "reason_source": "insufficient_state"}
         act = self._budget().act
         choices = map_choices(nodes)
         probes = path_damage_probes(nodes, act)
         d = MapRouter(self.jev, self._budget(), run=self.run).decide(choices, probes)
-        index = {str(n["id"]): i for i, n in enumerate(nodes)}
+        index = {str(n["id"]): n["original_index"] for n in nodes}
         choice = index.get(str(d.value), 0)
         return self._record(d, {"command": "choose", "choice": choice})
 
@@ -315,13 +377,14 @@ class SpireBrainAgent:
                  for i, o in enumerate(raw)]
         labels, index = _unique_labels(texts)
         if not labels:
-            return {"command": "choose", "choice": 0}
+            return {"command": "state", "reason_source": "insufficient_state"}
 
         # Options the game has greyed out are not choices; never ask about them.
         available = {label: "" for label, i in index.items()
-                     if not _get(raw[i], "disabled", default=False)}
+                     if not _get(raw[i], "disabled", default=False)
+                     and i not in self.guide_result.forbidden_indices}
         if not available:
-            return {"command": "choose", "choice": 0}
+            return {"command": "state", "reason_source": "no_safe_candidate"}
 
         d = EventChooser(self.jev, goal=self.goal, run=self.run).decide(event_text, available)
         return self._record(d, {"command": "choose", "choice": index.get(str(d.value), 0)})
@@ -595,15 +658,20 @@ class SpireBrainAgent:
         # JEV decides posture; the code decides the cards. The gate is only
         # consulted when the incoming damage threatens the act's HP budget, so a
         # routine turn costs zero JEV calls.
-        incoming = sum(e["damage"] for e in state.enemies if e["intent"] == "attack")
+        incoming = sum(max(0, e["damage"]) for e in state.enemies if "attack" in e["intent"])
         if incoming > self._budget().remaining_budget:
             gate = CombatRiskGate(self.jev, self._budget(), run=self.run)
             d = gate.decide(str(_get(combat, "encounter_name", default="a fight")), incoming)
             self._record(d, {"command": "(posture only)"})
 
-        if state.energy <= 0 or not state.hand:
-            return {"command": "end"}
-        return self._first_play(state)
+        suggestion = recommend_action(game)
+        if suggestion is not None:
+            return self._record(Decision("combat", suggestion.command, 0.0, True,
+                                         {"reason": suggestion.reason,
+                                          "source_type": "rule_fallback",
+                                          "uncertain": suggestion.uncertain}),
+                                suggestion.command)
+        return {"command": "state", "reason": "战斗状态不足，暂无法给出可靠的一步建议"}
 
     @staticmethod
     def _first_play(state: CombatState) -> dict:

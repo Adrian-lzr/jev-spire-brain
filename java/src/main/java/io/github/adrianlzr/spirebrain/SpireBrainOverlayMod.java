@@ -330,7 +330,10 @@ public class SpireBrainOverlayMod implements PostInitializeSubscriber, RenderSub
         resolvedFor = snap;
         BitmapFont big = bigFont();
 
-        rPoint = fit(FontHelper.tipBodyFont, snap.pointLabel, snap.pointAscii);
+        String pointZh = snap.pointLabel + (snap.adviceSource.isEmpty() ? "" : "  ·  " + snap.adviceSource);
+        String pointAscii = snap.pointAscii + (snap.adviceSourceAscii.isEmpty()
+                ? "" : "  ·  " + snap.adviceSourceAscii);
+        rPoint = fit(FontHelper.tipBodyFont, pointZh, pointAscii);
         rAdvice = fit(big, snap.adviceLabel, snap.adviceAscii);
         rReason = fit(FontHelper.tipBodyFont, snap.adviceReason, "");
         rActed = fit(FontHelper.tipHeaderFont, "你刚才: " + snap.actedLabel,
@@ -342,7 +345,8 @@ public class SpireBrainOverlayMod implements PostInitializeSubscriber, RenderSub
         // Orange has meant "a rule answered, not the model" in this mod since the
         // first version; the advisor keeps that meaning for the recommendation so
         // a player learns one colour vocabulary, not two.
-        rAdviceColor = (snap.ruleOnly || snap.fallback) ? Color.ORANGE : Color.SKY;
+        rAdviceColor = "thinking".equals(snap.adviceStatus) ? Color.LIGHT_GRAY
+                : (snap.ruleOnly || snap.fallback) ? Color.ORANGE : Color.SKY;
         rVerdictColor = "match".equals(snap.verdict) ? Color.TEAL
                 : "mismatch".equals(snap.verdict) ? Color.ORANGE : Color.GRAY;
     }

@@ -178,6 +178,10 @@ class Advice:
     act: int = 0
     floor: int = 0
     message: int = 0                # transport message index that produced it
+    state_id: str = ""               # exact state this recommendation belongs to
+    source_type: str = ""            # guide_rule | jev | rule_fallback
+    source: str = ""                 # human-auditable guide source, when known
+    guide_rules: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -578,6 +582,11 @@ def label_for(game, command: dict, point: str = "") -> str:
         if tidx is not None and 0 <= _int(tidx) < len(mons):
             suffix = f" → {mons[_int(tidx)]['name']}"
         return f"出「{card}」{suffix}"
+    if verb == "potion":
+        slot = _int(_get(command, "slot", "choice", default=-1), -1)
+        potions = _get(game, "potions", default=[]) or []
+        name = _name_of(potions[slot]) if 0 <= slot < len(potions) else f"第 {slot + 1} 槽药水"
+        return f"使用「{name}」"
     if verb == "end":
         return "结束回合"
     if verb == "return":

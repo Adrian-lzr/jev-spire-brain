@@ -57,7 +57,7 @@ def test_map_empty_falls_through_safely():
     with tempfile.TemporaryDirectory() as tmp:
         agent = _agent(tmp)
         cmd = agent.choose_action(_base(screen_type="MAP", map={"next_nodes": []}))
-        assert cmd == {"command": "choose", "choice": 0}
+        assert cmd == {"command": "state", "reason_source": "insufficient_state"}
 
 
 # --------------------------------------------------------------------------- #
@@ -121,7 +121,7 @@ def test_event_with_no_options_is_safe():
     with tempfile.TemporaryDirectory() as tmp:
         agent = _agent(tmp)
         cmd = agent.choose_action(_base(screen_type="EVENT", screen_state={"options": []}))
-        assert cmd == {"command": "choose", "choice": 0}
+        assert cmd == {"command": "state", "reason_source": "insufficient_state"}
 
 
 # --------------------------------------------------------------------------- #
@@ -293,9 +293,9 @@ def test_combat_routine_turn_costs_zero_jev_calls():
         cmd = agent.choose_action(_base(screen_type="COMBAT", combat=COMBAT))
         assert cmd["command"] == "play"
         assert cmd["card"] == 0                # blocks first against the attack
-        assert cmd["target"] == 0
+        assert "target" not in cmd  # non-targeted block card
         assert agent.jev.calls == 0            # drone rule: no JEV at control rate
-        assert agent.history == []
+        assert agent.history[-1]["point"] == "combat"
 
 
 def test_combat_no_energy_ends_turn():
@@ -317,8 +317,10 @@ def test_combat_consults_jev_when_damage_threatens_the_budget():
         cmd = agent.choose_action(_base(screen_type="COMBAT", current_hp=30, combat=combat))
         assert cmd["command"] in ("play", "end")
         assert agent.jev.calls == 1
-        assert agent.history[-1]["point"] == "combat_risk"
-        assert agent.history[-1]["detail"]["posture"] == "defensive"
+        assert any(entry["point"] == "combat_risk" for entry in agent.history)
+        assert agent.history[-1]["point"] == "combat"  # the actionable step
+        assert any(entry["detail"].get("posture") == "defensive"
+                   for entry in agent.history)
 
 
 # --------------------------------------------------------------------------- #

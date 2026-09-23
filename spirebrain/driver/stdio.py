@@ -56,6 +56,7 @@ from spirebrain.driver.protocol import (
     verb_of,
 )
 from spirebrain.driver.witness import PlayerTracker
+from spirebrain.driver.live_state import normalize_game_state
 
 # Names that used to live in this module and are still imported from it. Kept as
 # thin aliases rather than a shim object: a caller that wants the new home should
@@ -350,6 +351,8 @@ class StdioTransport:
             # A ready message with no state we can read: ask for one rather than
             # guess. PHASE 1 VERIFY: check whether this occurs in practice.
             return "state"
+
+        game = normalize_game_state(game)
 
         available = message.get("available_commands")
         fp = self._fingerprint(game)

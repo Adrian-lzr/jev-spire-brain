@@ -112,6 +112,11 @@ def _state_snapshot(feed: DecisionFeed) -> dict:
                 "floor": event.get("floor"),
                 "agreement": event.get("agreement"),
                 "tally": event.get("tally"),
+                "state_id": event.get("state_id"),
+                "status": event.get("status", "ready"),
+                "source_type": event.get("source_type", ""),
+                "source": event.get("source", ""),
+                "guide_rules": event.get("guide_rules") or [],
             }
         if last_outcome is None and kind == "outcome":
             last_outcome = {
@@ -143,7 +148,8 @@ def _state_snapshot(feed: DecisionFeed) -> dict:
             break
     return {"last_decision": last_decision, "last_advice": last_advice,
             "last_outcome": last_outcome, "run_state": run_state,
-            "agent_state": agent_state}
+            "agent_state": agent_state,
+            "current_state_id": last_advice.get("state_id") if last_advice else None}
 
 
 class PortInUse(RuntimeError):
