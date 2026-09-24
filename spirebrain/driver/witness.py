@@ -198,6 +198,7 @@ class Advice:
     brain_latency_ms: int = 0
     brain_request_id: str = ""
     brain_error: str = ""
+    status: str = "ready"             # fast_advice | model_ready | unavailable
 
 
 @dataclass

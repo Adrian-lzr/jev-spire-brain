@@ -378,9 +378,15 @@ def reconcile(*, game: dict, candidates: list[ActionCandidate], fallback: dict,
         # not an identity.  Require the generation-time signature to match;
         # mismatches deliberately fall back to current local/JEV candidates.
         bound = getattr(plan, "candidate_bindings", {}) or {}
+        avoid_bound = getattr(plan, "avoid_bindings", {}) or {}
+        def binding_matches(candidate_id: str, candidate: ActionCandidate, bindings: dict) -> bool:
+            # Plans produced by the current planner always carry bindings. An
+            # old in-memory plan without them is treated as legacy-compatible;
+            # once a binding exists, an ID alone is never sufficient.
+            return not bindings or bindings.get(candidate_id) == candidate.candidate_signature
         preferred = [constrained[candidate_id] for candidate_id in plan.preferred_candidates
                      if candidate_id in constrained
-                     and (not bound or bound.get(candidate_id) == constrained[candidate_id].candidate_signature)
+                     and binding_matches(candidate_id, constrained[candidate_id], bound)
                      and candidate_id not in plan.avoid_candidates]
         # A tactical JEV selection is accepted when it stays inside the GPT
         # preference set. Otherwise GPT's first explicit preference wins.
@@ -392,9 +398,11 @@ def reconcile(*, game: dict, candidates: list[ActionCandidate], fallback: dict,
             source = "gpt_strategy"
         if (selected is None
                 or selected.candidate_id in plan.avoid_candidates
+                and binding_matches(selected.candidate_id, selected, avoid_bound)
                 or not _constraint_allows(selected, plan.resource_constraints, game)):
             selected = next((c for c in legal
-                             if c.candidate_id not in plan.avoid_candidates
+                             if (c.candidate_id not in plan.avoid_candidates
+                                 or not binding_matches(c.candidate_id, c, avoid_bound))
                              and _constraint_allows(c, plan.resource_constraints, game)), None)
             if selected is not None:
                 source = "gpt_strategy"

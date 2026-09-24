@@ -20,6 +20,7 @@ command. Two rules keep that honest:
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 from spirebrain.jev_brain.client import ChoiceSpec, NOUL_UNCERTAIN_BAND, get_client
@@ -215,6 +216,9 @@ class SpireBrainAgent:
         self._shop_decided_on_floor: int | None = None
         self._shop_state_signature: tuple | None = None
         self.history: list[dict] = []
+        self._decision_sequence = 0
+        self._decision_started_at = 0.0
+        self._traced_requests: set[str] = set()
         # Phase 1.5, the interaction layer: an optional live feed of everything
         # the brain is thinking. None (the default) changes nothing — the feed
         # is an observability side-channel, never a dependency.
@@ -337,6 +341,8 @@ class SpireBrainAgent:
 
     def choose_action(self, game) -> dict:
         """Return ONE CommunicationMod command for the current screen."""
+        self._decision_sequence += 1
+        self._decision_started_at = time.monotonic()
         self.snapshot = GameSnapshot.from_communication(game)
         game = self.snapshot.payload
         self.observe(game)
@@ -439,8 +445,12 @@ class SpireBrainAgent:
         # check is intentionally redundant: guide rules, stale plans, and
         # legacy handlers must never put an illegal index or target on the wire.
         verb = str(command.get("command", "")).lower()
+        legal_result = None
+        legality_reason = ""
         if (self._active_game is not None and verb not in {"state", "wait", "(posture only)"}):
             legal, why_not = check_action(self._active_game, command)
+            legal_result = bool(legal)
+            legality_reason = why_not if not legal else ""
             if not legal:
                 detail["source_type"] = "rule_constraint"
                 detail["constraint_reason"] = why_not
@@ -450,6 +460,27 @@ class SpireBrainAgent:
         detail.setdefault("guide_rules", self.guide_result.evidence())
         detail.setdefault("source_type", "rule_fallback" if decision.used_fallback else "jev")
         decision.detail = detail
+        state_for_trace = self.snapshot.state_id if self.snapshot else self._observed_state_id
+        run_id = self.strategic.memory.run_id
+        decision_id = f"{run_id}:{state_for_trace[:16]}:{self._decision_sequence}"
+        request_id = str(detail.get("brain_request_id", "") or "")
+        if request_id and request_id not in self._traced_requests:
+            self._traced_requests.add(request_id)
+            response = self._active_brain_response
+            usage = getattr(response, "usage", {}) or {}
+            self.trace.record("provider_request", {
+                "run_id": run_id,
+                "state_id": state_for_trace,
+                "decision_id": decision_id,
+                "request_id": request_id,
+                "plan_id": detail.get("plan_id", ""),
+                "brain_backend": self.strategic.backend_name,
+                "request_latency_ms": int(detail.get("brain_latency_ms", 0) or 0),
+                "cost_usd": usage.get("cost_usd", usage.get("cost")),
+                "fallback": bool(detail.get("brain_error")),
+                "fallback_reason": detail.get("brain_error", "") or None,
+                "timeout": "timeout" in str(detail.get("brain_error", "")).lower(),
+            })
         self.history.append({
             "point": decision.point,
             "value": decision.value,
@@ -472,8 +503,10 @@ class SpireBrainAgent:
         rule_ids = [str(rule.get("id")) for rule in (detail.get("guide_rules") or [])
                     if isinstance(rule, dict) and rule.get("id")]
         self.trace.record("decision", {
-            "run_id": self.strategic.memory.run_id,
-            "state_id": self.snapshot.state_id if self.snapshot else self._observed_state_id,
+            "run_id": run_id,
+            "state_id": state_for_trace,
+            "decision_id": decision_id,
+            "request_id": request_id or None,
             "plan_id": detail.get("plan_id", ""),
             "screen": str(_get(self._active_game, "screen_type", default="")).upper(),
             "point": decision.point,
@@ -484,6 +517,8 @@ class SpireBrainAgent:
             "candidates": [candidate.to_dict() for candidate in self._active_candidates],
             "filtered_candidates": self._candidate_diagnostics,
             "selected_candidate_id": detail.get("candidate_id", ""),
+            "candidate_signature": next((c.get("candidate_signature") for c in detail.get("candidates", [])
+                                          if isinstance(c, dict) and c.get("candidate_id") == detail.get("candidate_id")), None),
             "command": command,
             "alternative": {
                 "command": detail.get("alternative_command"),
@@ -493,7 +528,13 @@ class SpireBrainAgent:
             "confidence": float(decision.confidence or 0.0),
             "jev_confidence": float(detail.get("jev_confidence", 0.0) or 0.0),
             "latency_ms": int(detail.get("brain_latency_ms", 0) or 0),
+            "request_latency_ms": int(detail.get("brain_latency_ms", 0) or 0),
+            "decision_latency_ms": int((time.monotonic() - self._decision_started_at) * 1000)
+            if self._decision_started_at else None,
             "fallback": bool(decision.used_fallback or detail.get("fallback")),
+            "fallback_reason": detail.get("brain_error") or detail.get("constraint_reason") or None,
+            "legal": legal_result,
+            "legality_reason": legality_reason or None,
             "uncertain": bool(detail.get("uncertain", False)),
             "act": _as_int(_get(self._active_game, "act", default=0)),
             "floor": _as_int(_get(self._active_game, "floor", "floor_num", default=0)),
@@ -976,6 +1017,7 @@ class SpireBrainAgent:
         # JEV decides posture; the code decides the cards. The gate is only
         # consulted when the incoming damage threatens the act's HP budget, so a
         # routine turn costs zero JEV calls.
+        suggestion = recommend_action(game)
         incoming = sum(max(0, e["damage"]) for e in state.enemies if "attack" in e["intent"])
         defensive_posture = False
         if incoming > self._budget().remaining_budget:
@@ -984,20 +1026,29 @@ class SpireBrainAgent:
             self._record(d, {"command": "(posture only)"})
             defensive_posture = str(d.detail.get("posture", "")) == "defensive"
             if defensive_posture:
-                # A risk gate is a hard constraint, not merely a dashboard
-                # annotation.  Remove attacks from the candidate set before
-                # the strategic plan/JEV reconciliation can see them.
+                # Defensive posture is a risk preference, not a blanket ban on
+                # attacks. Preserve a locally verified lethal action because it
+                # removes the incoming threat completely; only unverified
+                # attacks are excluded from the defensive candidate set.
+                lethal_command = (suggestion.command if suggestion is not None
+                                  and "击败" in suggestion.reason else None)
                 safe = [candidate for candidate in self._active_candidates
                         if candidate.kind in {"end", "potion"}
-                        or "block" in candidate.goal_tags]
+                        or "block" in candidate.goal_tags
+                        or (lethal_command is not None and candidate.command == lethal_command)]
                 if safe:
                     self._active_candidates = safe
 
-        suggestion = recommend_action(game)
         if suggestion is not None:
             if defensive_posture and str(suggestion.command.get("command", "")).lower() == "play":
-                safe = next((candidate for candidate in self._active_candidates
-                             if "block" in candidate.goal_tags), None)
+                # A verified kill remains preferable to a defensive fallback.
+                if "击败" in suggestion.reason and any(
+                        candidate.command == suggestion.command for candidate in self._active_candidates):
+                    safe = next(candidate for candidate in self._active_candidates
+                                if candidate.command == suggestion.command)
+                else:
+                    safe = next((candidate for candidate in self._active_candidates
+                                 if "block" in candidate.goal_tags), None)
                 safe = safe or next((candidate for candidate in self._active_candidates
                                      if candidate.kind == "potion"), None)
                 safe = safe or next((candidate for candidate in self._active_candidates

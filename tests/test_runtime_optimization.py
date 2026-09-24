@@ -56,3 +56,56 @@ def test_jev_auth_failure_is_fast_and_does_not_retry():
         raise AssertionError("expected auth error")
     assert client.calls_seen == 1
     assert client.metrics["auth_errors"] == 1
+
+
+def test_defensive_posture_keeps_verified_lethal_attack(monkeypatch, tmp_path):
+    from spirebrain.driver import agent as agent_module
+    from spirebrain.jev_brain.decisions import Decision
+    from spirebrain.driver.agent import SpireBrainAgent
+
+    class DefensiveGate:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def decide(self, *args, **kwargs):
+            return Decision("combat_risk", "defensive", 1.0, False,
+                             {"posture": "defensive", "reason": "test"})
+
+    monkeypatch.setattr(agent_module, "CombatRiskGate", DefensiveGate)
+    state = {
+        "character": "IRONCLAD", "act": 1, "floor": 2, "current_hp": 10,
+        "max_hp": 80, "screen_type": "COMBAT",
+        "available_commands": ["play", "end", "wait", "state"],
+        "combat": {
+            "player": {"current_hp": 10, "energy": 1, "block": 0},
+            "hand": [{"id": "Strike_R", "type": "ATTACK", "cost": 1,
+                      "damage": 20, "has_target": True}],
+            "monsters": [{"id": "JawWorm", "current_hp": 20,
+                          "intent": "ATTACK", "damage": 20}],
+        },
+    }
+    agent = SpireBrainAgent(jev_backend="mock", brain_backend="none", log_dir=tmp_path)
+    command = agent.choose_action(state)
+    assert command == {"command": "play", "card": 0, "target": 0}
+
+
+def test_trace_contract_records_decision_identity_and_legality(tmp_path):
+    from spirebrain.driver.agent import SpireBrainAgent
+    state = {
+        "character": "IRONCLAD", "screen_type": "REST", "current_hp": 20,
+        "max_hp": 80, "available_commands": ["choose", "wait", "state"],
+        "screen_state": {"rest_options": ["smith", "rest"]},
+    }
+    agent = SpireBrainAgent(jev_backend="mock", brain_backend="none", log_dir=tmp_path)
+    agent.choose_action(state)
+    record = __import__("json").loads((tmp_path / "decision_trace.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    assert record["event_type"] == "decision"
+    assert record["decision_id"]
+    assert record["state_id"]
+    assert "legal" in record
+    assert "decision_latency_ms" in record
+
+
+def test_metrics_missing_input_is_not_success(tmp_path):
+    from spirebrain.analysis.metrics import main
+    assert main(["--input", str(tmp_path / "missing.jsonl")]) == 2

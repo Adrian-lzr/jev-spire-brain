@@ -103,6 +103,7 @@ class StrategicPlan:
     # Runtime-only map.  Models never author this field; the local planner binds
     # each preference to the candidate signature present at generation time.
     candidate_bindings: dict[str, str] = field(default_factory=dict, repr=False)
+    avoid_bindings: dict[str, str] = field(default_factory=dict, repr=False)
 
     @classmethod
     def from_dict(cls, data: dict, *, state_id: str, run_id: str,
@@ -221,9 +222,15 @@ class StrategicPlan:
         }
 
     def bind_candidates(self, candidates: list[ActionCandidate]) -> None:
+        bindings = {candidate.candidate_id: candidate.candidate_signature
+                    for candidate in candidates if candidate.legal}
         self.candidate_bindings = {
-            candidate.candidate_id: candidate.candidate_signature
-            for candidate in candidates if candidate.legal
+            candidate_id: bindings[candidate_id]
+            for candidate_id in self.preferred_candidates if candidate_id in bindings
+        }
+        self.avoid_bindings = {
+            candidate_id: bindings[candidate_id]
+            for candidate_id in self.avoid_candidates if candidate_id in bindings
         }
 
 

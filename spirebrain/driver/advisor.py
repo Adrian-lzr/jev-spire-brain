@@ -349,6 +349,8 @@ class AdviseSession:
             brain_latency_ms=int(detail.get("brain_latency_ms", 0) or 0),
             brain_request_id=str(detail.get("brain_request_id", "") or ""),
             brain_error=str(detail.get("brain_error", "") or ""),
+            status=("fast_advice" if provisional or source_type in {"guide_rule", "rule_fallback"}
+                    else "model_ready"),
         )
         self.tracker.remember_state(game)
         self.tracker.note(advice)
@@ -431,7 +433,8 @@ class AdviseSession:
                           "brain_backend": advice.brain_backend,
                           "brain_latency_ms": advice.brain_latency_ms,
                           "brain_request_id": advice.brain_request_id,
-                          "brain_error": advice.brain_error}
+                          "brain_error": advice.brain_error,
+                          "status": advice.status}
         self._advice_log(event)
         self._trace("advice", {
             "run_id": self._run_id(), "state_id": advice.state_id,
@@ -448,6 +451,7 @@ class AdviseSession:
             "reason": advice.reason, "confidence": advice.confidence,
             "jev_confidence": advice.jev_confidence,
             "latency_ms": advice.brain_latency_ms,
+            "request_latency_ms": advice.brain_latency_ms,
             "fallback": advice.fallback, "uncertain": advice.uncertain,
             "act": advice.act, "floor": advice.floor,
         })

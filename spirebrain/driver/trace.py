@@ -14,11 +14,14 @@ _SECRET = re.compile(
     r"(?i)(authorization\s*[:=]\s*bearer\s+|bearer\s+|api[_ -]?key\s*[:=]\s*)\S+"
 )
 _FIELDS = {
-    "run_id", "state_id", "plan_id", "screen", "point", "config_id",
+    "run_id", "state_id", "decision_id", "request_id", "plan_id", "screen", "point", "config_id",
     "brain_backend", "jev_backend", "source_type", "rule_ids", "candidates",
-    "filtered_candidates", "selected_candidate_id", "command", "alternative",
-    "reason", "confidence", "jev_confidence", "latency_ms", "fallback",
-    "uncertain", "player_action", "verdict", "result", "act", "floor",
+    "filtered_candidates", "selected_candidate_id", "candidate_signature", "command", "alternative",
+    "reason", "confidence", "jev_confidence", "latency_ms", "request_latency_ms",
+    "decision_latency_ms", "first_advice_latency_ms", "publish_latency_ms", "fallback",
+    "fallback_reason", "legal", "legality_reason", "uncertain", "player_action", "verdict",
+    "result", "act", "floor", "cost_usd", "timeout", "http_status", "expired_result",
+    "expired_result_count", "fixture_type", "code_version",
 }
 
 
@@ -43,11 +46,14 @@ class DecisionTrace:
     def __init__(self, path: str | Path, config_id: str = "") -> None:
         self.path = Path(path)
         self.config_id = str(config_id)
+        self._sequence = 0
 
     def record(self, event_type: str, fields: dict) -> bool:
+        self._sequence += 1
         record = {
             "schema_version": 1,
             "ts": time.time(),
+            "trace_sequence": self._sequence,
             "event_type": str(event_type),
             "config_id": self.config_id,
         }
