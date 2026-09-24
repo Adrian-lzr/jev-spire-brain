@@ -52,11 +52,13 @@ own mod settings directory.
 
 from __future__ import annotations
 
-import os
 import shutil
 import sys
 import time
 from pathlib import Path
+from typing import Mapping
+
+from spirebrain.environment import EnvironmentAdapter, host_environment
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -208,16 +210,15 @@ def build_config(command: str, *, run_at_game_start: bool = DEFAULT_RUN_AT_GAME_
     return "\n".join(lines)
 
 
-def config_path() -> Path:
+def config_path(environment: EnvironmentAdapter | Mapping[str, str] | None = None) -> Path:
     """`ConfigUtils.CONFIG_DIR` + mod name + config name, per ModTheSpire source."""
-    return config_dir(MOD_NAME) / CONFIG_NAME
+    return config_dir(MOD_NAME, environment) / CONFIG_NAME
 
 
-def config_dir(mod_name: str) -> Path:
-    local = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
-    if not local:
-        raise RuntimeError("%LOCALAPPDATA% is not set; cannot locate ModTheSpire's config dir")
-    return Path(local) / "ModTheSpire" / mod_name
+def config_dir(mod_name: str,
+               environment: EnvironmentAdapter | Mapping[str, str] | None = None) -> Path:
+    """Return a mod config directory using an injectable host environment."""
+    return host_environment(environment).mod_config_dir(mod_name)
 
 
 # Every mod in the CommunicationMod family keeps its OWN config file, because
@@ -234,16 +235,16 @@ def config_dir(mod_name: str) -> Path:
 FAMILY = ("CommunicationMod", "CommunicationModCJK")
 
 
-def family_config_paths() -> list[Path]:
+def family_config_paths(environment: EnvironmentAdapter | Mapping[str, str] | None = None) -> list[Path]:
     """Every config file this project should keep in sync, official one first.
 
     The official path is always included (it is created on demand). A fork's path
     is included when its directory already exists — that directory is how a mod
     that has run at least once shows up, so it means "this fork is in use here".
     """
-    paths = [config_dir(FAMILY[0]) / CONFIG_NAME]
+    paths = [config_dir(FAMILY[0], environment) / CONFIG_NAME]
     for name in FAMILY[1:]:
-        directory = config_dir(name)
+        directory = config_dir(name, environment)
         if directory.exists():
             paths.append(directory / CONFIG_NAME)
     return paths

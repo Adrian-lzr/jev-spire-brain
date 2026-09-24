@@ -16,10 +16,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install --upgrade pytest
-      - run: python -m pytest -q
-      - run: python -m compileall -q spirebrain start.py run_agent.py
-      - run: python tools/check_contracts.py
-      # A clean checkout has no runtime logs.  Use the committed synthetic
-      # trace to exercise the metrics contract without pretending it is a
-      # real-game evaluation.
-      - run: python -m spirebrain.analysis.metrics --input tests/fixtures/metrics/decision_trace.jsonl
+      # This runner executes tests, compilation, contracts, metrics and replay
+      # independently, so a failure in one check cannot hide the others.
+      # It uses only committed synthetic data and never calls a provider.
+      - run: python tools/verify_offline.py

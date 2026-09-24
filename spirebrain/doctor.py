@@ -24,6 +24,9 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import Mapping
+
+from spirebrain.environment import EnvironmentAdapter, host_environment
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -58,15 +61,17 @@ class Report:
 # --------------------------------------------------------------------------- #
 # Steam: the ledger and the content folder
 # --------------------------------------------------------------------------- #
-def find_steam_libraries() -> list[Path]:
+def find_steam_libraries(environment: EnvironmentAdapter | Mapping[str, str] | None = None) -> list[Path]:
     """Every Steam library root we can find, from the vdf files that list them."""
     roots: list[Path] = []
-    candidates = []
-    for drive in ("C", "D", "E", "F"):
-        for base in (f"{drive}:\\Program Files (x86)\\Steam", f"{drive}:\\Steam",
-                     f"{drive}:\\SteamLibrary", f"{drive}:\\Steam\\SteamApps",
-                     f"{drive}:\\LeStoreDownload\\steam"):
-            candidates.append(Path(base))
+    env = host_environment(environment)
+    candidates = list(env.steam_roots)
+    if not candidates:
+        for drive in ("C", "D", "E", "F"):
+            for base in (f"{drive}:\\Program Files (x86)\\Steam", f"{drive}:\\Steam",
+                         f"{drive}:\\SteamLibrary", f"{drive}:\\Steam\\SteamApps",
+                         f"{drive}:\\LeStoreDownload\\steam"):
+                candidates.append(Path(base))
     for cand in candidates:
         for vdf in (cand / "config" / "libraryfolders.vdf", cand / "steamapps" / "libraryfolders.vdf"):
             if vdf.exists():
@@ -136,12 +141,12 @@ def check_repo(rep: Report) -> None:
         rep.add(PASS, "Repository files", f"{len(needed)} key files present")
 
 
-def check_game(rep: Report) -> tuple[Path | None, list[Path]]:
+def check_game(rep: Report, environment: EnvironmentAdapter | Mapping[str, str] | None = None) -> tuple[Path | None, list[Path]]:
     """Returns the game directory and whatever jars are in its mods\\ folder."""
     try:
         from spirebrain import gamedata
 
-        game = gamedata.find_game_dir()
+        game = gamedata.find_game_dir(environment)
     except Exception as exc:  # noqa: BLE001
         rep.add(FAIL, "Game install", f"gamedata could not load: {exc}", "")
         return None, []
@@ -170,7 +175,8 @@ def check_game(rep: Report) -> tuple[Path | None, list[Path]]:
 
 
 def check_workshop(rep: Report, appid: str = "646570",
-                   local_jar: bool = False) -> Path | None:
+                   local_jar: bool = False,
+                   environment: EnvironmentAdapter | Mapping[str, str] | None = None) -> Path | None:
     """The subscription-vs-download distinction, which is the whole point.
 
     `local_jar` says a CommunicationMod jar is already installed by other means
@@ -178,7 +184,7 @@ def check_workshop(rep: Report, appid: str = "646570",
     not a blocker, and reporting it as one sends the user off to fix a
     non-problem — which is what this check did until 2026-09-21.
     """
-    libraries = find_steam_libraries()
+    libraries = find_steam_libraries(environment)
     if not libraries:
         rep.add(WARN, "Steam libraries", "no libraryfolders.vdf found",
                 "Steam may be installed in an unusual place")
@@ -234,7 +240,8 @@ def check_workshop(rep: Report, appid: str = "646570",
     return found_dir
 
 
-def find_communicationmod(mods_jars: list[Path]) -> list[Path]:
+def find_communicationmod(mods_jars: list[Path],
+                          environment: EnvironmentAdapter | Mapping[str, str] | None = None) -> list[Path]:
     """Every CommunicationMod jar we can find, best candidate first.
 
     Order matters for what the report *says*: the game's own `mods\\` folder is the
@@ -244,17 +251,22 @@ def find_communicationmod(mods_jars: list[Path]) -> list[Path]:
     the installation).
     """
     found: list[Path] = [p for p in mods_jars if "CommunicationMod" in p.name]
-    for drive in ("C:", "D:", "E:", "F:"):
-        content = Path(drive + "\\") / "LeStoreDownload" / "steam" / "steamapps" / "workshop" \
-            / "content" / "646570" / "2131373661"
-        try:
-            found.extend(sorted(content.glob("CommunicationMod*.jar")))
-        except OSError:
-            pass
+    env = host_environment(environment)
+    roots = list(env.steam_roots) or [Path(f"{drive}:\\") for drive in ("C", "D", "E", "F")]
+    for root in roots:
+        content_roots = (
+            root / "steamapps" / "workshop" / "content" / "646570" / "2131373661",
+            root / "LeStoreDownload" / "steam" / "steamapps" / "workshop" /
+            "content" / "646570" / "2131373661",
+        )
+        for content in content_roots:
+            try:
+                found.extend(sorted(content.glob("CommunicationMod*.jar")))
+            except OSError:
+                pass
     if found:
         return found
-    for drive in ("C:", "D:", "E:", "F:"):
-        base = Path(drive + "\\")
+    for base in roots:
         if not base.exists():
             continue
         try:
@@ -282,7 +294,8 @@ def check_communicationmod(rep: Report, found: list[Path]) -> bool:
     return True
 
 
-def check_mod_config(rep: Report) -> None:
+def check_mod_config(rep: Report,
+                     environment: EnvironmentAdapter | Mapping[str, str] | None = None) -> None:
     """Judge every CommunicationMod-family config, not just the official one.
 
     `SpireConfig` is keyed on the mod name, so the official mod reads
@@ -298,7 +311,7 @@ def check_mod_config(rep: Report) -> None:
         rep.add(WARN, "CommunicationMod configs", f"cannot inspect: {exc}")
         return
 
-    existing = [p for p in family_config_paths() if p.exists()]
+    existing = [p for p in family_config_paths(environment) if p.exists()]
     if not existing:
         rep.add(WARN, "CommunicationMod config", "not created yet",
                 "the mod creates it on its first load. Either start the game once with"
@@ -309,7 +322,7 @@ def check_mod_config(rep: Report) -> None:
     # Which config is the LIVE one is decided by which mod is ticked, and
     # mod_lists.json knows. Without it, every existing config has to be treated as
     # possibly-live, which is why an empty one is a FAIL rather than a note.
-    ticked = enabled_mod_jars() or []
+    ticked = enabled_mod_jars(environment) or []
     required = None
     for jar in ticked:
         if jar.lower().startswith("communicationmod"):
@@ -359,7 +372,7 @@ def check_mod_config(rep: Report) -> None:
 COMMUNICATIONMOD_FAMILY = ("CommunicationMod", "CommunicationModCJK")
 
 
-def enabled_mod_jars() -> list[str] | None:
+def enabled_mod_jars(environment: EnvironmentAdapter | Mapping[str, str] | None = None) -> list[str] | None:
     """The mod jars ModTheSpire has TICKED, from its own saved list — or None.
 
     `%LOCALAPPDATA%\\ModTheSpire\\mod_lists.json` holds the selection the player
@@ -372,10 +385,10 @@ def enabled_mod_jars() -> list[str] | None:
     moved), in which case the caller falls back to judging what is installed and
     says so rather than pretending to know.
     """
-    local = os.environ.get("LOCALAPPDATA")
-    if not local:
+    local = host_environment(environment).local_appdata
+    if local is None:
         return None
-    path = Path(local) / "ModTheSpire" / "mod_lists.json"
+    path = local / "ModTheSpire" / "mod_lists.json"
     if not path.exists():
         return None
     try:
@@ -406,7 +419,8 @@ def _declared_modid(jar: Path) -> str | None:
 
 
 def check_single_communicationmod(rep: Report, game: Path | None,
-                                  mods_jars: list[Path]) -> None:
+                                  mods_jars: list[Path],
+                                  environment: EnvironmentAdapter | Mapping[str, str] | None = None) -> None:
     """Exactly ONE CommunicationMod may be installed: it spawns the agent process.
 
     Measured 2026-09-22 on this machine, and nothing in the game reports it: with
@@ -429,7 +443,7 @@ def check_single_communicationmod(rep: Report, game: Path | None,
     # Ask ModTheSpire what it is actually going to LOAD before judging what is on
     # disk. "Two jars installed" is not a problem; "two mods ticked" is, and only
     # the second one costs a player anything.
-    ticked = enabled_mod_jars()
+    ticked = enabled_mod_jars(environment)
     if ticked is not None:
         family = [j for j in ticked if j.lower().startswith("communicationmod")]
         overlay = [j for j in ticked if "spirebrain" in j.lower()]
@@ -462,7 +476,7 @@ def check_single_communicationmod(rep: Report, game: Path | None,
         roots.append(game / "mods")
     # ModTheSpire auto-loads Workshop items too, so a second CommunicationMod
     # living there is just as active as one copied into mods\.
-    for library in find_steam_libraries():
+    for library in find_steam_libraries(environment):
         content = workshop_content_dir(library, "646570")
         if content.exists():
             roots.extend(d for d in sorted(content.iterdir()) if d.is_dir())
@@ -540,11 +554,12 @@ def check_overlay_jar(rep: Report, game: Path | None) -> None:
                 " `python java/build.py --install`")
 
 
-def check_gamedata(rep: Report) -> None:
+def check_gamedata(rep: Report,
+                   environment: EnvironmentAdapter | Mapping[str, str] | None = None) -> None:
     try:
         from spirebrain import gamedata
 
-        gd = gamedata.get()
+        gd = gamedata.get(environment=environment)
         if not gd.loaded:
             rep.add(WARN, "Game data", "not loaded — card text will be missing",
                     "set STS_GAME_DIR, or ignore: the agent degrades to names only")
@@ -651,22 +666,23 @@ def main(argv: list[str]) -> int:
             stream.reconfigure(encoding="utf-8", errors="replace")
 
     live = "--live" in argv
+    environment = host_environment()
     print(f"Jev Spire Brain — environment check (repo: {ROOT})")
     print(f"live JEV probe: {'on' if live else 'off (pass --live to include)'}\n")
 
     rep = Report()
     check_python(rep)
     check_repo(rep)
-    game, mods_jars = check_game(rep)
+    game, mods_jars = check_game(rep, environment)
     # Find the jar before judging the Workshop, so a locally installed mod is not
     # reported as a missing mandatory download.
-    jars = find_communicationmod(mods_jars)
-    content = check_workshop(rep, local_jar=bool(jars))
+    jars = find_communicationmod(mods_jars, environment)
+    content = check_workshop(rep, local_jar=bool(jars), environment=environment)
     have_cm = check_communicationmod(rep, jars)
-    check_single_communicationmod(rep, game, mods_jars)
+    check_single_communicationmod(rep, game, mods_jars, environment)
     check_overlay_jar(rep, game)
-    check_mod_config(rep)
-    check_gamedata(rep)
+    check_mod_config(rep, environment)
+    check_gamedata(rep, environment)
     check_brain_config(rep)
     check_backend(rep, live)
 

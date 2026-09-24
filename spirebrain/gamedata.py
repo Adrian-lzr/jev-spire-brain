@@ -43,11 +43,13 @@ state snapshot, which is exactly what CommunicationMod provides.
 from __future__ import annotations
 
 import json
-import os
 import re
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Mapping
+
+from spirebrain.environment import EnvironmentAdapter, host_environment
 
 ROOT = Path(__file__).resolve().parents[2]
 CACHE_DIR = ROOT / ".cache" / "gamedata"
@@ -80,12 +82,18 @@ CANDIDATES = [
 ]
 
 
-def find_game_dir() -> Path | None:
-    """$STS_GAME_DIR first, then the usual Steam locations."""
-    env = os.environ.get("STS_GAME_DIR")
-    if env and (Path(env) / JAR_NAME).exists():
-        return Path(env)
-    for cand in CANDIDATES:
+def find_game_dir(environment: EnvironmentAdapter | Mapping[str, str] | None = None,
+                  candidates: list[str | Path] | None = None) -> Path | None:
+    """Find the game without requiring a particular developer machine.
+
+    ``environment`` and ``candidates`` are injectable for replay/CI tests.  The
+    default remains the historic ``STS_GAME_DIR`` plus known Steam locations.
+    """
+    env = host_environment(environment)
+    explicit = env.game_dir
+    if explicit and (explicit / JAR_NAME).exists():
+        return explicit
+    for cand in candidates if candidates is not None else CANDIDATES:
         p = Path(cand)
         if (p / JAR_NAME).exists():
             return p
@@ -136,7 +144,10 @@ class GameData:
 
     # -- loading ----------------------------------------------------------- #
     @classmethod
-    def load(cls, game_dir: str | Path | None = None, use_cache: bool = True) -> GameData:
+    def load(cls, game_dir: str | Path | None = None, use_cache: bool = True,
+             *, environment: EnvironmentAdapter | Mapping[str, str] | None = None,
+             candidates: list[str | Path] | None = None,
+             cache_dir: str | Path | None = None) -> GameData:
         gd = cls()
         jar = None
         if game_dir is not None:
@@ -144,7 +155,7 @@ class GameData:
             if cand.exists():
                 jar = cand
         if jar is None:
-            found = find_game_dir()
+            found = find_game_dir(environment, candidates=candidates)
             if found is None:
                 return gd  # empty, not an error: everything degrades gracefully
             jar = found / JAR_NAME
@@ -152,12 +163,13 @@ class GameData:
         # Cache key: jar size + mtime. Cheap to compute, invalidates on patch.
         stat = jar.stat()
         key = f"{stat.st_size}-{int(stat.st_mtime)}"
-        meta = CACHE_DIR / "meta.json"
+        cache_root = Path(cache_dir) if cache_dir is not None else CACHE_DIR
+        meta = cache_root / "meta.json"
         if use_cache and meta.exists():
             try:
                 if json.loads(meta.read_text(encoding="utf-8")).get("key") == key:
                     for name in WANTED:
-                        f = CACHE_DIR / f"{name}.json"
+                        f = cache_root / f"{name}.json"
                         if f.exists():
                             gd.tables[name] = json.loads(f.read_text(encoding="utf-8"))
                     gd.source = f"{jar} (cached)"
@@ -181,9 +193,9 @@ class GameData:
         gd.loaded = True
         if use_cache:
             try:
-                CACHE_DIR.mkdir(parents=True, exist_ok=True)
+                cache_root.mkdir(parents=True, exist_ok=True)
                 for name, table in gd.tables.items():
-                    (CACHE_DIR / f"{name}.json").write_text(
+                    (cache_root / f"{name}.json").write_text(
                         json.dumps(table, ensure_ascii=False), encoding="utf-8")
                 meta.write_text(json.dumps({"key": key, "jar": str(jar)}), encoding="utf-8")
             except OSError:
@@ -343,11 +355,13 @@ class GameData:
 _INSTANCE: GameData | None = None
 
 
-def get(reload: bool = False) -> GameData:
+def get(reload: bool = False, *, environment: EnvironmentAdapter | Mapping[str, str] | None = None,
+        game_dir: str | Path | None = None, cache_dir: str | Path | None = None) -> GameData:
     """Process-wide lazy singleton. Safe because the data is read-only."""
     global _INSTANCE
     if _INSTANCE is None or reload:
-        _INSTANCE = GameData.load()
+        _INSTANCE = GameData.load(game_dir=game_dir, environment=environment,
+                                  cache_dir=cache_dir)
     return _INSTANCE
 
 
