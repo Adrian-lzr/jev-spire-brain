@@ -76,6 +76,19 @@ JEV 是战术层：只能在本地已确认合法、且符合战略约束的候�
 - 旧的 JEV-only 后端仍可通过 `brain.backend=jev` 或启动参数使用。
 - CommunicationMod 原始字典、stdio 命令协议和旧测试入口保持兼容。
 - 所有模型结果都必须匹配当前状态代际；过期异步结果直接丢弃。
+
+## 8. 离线回放与指标
+
+`python -m spirebrain.analysis.replay --input tests/fixtures/replay` 将合成
+CommunicationMod 消息送入真实 stdio/advisor 管道，强制使用本地 mock，检查
+`advise` 是否只输出 `wait`/`state`，并报告建议与规则回退数量。fixture 明确标记
+为 `synthetic`，不能当作真实玩家记录。
+
+`python -m spirebrain.analysis.metrics --input <trace.jsonl>` 只读取 JSONL，输出
+场景覆盖、合法率、模型请求数、回退率及生成/发布延迟 p50/p95。缺失输入会返回
+非零退出码；没有真实 `win/loss/death` 标签时结果为 `unknown`，不会从采纳率、
+模拟伤害或合成 HP 推断胜率。决策事件使用 `decision_id`，模型请求使用
+`request_id`，两者不可混计。
 # Runtime decision boundaries
 
 The CommunicationMod payload is normalized into a semantic state projection in

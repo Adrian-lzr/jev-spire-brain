@@ -328,3 +328,13 @@ latency p50/p95, provider calls, fallback reasons and `unobserved` outcomes.
 Use `--json path` to save the report. Empty or incomplete traces report
 `unknown` for real outcomes. Replay/adoption counts, synthetic damage and HP
 simulation are not win-rate evidence.
+
+The command intentionally exits with status 2 when the requested input does
+not exist. A clean checkout therefore cannot be reported as a successful
+zero-sample evaluation. CI uses the committed
+`tests/fixtures/metrics/decision_trace.jsonl` fixture and labels it
+`synthetic`; replace it with a real `decision_trace.jsonl` only when a game
+run has actually been captured. `provider_request` is the canonical model
+request event, while `provider` and `brain_call` are accepted for older logs.
+Decision events and provider requests have separate identities, so request
+counts must not be interpreted as player-decision counts.

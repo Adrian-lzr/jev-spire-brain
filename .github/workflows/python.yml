@@ -19,4 +19,7 @@ jobs:
       - run: python -m pytest -q
       - run: python -m compileall -q spirebrain start.py run_agent.py
       - run: python tools/check_contracts.py
-      - run: python -m spirebrain.analysis.metrics --input logs/decision_trace.jsonl
+      # A clean checkout has no runtime logs.  Use the committed synthetic
+      # trace to exercise the metrics contract without pretending it is a
+      # real-game evaluation.
+      - run: python -m spirebrain.analysis.metrics --input tests/fixtures/metrics/decision_trace.jsonl

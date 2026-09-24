@@ -1,0 +1,54 @@
+{
+  "fixture_type": "synthetic",
+  "messages": [
+    {
+      "in_game": true,
+      "ready_for_command": true,
+      "available_commands": ["play", "end", "wait", "state"],
+      "game_state": {
+        "run_id": "replay-1",
+        "character": "IRONCLAD",
+        "screen_type": "COMBAT",
+        "current_hp": 30,
+        "max_hp": 80,
+        "animation_counter": 1,
+        "combat": {
+          "player": {"current_hp": 30, "energy": 1, "block": 0},
+          "hand": [{"id": "Strike_R", "type": "ATTACK", "cost": 1, "damage": 6, "has_target": true}],
+          "monsters": [{"id": "Cultist", "current_hp": 10, "intent": "ATTACK", "damage": 6}]
+        }
+      }
+    },
+    {
+      "in_game": true,
+      "ready_for_command": true,
+      "available_commands": ["play", "end", "wait", "state"],
+      "game_state": {
+        "run_id": "replay-1",
+        "character": "IRONCLAD",
+        "screen_type": "COMBAT",
+        "current_hp": 30,
+        "max_hp": 80,
+        "animation_counter": 2,
+        "timestamp": 999,
+        "combat": {
+          "player": {"current_hp": 30, "energy": 1, "block": 0},
+          "hand": [{"id": "Strike_R", "type": "ATTACK", "cost": 1, "damage": 6, "has_target": true}],
+          "monsters": [{"id": "Cultist", "current_hp": 10, "intent": "ATTACK", "damage": 6}]
+        }
+      }
+    },
+    {
+      "in_game": true,
+      "ready_for_command": true,
+      "available_commands": ["choose", "return", "wait", "state"],
+      "game_state": {
+        "run_id": "replay-1",
+        "character": "IRONCLAD",
+        "screen_type": "SHOP",
+        "gold": 80,
+        "screen_state": {"cards": [{"id": "Inflame", "price": 50}], "relics": [], "potions": []}
+      }
+    }
+  ]
+}

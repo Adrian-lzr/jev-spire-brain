@@ -306,6 +306,16 @@ python -m spirebrain.install_mod_config --write   # apply (backs up any existing
 python tests\test_stdio.py               # prove the pipe logic offline
 ```
 
+离线回放和指标入口（不会调用模型或修改游戏配置）：
+
+```bash
+python -m spirebrain.analysis.replay --input tests/fixtures/replay
+python -m spirebrain.analysis.metrics --input tests/fixtures/metrics/decision_trace.jsonl
+```
+
+指标输入缺失时命令会以非零状态退出；合成 fixture 只用于验证管道和字段契约，
+不代表真实游戏胜率。
+
 `doctor` exists because "is the mod installed?" turned out to need six manual
 checks, and one of them is genuinely non-obvious: a Steam Workshop **subscription**
 and a Workshop **download** are different states in `appworkshop_<appid>.acf`. The
