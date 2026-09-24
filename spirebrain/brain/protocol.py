@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
+import json
 from typing import Any, Protocol
 
 
@@ -29,17 +31,32 @@ class ActionCandidate:
     # executor template.  It is deliberately omitted from ``model_dict`` so
     # the strategic model can only select an ID, never author a command.
     command_template: dict | str | None = None
+    candidate_signature: str = ""
 
     def __post_init__(self) -> None:
         if not self.command and isinstance(self.command_template, dict):
             self.command = dict(self.command_template)
         if self.command_template is None:
             self.command_template = dict(self.command)
+        if not self.candidate_signature:
+            # The command keeps the current slot/target while the label carries
+            # the semantic object identity.  Together they prevent an index
+            # from silently changing meaning when a live list is reordered.
+            identity = {
+                "kind": self.kind,
+                "label": self.label,
+                "target": self.target,
+                "command": self.command,
+            }
+            raw = json.dumps(identity, sort_keys=True, ensure_ascii=False, default=str,
+                             separators=(",", ":"))
+            self.candidate_signature = hashlib.sha1(raw.encode("utf-8", "replace")).hexdigest()
 
     def model_dict(self) -> dict:
         """The model-facing shape; protocol details stay out of the prompt."""
         out = {
             "candidate_id": self.candidate_id,
+            "candidate_signature": self.candidate_signature,
             "kind": self.kind,
             "label": self.label,
             "legal": bool(self.legal),
@@ -83,6 +100,9 @@ class StrategicPlan:
     expires_after: int | None = None
     created_at: float = 0.0
     raw: dict = field(default_factory=dict, repr=False)
+    # Runtime-only map.  Models never author this field; the local planner binds
+    # each preference to the candidate signature present at generation time.
+    candidate_bindings: dict[str, str] = field(default_factory=dict, repr=False)
 
     @classmethod
     def from_dict(cls, data: dict, *, state_id: str, run_id: str,
@@ -198,6 +218,12 @@ class StrategicPlan:
             "reason": self.reason,
             "uncertainty": self.uncertainty,
             "expires_after": self.expires_after,
+        }
+
+    def bind_candidates(self, candidates: list[ActionCandidate]) -> None:
+        self.candidate_bindings = {
+            candidate.candidate_id: candidate.candidate_signature
+            for candidate in candidates if candidate.legal
         }
 
 

@@ -374,8 +374,14 @@ def reconcile(*, game: dict, candidates: list[ActionCandidate], fallback: dict,
             c.candidate_id: c for c in legal
             if _constraint_allows(c, plan.resource_constraints, game)
         }
+        # A plan can be reused across a combat turn, but an index-based ID is
+        # not an identity.  Require the generation-time signature to match;
+        # mismatches deliberately fall back to current local/JEV candidates.
+        bound = getattr(plan, "candidate_bindings", {}) or {}
         preferred = [constrained[candidate_id] for candidate_id in plan.preferred_candidates
-                     if candidate_id in constrained and candidate_id not in plan.avoid_candidates]
+                     if candidate_id in constrained
+                     and (not bound or bound.get(candidate_id) == constrained[candidate_id].candidate_signature)
+                     and candidate_id not in plan.avoid_candidates]
         # A tactical JEV selection is accepted when it stays inside the GPT
         # preference set. Otherwise GPT's first explicit preference wins.
         if fallback_candidate in preferred:
