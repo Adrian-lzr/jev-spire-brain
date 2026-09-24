@@ -1,1 +1,1 @@
-"""Analysis package: calibration and run statistics."""
+"""Offline replay and measurement tools."""

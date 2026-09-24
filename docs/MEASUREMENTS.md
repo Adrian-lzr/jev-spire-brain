@@ -320,3 +320,11 @@ untouched and must not be spent on a harness whose HP semantics are still wrong.
   its belief — so none of run 10's correlation applies to Noul questions, which are
   two thirds of all the answers logged (1665 of 3075).
 
+# Offline metrics
+
+Run `python -m spirebrain.analysis.metrics --input logs/decision_trace.jsonl`
+to summarize samples, runs, semantic states, scene coverage, legality,
+latency p50/p95, provider calls, fallback reasons and `unobserved` outcomes.
+Use `--json path` to save the report. Empty or incomplete traces report
+`unknown` for real outcomes. Replay/adoption counts, synthetic damage and HP
+simulation are not win-rate evidence.

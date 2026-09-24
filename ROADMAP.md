@@ -360,3 +360,9 @@ leans toward the first reading — but a lean is not a resolution.
 | OpenRouter key permits only the `typesafe` provider | the structured-LLM baseline arm | user (add a provider) or a second key |
 | No ground-truth labels anywhere in the simulator | "calibration" meaning correctness rather than consistency | me: record outcomes, not just decisions |
 | Advisor mode has no live data yet | any statement about its agreement rate — the code path is tested (15 cases) but has never seen a real player | user: one real run in advise mode; the panel and `logs/advice.jsonl` collect everything |
+# Verification status
+
+Offline Python tests and the cross-language static contract check run in GitHub
+Actions. Real game validation and Java compilation remain environment-dependent:
+they require the installed Slay the Spire, ModTheSpire, BaseMod and game JARs.
+No win-rate claim is made until paired real-game runs are available.

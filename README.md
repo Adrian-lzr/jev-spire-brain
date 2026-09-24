@@ -107,7 +107,7 @@ Both come straight from the official docs ([docs/JEV_API.md](docs/JEV_API.md)):
 **Both halves of Phase 1 exist now, and the brain has run against real JEV.**
 All 7 decision modules + HP budget + greedy combat + logging + simulation harness
 + agent router + the real JEV client + the **CommunicationMod stdio transport** are
-in place, with **250 tests in 17 files, all green**. Live decisions and simulator
+in place, with the offline suite run by `python -m pytest -q`. Live decisions and simulator
 decisions share the same rich `RunContext`, so both paths ask JEV against the full
 run digest and the game's own card/relic text.
 

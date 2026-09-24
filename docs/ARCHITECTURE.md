@@ -76,3 +76,22 @@ JEV 是战术层：只能在本地已确认合法、且符合战略约束的候�
 - 旧的 JEV-only 后端仍可通过 `brain.backend=jev` 或启动参数使用。
 - CommunicationMod 原始字典、stdio 命令协议和旧测试入口保持兼容。
 - 所有模型结果都必须匹配当前状态代际；过期异步结果直接丢弃。
+# Runtime decision boundaries
+
+The CommunicationMod payload is normalized into a semantic state projection in
+`spirebrain/driver/decision_state.py`. `state_id` identifies the game state;
+`recommendation_key` additionally includes the legal candidate view and is used
+only to suppress duplicate advice. Timestamps, animation counters, UUIDs and
+transport metadata do not trigger a new recommendation.
+
+Candidates retain their legacy index-shaped `candidate_id` for protocol
+compatibility, but also carry a stable `candidate_signature`. Strategic plans
+bind preferences to signatures at generation time; a changed hand, target or
+shop shelf therefore falls back to current legal candidates instead of reusing
+an index with a new meaning.
+
+The real OpenRouter JEV client has a 2500 ms total budget and at most one retry.
+Authentication failures stop immediately. Timeout, HTTP and fallback counters
+are kept in memory and never include credentials. Java overlay compilation is a
+local-only check when game JARs are installed; CI runs the static JSON contract
+checker instead.
