@@ -242,6 +242,7 @@ class OfficialJevClient(JevClient):
                 body = self._post(payload)
                 self.timeout = old_timeout
             except urllib.error.HTTPError as err:  # noqa: PERF203
+                self.timeout = old_timeout
                 detail = err.read().decode("utf-8", "replace")[:300] if err.fp else ""
                 if err.code in {401, 403, 402}:
                     self.metrics["auth_errors"] += 1
@@ -258,6 +259,7 @@ class OfficialJevClient(JevClient):
                     continue
                 raise JevApiError(f"HTTP {err.code}: {detail}") from err
             except (urllib.error.URLError, TimeoutError, OSError) as err:
+                self.timeout = old_timeout
                 if isinstance(err, TimeoutError):
                     self.metrics["timeouts"] += 1
                 if attempt < self.max_retries:
