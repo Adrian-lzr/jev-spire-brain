@@ -172,6 +172,7 @@ class OfficialJevClient(JevClient):
         timeout: float = 10.0,
         max_retries: int = 3,
         backoff: float = 0.5,
+        total_budget_ms: int | None = None,
     ) -> None:
         self.api_key = api_key or os.environ.get(self.key_env, "")
         if not self.api_key:
@@ -184,6 +185,9 @@ class OfficialJevClient(JevClient):
         self.timeout = timeout
         self.max_retries = max_retries
         self.backoff = backoff
+        self.total_budget_ms = int(total_budget_ms) if total_budget_ms else None
+        self.metrics = {"attempts": 0, "timeouts": 0, "auth_errors": 0,
+                        "rate_limits": 0, "http_errors": 0, "invalid_json": 0}
         self.total_cost_usd = 0.0
         self.calls = 0
 
@@ -223,28 +227,54 @@ class OfficialJevClient(JevClient):
                 "instead of letting it be silently truncated"
             )
         last_err: Exception | None = None
+        deadline = (time.monotonic() + self.total_budget_ms / 1000.0
+                    if self.total_budget_ms else None)
         for attempt in range(self.max_retries + 1):
+            self.metrics["attempts"] += 1
+            if deadline is not None and time.monotonic() >= deadline:
+                self.metrics["timeouts"] += 1
+                raise JevApiError("JEV request budget exceeded")
             t0 = time.perf_counter()
             try:
+                old_timeout = self.timeout
+                if deadline is not None:
+                    self.timeout = max(0.05, min(old_timeout, deadline - time.monotonic()))
                 body = self._post(payload)
+                self.timeout = old_timeout
             except urllib.error.HTTPError as err:  # noqa: PERF203
                 detail = err.read().decode("utf-8", "replace")[:300] if err.fp else ""
-                if err.code == 402:
-                    raise JevApiError(f"402 no credits loaded: {detail}") from err
+                if err.code in {401, 403, 402}:
+                    self.metrics["auth_errors"] += 1
+                    raise JevApiError(f"HTTP {err.code}: {detail}") from err
+                if err.code == 429:
+                    self.metrics["rate_limits"] += 1
+                self.metrics["http_errors"] += 1
                 if err.code in TRANSIENT_STATUS and attempt < self.max_retries:
                     last_err = err
-                    time.sleep(self.backoff * (2**attempt))
+                    delay = min(self.backoff * (2**attempt), 0.1)
+                    if deadline is not None:
+                        delay = min(delay, max(0.0, deadline - time.monotonic()))
+                    time.sleep(delay)
                     continue
                 raise JevApiError(f"HTTP {err.code}: {detail}") from err
             except (urllib.error.URLError, TimeoutError, OSError) as err:
+                if isinstance(err, TimeoutError):
+                    self.metrics["timeouts"] += 1
                 if attempt < self.max_retries:
                     last_err = err
-                    time.sleep(self.backoff * (2**attempt))
+                    delay = min(self.backoff * (2**attempt), 0.1)
+                    if deadline is not None:
+                        delay = min(delay, max(0.0, deadline - time.monotonic()))
+                    time.sleep(delay)
                     continue
                 raise JevApiError(f"network failure: {err}") from err
 
             latency_ms = int((time.perf_counter() - t0) * 1000)
-            answers_obj, usage, model = self._extract(body)
+            try:
+                answers_obj, usage, model = self._extract(body)
+            except (TypeError, ValueError, KeyError, json.JSONDecodeError) as err:
+                self.metrics["invalid_json"] += 1
+                raise JevApiError(f"invalid JEV response: {err}") from err
             usage = normalize_usage(usage)
             self.calls += 1
             cost, cost_source = resolve_cost(usage, model)
@@ -330,7 +360,11 @@ class OpenRouterJevClient(OfficialJevClient):
         api_key: str | None = None,
         model: str = "jev-1.13",
         endpoint: str = OPENROUTER_SYSTEMONE,
-        timeout: float = 60.0,
+        timeout: float = 2.0,
+        max_retries: int = 1,
+        total_budget_ms: int = 2500,
         **kw: Any,
     ) -> None:
-        super().__init__(api_key=api_key, model=model, endpoint=endpoint, timeout=timeout, **kw)
+        super().__init__(api_key=api_key, model=model, endpoint=endpoint,
+                         timeout=timeout, max_retries=max_retries,
+                         total_budget_ms=total_budget_ms, **kw)
