@@ -338,3 +338,8 @@ run has actually been captured. `provider_request` is the canonical model
 request event, while `provider` and `brain_call` are accepted for older logs.
 Decision events and provider requests have separate identities, so request
 counts must not be interpreted as player-decision counts.
+New reports keep provider request latency, end-to-end decision/advice latency,
+first-advice latency, and local feed-publish latency in separate distributions.
+Legacy `latency_ms` values that cannot be classified are reported separately;
+the Java overlay does not currently acknowledge render/display time, so player-
+visible latency is explicitly reported as `not_collected`.

@@ -475,7 +475,8 @@ class SpireBrainAgent:
                 "request_id": request_id,
                 "plan_id": detail.get("plan_id", ""),
                 "brain_backend": self.strategic.backend_name,
-                "request_latency_ms": int(detail.get("brain_latency_ms", 0) or 0),
+                "request_latency_ms": (int(detail["brain_latency_ms"])
+                                        if detail.get("brain_latency_ms") is not None else None),
                 "cost_usd": usage.get("cost_usd", usage.get("cost")),
                 "fallback": bool(detail.get("brain_error")),
                 "fallback_reason": detail.get("brain_error", "") or None,
@@ -527,8 +528,12 @@ class SpireBrainAgent:
             "reason": detail.get("reason", ""),
             "confidence": float(decision.confidence or 0.0),
             "jev_confidence": float(detail.get("jev_confidence", 0.0) or 0.0),
-            "latency_ms": int(detail.get("brain_latency_ms", 0) or 0),
-            "request_latency_ms": int(detail.get("brain_latency_ms", 0) or 0),
+            # Keep latency_ms as a compatibility alias; new analysis separates
+            # request time from total decision time below.
+            "latency_ms": (int(detail["brain_latency_ms"])
+                           if detail.get("brain_latency_ms") is not None else None),
+            "request_latency_ms": (int(detail["brain_latency_ms"])
+                                   if detail.get("brain_latency_ms") is not None else None),
             "decision_latency_ms": int((time.monotonic() - self._decision_started_at) * 1000)
             if self._decision_started_at else None,
             "fallback": bool(decision.used_fallback or detail.get("fallback")),

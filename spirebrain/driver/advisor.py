@@ -75,7 +75,8 @@ class AdviseSession:
                  ensure_offered: Callable[..., str],
                  fingerprint: Callable[[dict], str],
                  message_count: Callable[[], int],
-                 tracker: PlayerTracker | None = None) -> None:
+                 tracker: PlayerTracker | None = None,
+                 clock: Callable[[], float] = time.monotonic) -> None:
         self.agent = agent
         self.advice_path = advice_path
         self.poll_frames = poll_frames
@@ -85,6 +86,7 @@ class AdviseSession:
         self._ensure_offered = ensure_offered
         self._fingerprint = fingerprint
         self.message_count = message_count
+        self._clock = clock
         #: What keeps polling from becoming a per-second JEV bill: the brain is
         #: asked once per *distinct* state, and a poll re-transmits by design.
         self.advised_fp: str | None = None
@@ -96,6 +98,9 @@ class AdviseSession:
         self._latest_fp: str | None = None
         self._latest_state_id: str | None = None
         self._generation = 0
+        self._decision_sequence = 0
+        self._state_started_at: dict[str, float] = {}
+        self._first_advice_latency: dict[str, int] = {}
         self._work_lock = threading.Lock()
         self._work_running = False
         self._queued_work: tuple | None = None
@@ -115,6 +120,8 @@ class AdviseSession:
         self._issued_state_ids.clear()
         self._latest_fp = None
         self._latest_state_id = None
+        self._state_started_at.clear()
+        self._first_advice_latency.clear()
         self._generation += 1
         with self._work_lock:
             self._queued_work = None
@@ -149,6 +156,7 @@ class AdviseSession:
                 self.advised_fp = fp
                 self._latest_fp = fp
                 self._latest_state_id = state_version
+                self._begin_decision(fp, state_version)
                 self._publish_status(state_version, "unavailable", "当前界面暂无可判断的操作",
                                      "请继续手动操作，进入可识别界面后建议会自动恢复。",
                                      point=SCREEN_POINT.get(screen_of(game), "navigation"))
@@ -163,6 +171,7 @@ class AdviseSession:
             # the same shop after a cancel).  The generation distinguishes that
             # new request from a late result produced for the earlier visit.
             self._generation += 1
+            self._begin_decision(fp, state_version)
             if self._worker_agent is None:
                 self._advise_once(game, available)
             else:
@@ -252,6 +261,18 @@ class AdviseSession:
             except Exception as exc:  # noqa: BLE001 - failure becomes a panel status
                 self._completed.put((fp, generation, payload, None, None, exc))
 
+    def _begin_decision(self, fp: str, state_id: str) -> None:
+        self._decision_sequence += 1
+        self._state_started_at[fp] = self._clock()
+        self._first_advice_latency.pop(fp, None)
+        if len(self._state_started_at) > 64:
+            oldest = next(iter(self._state_started_at))
+            self._state_started_at.pop(oldest, None)
+            self._first_advice_latency.pop(oldest, None)
+        self._current_decision_id = (
+            f"{self._run_id()}:{state_id[:16]}:{self._decision_sequence}"
+        )
+
     def _drain_completed(self) -> None:
         while True:
             try:
@@ -320,6 +341,14 @@ class AdviseSession:
         detail = dict(metadata or {})
         if entry and entry.get("command") == command:
             detail.update(entry.get("detail", {}) or {})
+        fp = self._fingerprint(dict(game, available_commands=game.get("available_commands")))
+        started_at = self._state_started_at.get(fp)
+        decision_latency = (max(0, round((self._clock() - started_at) * 1000))
+                            if started_at is not None else None)
+        first_latency = self._first_advice_latency.get(fp)
+        if first_latency is None and decision_latency is not None:
+            first_latency = decision_latency
+            self._first_advice_latency[fp] = first_latency
         advice = Advice(
             point=point, screen=screen, command=command,
             key=advice_key(payload, command, point),
@@ -351,6 +380,10 @@ class AdviseSession:
             brain_error=str(detail.get("brain_error", "") or ""),
             status=("fast_advice" if provisional or source_type in {"guide_rule", "rule_fallback"}
                     else "model_ready"),
+            decision_id=getattr(self, "_current_decision_id", ""),
+            request_id=str(detail.get("brain_request_id", "") or ""),
+            first_advice_latency_ms=first_latency,
+            decision_latency_ms=decision_latency,
         )
         self.tracker.remember_state(game)
         self.tracker.note(advice)
@@ -434,10 +467,25 @@ class AdviseSession:
                           "brain_latency_ms": advice.brain_latency_ms,
                           "brain_request_id": advice.brain_request_id,
                           "brain_error": advice.brain_error,
-                          "status": advice.status}
-        self._advice_log(event)
+                          "status": advice.status,
+                          "decision_id": advice.decision_id,
+                          "request_id": advice.request_id or advice.brain_request_id,
+                          "first_advice_latency_ms": advice.first_advice_latency_ms,
+                          "decision_latency_ms": advice.decision_latency_ms}
+        feed = getattr(self.agent, "feed", None)
+        if feed is not None:
+            started = self._clock()
+            try:
+                feed.publish("advice", advice_event(advice, self.tracker.tally,
+                                                    self.tracker.agreement))
+                advice.publish_latency_ms = max(0, round((self._clock() - started) * 1000))
+            except Exception:  # noqa: BLE001 - a dead dashboard must not break the pipe
+                advice.publish_latency_ms = None
+        self._advice_log({**event, "publish_latency_ms": advice.publish_latency_ms})
         self._trace("advice", {
             "run_id": self._run_id(), "state_id": advice.state_id,
+            "decision_id": advice.decision_id,
+            "request_id": advice.request_id or advice.brain_request_id or None,
             "plan_id": advice.plan_id, "screen": advice.screen,
             "point": advice.point, "brain_backend": advice.brain_backend,
             "source_type": advice.source_type,
@@ -450,19 +498,13 @@ class AdviseSession:
                             "label": advice.alternative_label},
             "reason": advice.reason, "confidence": advice.confidence,
             "jev_confidence": advice.jev_confidence,
-            "latency_ms": advice.brain_latency_ms,
-            "request_latency_ms": advice.brain_latency_ms,
+            "request_latency_ms": advice.brain_latency_ms or None,
+            "first_advice_latency_ms": advice.first_advice_latency_ms,
+            "decision_latency_ms": advice.decision_latency_ms,
+            "publish_latency_ms": advice.publish_latency_ms,
             "fallback": advice.fallback, "uncertain": advice.uncertain,
             "act": advice.act, "floor": advice.floor,
         })
-        feed = getattr(self.agent, "feed", None)
-        if feed is None:
-            return
-        try:
-            feed.publish("advice", advice_event(advice, self.tracker.tally,
-                                                self.tracker.agreement))
-        except Exception:  # noqa: BLE001 - a dead dashboard must not break the pipe
-            pass
 
     def _publish_outcome(self, outcome) -> None:
         advice = outcome.advice

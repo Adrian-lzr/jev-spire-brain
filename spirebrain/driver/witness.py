@@ -199,6 +199,11 @@ class Advice:
     brain_request_id: str = ""
     brain_error: str = ""
     status: str = "ready"             # fast_advice | model_ready | unavailable
+    decision_id: str = ""
+    request_id: str = ""
+    first_advice_latency_ms: int | None = None
+    decision_latency_ms: int | None = None
+    publish_latency_ms: int | None = None
 
 
 @dataclass
