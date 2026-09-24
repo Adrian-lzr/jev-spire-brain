@@ -30,6 +30,37 @@
   header .dot.live { background: var(--teal); }
   header .sub { color: var(--muted); font-size: 12px; }
   header .spacer { flex: 1; }
+  .config-open, .config-btn { border: 1px solid var(--line); background: var(--panel2); color: var(--text); border-radius: 6px; padding: 7px 11px; font: inherit; cursor: pointer; }
+  .config-open:hover, .config-btn:hover { border-color: var(--blue); }
+  dialog.config { width: min(680px, calc(100vw - 28px)); height: min(90vh, 820px); max-height: 90vh; margin: auto; padding: 0; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 20px 60px #0009; }
+  dialog.config[open] { display: flex; flex-direction: column; }
+  dialog.config::backdrop { background: #050812bb; }
+  dialog.config form { display: flex; flex: 1; min-height: 0; flex-direction: column; }
+  .config-head { display: flex; align-items: center; gap: 12px; padding: 16px 20px; border-bottom: 1px solid var(--line); }
+  .config-head h2 { font-size: 15px; font-weight: 600; }
+  .config-head button { margin-left: auto; border: 0; background: transparent; color: var(--muted); font-size: 20px; cursor: pointer; }
+  .config-body { flex: 1; min-height: 0; padding: 4px 20px 16px; overflow-y: auto; }
+  .config-section { padding: 14px 0; border-bottom: 1px solid var(--line); }
+  .config-section h3 { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+  .config-help, .config-note { color: var(--muted); font-size: 12px; line-height: 1.5; }
+  .config-effective { color: var(--muted); font-size: 12px; line-height: 1.5; padding: 10px 12px; background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; overflow-wrap: anywhere; }
+  .config-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+  .config-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+  .config-field.full { grid-column: 1 / -1; }
+  .config-field label { color: var(--muted); font-size: 12px; }
+  .config-field input, .config-field select { width: 100%; min-width: 0; background: #0b0f19; color: var(--text); border: 1px solid var(--line); border-radius: 5px; padding: 8px 9px; font: inherit; }
+  .config-field input:focus, .config-field select:focus { outline: 1px solid var(--blue); border-color: var(--blue); }
+  .secret-state { color: var(--dim); font-size: 11px; }
+  .config-clear { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; }
+  .config-clear input { width: auto; }
+  .config-test { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+  .config-result { color: var(--muted); font-size: 12px; }
+  .config-result.ok { color: var(--teal); }
+  .config-result.fail { color: var(--red); }
+  .config-foot { display: flex; align-items: center; gap: 10px; padding: 12px 20px; border-top: 1px solid var(--line); }
+  .config-foot .spacer { flex: 1; }
+  .config-btn.primary { background: var(--blue); color: #08111e; border-color: var(--blue); font-weight: 600; }
+  @media (max-width: 600px) { .config-grid { grid-template-columns: 1fr; } .config-field.full { grid-column: auto; } header .counter { display: none; } }
 
   /* left: run state */
   aside { border-right: 1px solid var(--line); background: var(--panel); padding: 16px; overflow-y: auto; }
@@ -139,7 +170,42 @@
   <span class="sub" id="status">未连接</span>
   <span class="spacer"></span>
   <span class="sub" id="counter"></span>
+  <button class="config-open" id="openConfig" type="button">模型配置</button>
 </header>
+
+<dialog class="config" id="configDialog" aria-labelledby="configTitle">
+  <form id="configForm">
+    <div class="config-head"><h2 id="configTitle">模型与 API 配置</h2><button type="button" id="closeConfig" aria-label="关闭">×</button></div>
+    <div class="config-body">
+      <section class="config-section">
+        <h3>战略大脑 · GPT</h3>
+        <div class="config-help">负责构筑方向、资源预算和阶段目标。API Key 仅保存在本机项目 .env 文件。</div>
+        <div class="config-grid">
+          <div class="config-field"><label for="brainBackend">运行后端</label><select id="brainBackend" name="brain_backend"><option value="openai">OpenAI API</option><option value="jev">旧版 JEV 兼容模式</option><option value="mock">Mock 离线测试</option><option value="disabled">关闭战略大脑</option></select></div>
+          <div class="config-field"><label for="openaiModel">模型名称</label><input id="openaiModel" name="openai_model" maxlength="128" autocomplete="off" placeholder="gpt-4.1-mini"></div>
+          <div class="config-field full"><label for="openaiEndpoint">API 地址</label><input id="openaiEndpoint" name="openai_endpoint" maxlength="512" autocomplete="url" placeholder="https://api.openai.com/v1/responses"></div>
+          <div class="config-field full"><label for="openaiKey">OpenAI API Key <span id="openaiKeyState" class="secret-state"></span></label><input id="openaiKey" type="password" name="openai_api_key" maxlength="4096" autocomplete="new-password" placeholder="留空则保留当前密钥"><label class="config-clear"><input type="checkbox" name="clear_openai">清除已保存密钥</label></div>
+        </div>
+        <div class="config-test"><button class="config-btn" type="button" id="testBrain">测试 GPT 连接</button><span id="brainResult" class="config-result" role="status"></span></div>
+      </section>
+      <section class="config-section">
+        <h3>战术判断 · JEV</h3>
+        <div class="config-help">JEV 在当前合法候选中做快速判断。选择实际使用的后端后，可测试对应 API。</div>
+        <div class="config-grid">
+          <div class="config-field full"><label for="jevBackend">JEV 后端</label><select id="jevBackend" name="jev_backend"><option value="mock">Mock 离线测试</option><option value="openrouter">OpenRouter · JEV System One</option><option value="official">TypeSafe 官方 API</option><option value="llm">OpenRouter 结构化模型（非 JEV）</option><option value="cloudflare">Cloudflare AI</option></select></div>
+          <div class="config-field full"><label for="openrouterKey">OpenRouter API Key <span id="openrouterKeyState" class="secret-state"></span></label><input id="openrouterKey" type="password" name="openrouter_api_key" maxlength="4096" autocomplete="new-password" placeholder="留空则保留当前密钥"><label class="config-clear"><input type="checkbox" name="clear_openrouter">清除已保存密钥</label></div>
+          <div class="config-field full"><label for="typesafeKey">TypeSafe API Key <span id="typesafeKeyState" class="secret-state"></span></label><input id="typesafeKey" type="password" name="typesafe_api_key" maxlength="4096" autocomplete="new-password" placeholder="留空则保留当前密钥"><label class="config-clear"><input type="checkbox" name="clear_typesafe">清除已保存密钥</label></div>
+          <div class="config-field"><label for="cloudflareAccount">Cloudflare Account ID <span id="cloudflareAccountState" class="secret-state"></span></label><input id="cloudflareAccount" type="password" name="cloudflare_account_id" maxlength="4096" autocomplete="new-password" placeholder="留空则保留当前值"><label class="config-clear"><input type="checkbox" name="clear_cloudflare_account">清除已保存 ID</label></div>
+          <div class="config-field"><label for="cloudflareToken">Cloudflare API Token <span id="cloudflareTokenState" class="secret-state"></span></label><input id="cloudflareToken" type="password" name="cloudflare_api_token" maxlength="4096" autocomplete="new-password" placeholder="留空则保留当前密钥"><label class="config-clear"><input type="checkbox" name="clear_cloudflare_token">清除已保存密钥</label></div>
+        </div>
+        <div class="config-test"><button class="config-btn" type="button" id="testJev">测试 JEV 连接</button><span id="jevResult" class="config-result" role="status"></span></div>
+      </section>
+      <div class="config-effective" id="effectiveConfig" role="status"></div>
+      <div class="config-note" style="padding-top:12px">保存后需重启游戏 agent 才会应用到当前游戏。连接测试会实际向所选服务发送一次小请求，可能产生少量 API 用量。</div>
+    </div>
+    <div class="config-foot"><span id="saveResult" class="config-result" role="status"></span><span class="spacer"></span><button type="button" class="config-btn" id="cancelConfig">取消</button><button type="submit" class="config-btn primary" id="saveConfig">保存配置</button></div>
+  </form>
+</dialog>
 
 <aside>
   <h2>军师建议</h2>
@@ -215,6 +281,9 @@ const statusEl = document.getElementById("status");
 const counter = document.getElementById("counter");
 const fchip = document.getElementById("fchip");
 let n = 0;
+const configDialog = document.getElementById("configDialog");
+const configForm = document.getElementById("configForm");
+let publicConfig = null;
 // The browser receives run_state before the asynchronous advice event. Keep
 // the same state-version boundary as the in-game Java overlay so an old
 // recommendation is never shown while the next one is being computed.
@@ -227,6 +296,110 @@ function el(tag, cls, text) {
   if (text !== undefined) e.textContent = text;
   return e;
 }
+
+/* ---- local model settings ---- */
+async function readConfig() {
+  const response = await fetch("/api/config", {cache: "no-store"});
+  if (!response.ok) throw new Error("读取配置失败");
+  publicConfig = await response.json();
+  document.getElementById("brainBackend").value = publicConfig.brain_backend || "openai";
+  document.getElementById("openaiModel").value = publicConfig.openai_model || "gpt-4.1-mini";
+  document.getElementById("openaiEndpoint").value = publicConfig.openai_endpoint || "https://api.openai.com/v1/responses";
+  document.getElementById("jevBackend").value = publicConfig.jev_backend || "mock";
+  document.getElementById("openaiKeyState").textContent = publicConfig.secrets.openai_api_key ? "· 本机已配置" : "· 未配置";
+  document.getElementById("openrouterKeyState").textContent = publicConfig.secrets.openrouter_api_key ? "· 本机已配置" : "· 未配置";
+  document.getElementById("typesafeKeyState").textContent = publicConfig.secrets.typesafe_api_key ? "· 本机已配置" : "· 未配置";
+  document.getElementById("cloudflareAccountState").textContent = publicConfig.secrets.cloudflare_account_id ? "· 本机已配置" : "· 未配置";
+  document.getElementById("cloudflareTokenState").textContent = publicConfig.secrets.cloudflare_api_token ? "· 本机已配置" : "· 未配置";
+  const effective = publicConfig.effective || {};
+  const sources = effective.sources || {};
+  const sourceName = value => ({command_line: "命令行", process_environment: "进程环境", dotenv: ".env", "strategy.json": "策略文件", default: "默认值"})[value] || value || "未知来源";
+  document.getElementById("effectiveConfig").textContent = `实际生效：JEV ${effective.jev_backend || publicConfig.jev_backend}（${sourceName(sources.jev_backend)}）；战略大脑 ${effective.brain_backend || publicConfig.brain_backend}（${sourceName(sources.brain_backend)}）。配置指纹 ${effective.config_id || "未知"}。${effective.restart_required ? "保存后重启 agent 生效。" : ""}`;
+}
+
+function configValues() {
+  const data = Object.fromEntries(new FormData(configForm).entries());
+  for (const key of ["clear_openai", "clear_openrouter", "clear_typesafe", "clear_cloudflare_account", "clear_cloudflare_token"]) delete data[key];
+  data.clear_secrets = [];
+  if (configForm.elements.clear_openai.checked) data.clear_secrets.push("openai_api_key");
+  if (configForm.elements.clear_openrouter.checked) data.clear_secrets.push("openrouter_api_key");
+  if (configForm.elements.clear_typesafe.checked) data.clear_secrets.push("typesafe_api_key");
+  if (configForm.elements.clear_cloudflare_account.checked) data.clear_secrets.push("cloudflare_account_id");
+  if (configForm.elements.clear_cloudflare_token.checked) data.clear_secrets.push("cloudflare_api_token");
+  return data;
+}
+
+async function postConfig(path, data) {
+  const response = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(data)});
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || "请求失败");
+  return result;
+}
+
+function showConfigResult(id, result) {
+  const target = document.getElementById(id);
+  target.className = "config-result " + (result.ok ? "ok" : "fail");
+  target.textContent = result.message + (result.latency_ms !== undefined ? " · " + result.latency_ms + " ms" : "") + (result.model ? " · " + result.model : "");
+}
+
+document.getElementById("openConfig").addEventListener("click", async () => {
+  document.getElementById("saveResult").textContent = "";
+  configDialog.showModal();
+  try { await readConfig(); }
+  catch (error) { document.getElementById("saveResult").textContent = error.message; }
+});
+document.getElementById("closeConfig").addEventListener("click", () => configDialog.close());
+document.getElementById("cancelConfig").addEventListener("click", () => configDialog.close());
+configDialog.addEventListener("click", event => { if (event.target === configDialog) configDialog.close(); });
+document.getElementById("testBrain").addEventListener("click", async event => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  const target = document.getElementById("brainResult");
+  target.className = "config-result"; target.textContent = "正在测试…";
+  const values = configValues();
+  try {
+    const result = await postConfig("/api/config/test-brain", {
+      settings: {openai_model: values.openai_model, openai_endpoint: values.openai_endpoint},
+      api_key: values.openai_api_key || "",
+    });
+    showConfigResult("brainResult", result);
+  } catch (error) { showConfigResult("brainResult", {ok: false, message: error.message}); }
+  finally { button.disabled = false; }
+});
+document.getElementById("testJev").addEventListener("click", async event => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  const target = document.getElementById("jevResult");
+  target.className = "config-result"; target.textContent = "正在测试…";
+  const values = configValues();
+  const backend = values.jev_backend;
+  const key = (backend === "openrouter" || backend === "llm") ? values.openrouter_api_key
+    : backend === "cloudflare" ? values.cloudflare_api_token : values.typesafe_api_key;
+  try {
+    const result = await postConfig("/api/config/test-jev", {
+      backend, api_key: key || "", account_id: values.cloudflare_account_id || "",
+    });
+    showConfigResult("jevResult", result);
+  } catch (error) { showConfigResult("jevResult", {ok: false, message: error.message}); }
+  finally { button.disabled = false; }
+});
+configForm.addEventListener("submit", async event => {
+  event.preventDefault();
+  const button = document.getElementById("saveConfig");
+  const resultEl = document.getElementById("saveResult");
+  button.disabled = true; resultEl.className = "config-result"; resultEl.textContent = "正在保存…";
+  try {
+    const result = await postConfig("/api/config/save", configValues());
+    publicConfig = result.config;
+    await readConfig();
+    configForm.querySelectorAll("input[type=checkbox]").forEach(input => input.checked = false);
+    configForm.querySelectorAll("input[type=password]").forEach(input => input.value = "");
+    resultEl.className = "config-result ok";
+    resultEl.textContent = "已保存。重启游戏 agent 后生效。";
+  } catch (error) {
+    resultEl.className = "config-result fail"; resultEl.textContent = error.message;
+  } finally { button.disabled = false; }
+});
 
 function fmtCommand(cmd) {
   if (!cmd) return "";

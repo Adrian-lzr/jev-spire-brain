@@ -170,6 +170,10 @@ class OpenAIStrategicClient:
                  endpoint: str | None = None, timeout_ms: int = 6000,
                  max_output_tokens: int = 900, opener=None) -> None:
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "").strip()
+        # With no key, plan() returns a local fallback immediately. Running that
+        # path on a daemon thread only creates lifecycle races during shutdown
+        # and temporary-directory cleanup; real network calls remain async.
+        self.async_required = bool(self.api_key)
         self.model = model or os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
         self.endpoint = endpoint or os.environ.get(
             "OPENAI_BRAIN_ENDPOINT", "https://api.openai.com/v1/responses"
@@ -310,7 +314,7 @@ class LoggingStrategicClient:
 
 def get_strategic_brain(backend: str | None = None, **kwargs):
     """Build a provider without making a network request."""
-    selected = (os.environ.get("BRAIN_BACKEND") or backend or "openai").lower()
+    selected = (backend or os.environ.get("BRAIN_BACKEND") or "openai").lower()
     if selected in {"none", "disabled", "off", "jev", "legacy"}:
         return UnavailableStrategicClient("战略大脑已禁用",
                                           backend_name="jev" if selected in {"jev", "legacy"}

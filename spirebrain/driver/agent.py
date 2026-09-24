@@ -55,6 +55,10 @@ from spirebrain.overlay.feed import DecisionFeed, decision_event, run_state_even
 from spirebrain.tactical.combat_greedy import Card, CombatState, play_order, recommend_action
 from spirebrain.tactical.hp_budget import HPBudget
 from spirebrain.driver.legality import check_action
+from spirebrain.runtime_config import resolve_runtime_config
+from spirebrain.driver.live_state import GameSnapshot
+from spirebrain.driver.scenes import SceneRouter
+from spirebrain.driver.trace import DecisionTrace
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -128,7 +132,7 @@ def _unique_labels(items: list[str]) -> tuple[dict[str, str], dict[str, int]]:
 class SpireBrainAgent:
     """Receives game state, routes to decision modules, returns one command."""
 
-    def __init__(self, jev_backend: str = "mock", strategy_path: str | Path | None = None,
+    def __init__(self, jev_backend: str | None = None, strategy_path: str | Path | None = None,
                  log_dir: str | Path | None = None,
                  acceptance: str | None = None,
                  feed: DecisionFeed | None = None,
@@ -140,11 +144,17 @@ class SpireBrainAgent:
                               "async_planning": async_planning}
         strategy_file = Path(strategy_path) if strategy_path else ROOT / "config" / "strategy.json"
         self.strategy = json.loads(strategy_file.read_text(encoding="utf-8"))
+        self.runtime_config = resolve_runtime_config(
+            ROOT, cli={"backend": jev_backend, "brain_backend": brain_backend},
+            strategy=self.strategy)
+        jev_backend = self.runtime_config.jev_backend
+        brain_backend = self.runtime_config.brain_backend
+        self._constructor.update({"jev_backend": jev_backend, "brain_backend": brain_backend})
         self.goal = self.strategy.get("goal", "")
         # "margin" | "argmax" — the Score gate, see decisions.evaluate_score. The
         # default is the one the pre-registered comparison in docs/MEASUREMENTS.md
         # selected; the strategy file carries it so it stays a human choice.
-        self.acceptance = acceptance or self.strategy.get("jev", {}).get("score_acceptance")
+        self.acceptance = acceptance or self.runtime_config.score_acceptance
 
         client = get_client(jev_backend)
         self.guide = GuideBook()
@@ -156,22 +166,38 @@ class SpireBrainAgent:
         self.hp: HPBudget | None = None
         self.run: RunContext | None = None
         brain_cfg = self.strategy.get("brain", {}) or {}
+        resolved_log_dir = Path(log_dir) if log_dir else ROOT / brain_cfg.get("log_dir", "logs")
         self.strategic = StrategicOrchestrator(
-            backend=brain_backend or brain_cfg.get("backend", "openai"),
-            model=brain_cfg.get("model"),
-            timeout_ms=int(brain_cfg.get("timeout_ms", 6000) or 6000),
-            max_plan_steps=int(brain_cfg.get("max_plan_steps", 5) or 5),
-            memory_events=int(brain_cfg.get("memory_events", 20) or 20),
-            max_output_tokens=int(brain_cfg.get("max_output_tokens", 900) or 900),
+            backend=brain_backend,
+            model=self.runtime_config.openai_model,
+            endpoint=self.runtime_config.openai_endpoint,
+            timeout_ms=self.runtime_config.timeout_ms,
+            max_plan_steps=self.runtime_config.max_plan_steps,
+            memory_events=self.runtime_config.memory_events,
+            max_output_tokens=self.runtime_config.max_output_tokens,
             client=brain_client,
-            log_dir=log_dir or ROOT / brain_cfg.get("log_dir", "logs"),
+            log_dir=resolved_log_dir,
             async_planning=async_planning,
         )
+        self.trace = DecisionTrace(resolved_log_dir / "decision_trace.jsonl",
+                                   config_id=self.runtime_config.config_id)
         self._active_game: dict | None = None
         self._observed_state_id = ""
         self._active_candidates = []
         self._active_plan = None
         self._active_brain_response = None
+        self._candidate_diagnostics: list[dict] = []
+        self.snapshot: GameSnapshot | None = None
+        self.scene_router = SceneRouter({
+            MAP_SCREEN: self._on_map,
+            CARD_REWARD_SCREEN: self._on_card_reward,
+            EVENT_SCREEN: self._on_event,
+            REST_SCREEN: self._on_rest,
+            SHOP_SCREEN: self._on_shop,
+            SHOP: self._on_shop,
+            BOSS_REWARD_SCREEN: self._on_boss_reward,
+            COMBAT_SCREEN: self._on_combat,
+        }, GRID_SCREENS)
         # Set when JEV picks an upgrade at a rest site; consumed by the card grid
         # that follows. The protocol is one command per screen, so the intent has
         # to survive across two states.
@@ -247,6 +273,9 @@ class SpireBrainAgent:
     # -- lifecycle --------------------------------------------------------- #
     def observe(self, game) -> None:
         """Sync our model of the world (HP budget + run context) from the game."""
+        snapshot = GameSnapshot.from_communication(game)
+        game = snapshot.payload
+        self.snapshot = snapshot
         self._observed_state_id = stable_state_id(game)
         act = max(1, _as_int(_get(game, "act", default=1), 1))
         max_hp = max(1, _as_int(_get(game, "max_hp", default=80), 80))
@@ -308,6 +337,8 @@ class SpireBrainAgent:
 
     def choose_action(self, game) -> dict:
         """Return ONE CommunicationMod command for the current screen."""
+        self.snapshot = GameSnapshot.from_communication(game)
+        game = self.snapshot.payload
         self.observe(game)
         self.guide_result = self.guide.evaluate(game, self._budget().remaining_budget)
         self._guide_client.active = self.guide_result.evidence()
@@ -320,8 +351,10 @@ class SpireBrainAgent:
             self._active_brain_response = None
             return {"command": "state", "reason_source": "unsupported_character",
                     "reason": "当前角色尚未覆盖，暂不套用铁甲战士攻略。"}
+        self._candidate_diagnostics = []
         self._active_candidates = build_action_candidates(
-            game, forbidden_indices=set(self.guide_result.forbidden_indices))
+            game, forbidden_indices=set(self.guide_result.forbidden_indices),
+            diagnostics=self._candidate_diagnostics)
         self._active_plan = None
         self._active_brain_response = None
         if self.guide_result.command is not None:
@@ -334,17 +367,8 @@ class SpireBrainAgent:
                  "source_type": "guide_rule", "rule_id": rule.id, "source": rule.source},
             )
             return self._record(decision, dict(self.guide_result.command))
-        handler = {
-            MAP_SCREEN: self._on_map,
-            CARD_REWARD_SCREEN: self._on_card_reward,
-            EVENT_SCREEN: self._on_event,
-            REST_SCREEN: self._on_rest,
-            SHOP_SCREEN: self._on_shop,
-            SHOP: self._on_shop,
-            BOSS_REWARD_SCREEN: self._on_boss_reward,
-            COMBAT_SCREEN: self._on_combat,
-        }.get(screen)
-        if handler is None and screen in GRID_SCREENS:
+        handler = self.scene_router.resolve(screen)
+        if handler is None and self.scene_router.is_grid(screen):
             handler = self._on_grid
         else:
             # A half-finished pick only means anything on the grid it was made
@@ -445,6 +469,35 @@ class SpireBrainAgent:
                 self.feed.publish("decision", decision_event(decision, command))
             except Exception:  # noqa: BLE001 - the dashboard must not break the run
                 pass
+        rule_ids = [str(rule.get("id")) for rule in (detail.get("guide_rules") or [])
+                    if isinstance(rule, dict) and rule.get("id")]
+        self.trace.record("decision", {
+            "run_id": self.strategic.memory.run_id,
+            "state_id": self.snapshot.state_id if self.snapshot else self._observed_state_id,
+            "plan_id": detail.get("plan_id", ""),
+            "screen": str(_get(self._active_game, "screen_type", default="")).upper(),
+            "point": decision.point,
+            "brain_backend": self.strategic.backend_name,
+            "jev_backend": str(getattr(self.jev, "backend_name", "unknown")),
+            "source_type": detail.get("source_type", ""),
+            "rule_ids": rule_ids,
+            "candidates": [candidate.to_dict() for candidate in self._active_candidates],
+            "filtered_candidates": self._candidate_diagnostics,
+            "selected_candidate_id": detail.get("candidate_id", ""),
+            "command": command,
+            "alternative": {
+                "command": detail.get("alternative_command"),
+                "label": detail.get("alternative_label", ""),
+            },
+            "reason": detail.get("reason", ""),
+            "confidence": float(decision.confidence or 0.0),
+            "jev_confidence": float(detail.get("jev_confidence", 0.0) or 0.0),
+            "latency_ms": int(detail.get("brain_latency_ms", 0) or 0),
+            "fallback": bool(decision.used_fallback or detail.get("fallback")),
+            "uncertain": bool(detail.get("uncertain", False)),
+            "act": _as_int(_get(self._active_game, "act", default=0)),
+            "floor": _as_int(_get(self._active_game, "floor", "floor_num", default=0)),
+        })
         return command
 
     def _budget(self) -> HPBudget:

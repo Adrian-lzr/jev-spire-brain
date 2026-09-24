@@ -400,7 +400,7 @@ class AdviseSession:
         return 0.0, False, ""
 
     def _publish_advice(self, advice: Advice) -> None:
-        self._advice_log({"kind": "advice", "point": advice.point,
+        event = {"kind": "advice", "point": advice.point,
                           "screen": advice.screen, "label": advice.label,
                           "verb": str(advice.command.get("command", "")),
                           "command": advice.command, "key": list(advice.key or ()),
@@ -422,7 +422,26 @@ class AdviseSession:
                           "brain_backend": advice.brain_backend,
                           "brain_latency_ms": advice.brain_latency_ms,
                           "brain_request_id": advice.brain_request_id,
-                          "brain_error": advice.brain_error})
+                          "brain_error": advice.brain_error}
+        self._advice_log(event)
+        self._trace("advice", {
+            "run_id": self._run_id(), "state_id": advice.state_id,
+            "plan_id": advice.plan_id, "screen": advice.screen,
+            "point": advice.point, "brain_backend": advice.brain_backend,
+            "source_type": advice.source_type,
+            "rule_ids": [rule.get("id") for rule in advice.guide_rules
+                         if isinstance(rule, dict) and rule.get("id")],
+            "candidates": advice.candidates,
+            "selected_candidate_id": advice.candidate_id,
+            "command": advice.command,
+            "alternative": {"command": advice.alternative_command,
+                            "label": advice.alternative_label},
+            "reason": advice.reason, "confidence": advice.confidence,
+            "jev_confidence": advice.jev_confidence,
+            "latency_ms": advice.brain_latency_ms,
+            "fallback": advice.fallback, "uncertain": advice.uncertain,
+            "act": advice.act, "floor": advice.floor,
+        })
         feed = getattr(self.agent, "feed", None)
         if feed is None:
             return
@@ -433,14 +452,25 @@ class AdviseSession:
             pass
 
     def _publish_outcome(self, outcome) -> None:
-        self._advice_log({"kind": "outcome", "point": outcome.advice.point,
+        advice = outcome.advice
+        event = {"kind": "outcome", "point": advice.point,
                           "verdict": outcome.verdict,
-                          "advice_label": outcome.advice.label,
+                          "advice_label": advice.label,
                           "acted_label": outcome.acted_label,
                           "acted": list(outcome.acted_key or ()),
                           "evidence": outcome.evidence,
                           "tally": dict(self.tracker.tally),
-                          "agreement": self.tracker.agreement})
+                          "agreement": self.tracker.agreement}
+        self._advice_log(event)
+        self._trace("outcome", {
+            "run_id": self._run_id(), "state_id": advice.state_id,
+            "plan_id": advice.plan_id, "screen": advice.screen,
+            "point": advice.point, "selected_candidate_id": advice.candidate_id,
+            "command": advice.command,
+            "player_action": {"key": list(outcome.acted_key or ()),
+                              "label": outcome.acted_label},
+            "verdict": outcome.verdict,
+        })
         print(f"[advise] verdict {outcome.verdict}: advised "
               f"{advice_line(outcome.advice.command)} / player did "
               f"{outcome.acted_label or '?'} | agreement "
@@ -467,4 +497,13 @@ class AdviseSession:
                                         ensure_ascii=False, default=str) + "\n")
         except OSError:
             pass
+
+    def _run_id(self) -> str:
+        strategic = getattr(self.agent, "strategic", None)
+        return str(getattr(getattr(strategic, "memory", None), "run_id", "") or "")
+
+    def _trace(self, event_type: str, event: dict) -> None:
+        trace = getattr(self.agent, "trace", None)
+        if trace is not None:
+            trace.record(event_type, event)
 

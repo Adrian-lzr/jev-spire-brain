@@ -199,6 +199,7 @@ def recommend_action(game: dict) -> ActionSuggestion | None:
         lethal = [(i, c, d) for i, c, typ, d, _ in cards
                   if typ == "ATTACK"
                   and not player.get("powers") and not monsters[0][1].get("powers")
+                  and c.get("damage") is not None
                   and d is not None and d >= monsters[0][2]]
         if lethal:
             i, card, damage = min(lethal, key=lambda x: int(x[1].get("cost", 0) or 0))

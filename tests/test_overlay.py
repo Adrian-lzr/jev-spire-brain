@@ -196,6 +196,90 @@ def test_server_serves_page_health_and_publish():
         server.shutdown()
 
 
+def test_dashboard_config_saves_secrets_without_returning_them():
+    import os
+    from unittest.mock import patch
+
+    clean_keys = {key: "" for key in ("OPENAI_API_KEY", "OPENROUTER_API_KEY", "TYPESAFE_API_KEY",
+                                       "BRAIN_BACKEND", "OPENAI_MODEL", "OPENAI_BRAIN_ENDPOINT", "JEV_BACKEND")}
+    with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, clean_keys):
+        env_path = Path(tmp) / ".env"
+        env_path.write_text("# keep this comment\nOTHER_SETTING=preserve\nOPENAI_API_KEY=old-secret\n", encoding="utf-8")
+        server = DashboardServer(port=0, env_path=env_path)
+        server.start_background()
+        base = f"http://127.0.0.1:{server.port}"
+        try:
+            with urllib.request.urlopen(base + "/api/config", timeout=5) as response:
+                config = json.loads(response.read())
+            assert config["secrets"]["openai_api_key"] is True
+            assert "old-secret" not in json.dumps(config)
+
+            data = {"brain_backend": "openai", "openai_model": "gpt-test",
+                    "openai_endpoint": "https://example.test/v1/responses",
+                    "jev_backend": "openrouter", "openai_api_key": "new-secret",
+                    "openrouter_api_key": "jev-secret"}
+            req = urllib.request.Request(base + "/api/config/save", data=json.dumps(data).encode(),
+                                         headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=5) as response:
+                saved = json.loads(response.read())
+            assert saved["ok"] is True
+            assert "new-secret" not in json.dumps(saved)
+            text = env_path.read_text(encoding="utf-8")
+            assert "OTHER_SETTING=preserve" in text and "# keep this comment" in text
+            assert "OPENAI_API_KEY=new-secret" in text and "OPENROUTER_API_KEY=jev-secret" in text
+
+            malicious = urllib.request.Request(base + "/api/config/save", data=b"{}",
+                                                headers={"Content-Type": "application/json",
+                                                         "Origin": "http://evil.example"})
+            try:
+                urllib.request.urlopen(malicious, timeout=5)
+                assert False, "foreign origin must be rejected"
+            except urllib.error.HTTPError as exc:
+                assert exc.code == 403
+        finally:
+            server.shutdown()
+
+
+def test_dashboard_connection_test_never_echoes_api_key():
+    from unittest.mock import patch
+    import spirebrain.overlay.server as overlay_server
+
+    with tempfile.TemporaryDirectory() as tmp:
+        env_path = Path(tmp) / ".env"
+        env_path.write_text("OPENAI_API_KEY=saved-key-from-env\nOPENROUTER_API_KEY=saved-jev-key\n",
+                            encoding="utf-8")
+        server = DashboardServer(port=0, env_path=env_path)
+        server.start_background()
+        try:
+            secret = "saved-key-from-env"
+            with patch.object(overlay_server, "test_brain_connection",
+                              return_value={"ok": False, "message": "network failure"}) as probe:
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{server.port}/api/config/test-brain",
+                    # Empty form value means use the existing local .env key.
+                    data=json.dumps({"api_key": "", "settings": {}}).encode(),
+                    headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    result = json.loads(response.read())
+                probe.assert_called_once_with({}, "saved-key-from-env")
+                assert secret not in json.dumps(result)
+                assert "saved-key-from-env" not in json.dumps(result)
+                assert result["ok"] is False
+
+            with patch.object(overlay_server, "test_jev_connection",
+                              return_value={"ok": False, "message": "network failure"}) as jev_probe:
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{server.port}/api/config/test-jev",
+                    data=json.dumps({"backend": "openrouter", "api_key": ""}).encode(),
+                    headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    result = json.loads(response.read())
+                jev_probe.assert_called_once_with("openrouter", "saved-jev-key", "")
+                assert "saved-jev-key" not in json.dumps(result)
+        finally:
+            server.shutdown()
+
+
 def test_server_sse_stream_delivers_events():
     import http.client
 

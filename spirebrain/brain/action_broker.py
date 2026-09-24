@@ -63,8 +63,15 @@ def _live_monsters(game: dict) -> list[tuple[int, dict]]:
 
 
 def _add(out: list[ActionCandidate], game: dict, candidate: ActionCandidate,
-         forbidden_indices: set[int] | None = None) -> None:
+         forbidden_indices: set[int] | None = None,
+         diagnostics: list[dict] | None = None) -> None:
+    def reject(reason: str) -> None:
+        if diagnostics is not None and len(diagnostics) < 200:
+            diagnostics.append({"candidate_id": candidate.candidate_id,
+                                "label": candidate.label, "reason": reason})
+
     if not candidate.legal:
+        reject("候选已标记为非法")
         return
     if forbidden_indices and str(candidate.command.get("command", "")).lower() == "choose":
         try:
@@ -72,10 +79,18 @@ def _add(out: list[ActionCandidate], game: dict, candidate: ActionCandidate,
         except (TypeError, ValueError):
             choice = -1
         if choice in forbidden_indices:
+            reject("被攻略硬规则禁止")
             return
-    legal, _ = check_action(game, candidate.command)
+    legal, reason = check_action(game, candidate.command)
     if legal:
         out.append(candidate)
+    else:
+        reject(reason)
+
+
+def _reject(diagnostics: list[dict], candidate_id: str, label: str, reason: str) -> None:
+    if len(diagnostics) < 200:
+        diagnostics.append({"candidate_id": candidate_id, "label": label, "reason": reason})
 
 
 def _screen_items(game: dict) -> dict:
@@ -112,10 +127,12 @@ def potion_purchase_allowed(game: dict, item: dict, state: dict) -> bool:
 
 
 def build_action_candidates(game: dict, *,
-                            forbidden_indices: set[int] | None = None) -> list[ActionCandidate]:
+                            forbidden_indices: set[int] | None = None,
+                            diagnostics: list[dict] | None = None) -> list[ActionCandidate]:
     """Enumerate only actions that the current CommunicationMod state accepts."""
     screen = _screen(game)
     out: list[ActionCandidate] = []
+    diagnostics = diagnostics if diagnostics is not None else []
     state = _screen_items(game)
 
     if screen == "MAP":
@@ -132,7 +149,7 @@ def build_action_candidates(game: dict, *,
                 goal_tags=["advance", symbol],
                 risk_tags=["elite"] if symbol == "E" else [],
                 description=f"选择地图节点 {symbol}，位置 {node_id}。",
-            ), forbidden_indices)
+            ), forbidden_indices, diagnostics)
         return out
 
     if screen in {"CARD_REWARD", "BOSS_REWARD", "EVENT", "REST", "GRID", "CARD_SELECT", "HAND_SELECT"}:
@@ -142,6 +159,7 @@ def build_action_candidates(game: dict, *,
         items = _get(state, key, default=[]) or []
         for index, item in enumerate(items):
             if isinstance(item, dict) and item.get("disabled"):
+                _reject(diagnostics, f"{screen.lower()}:{index}", _label(item), "当前界面已禁用")
                 continue
             label = _label(item, f"选项 {index}")
             _add(out, game, ActionCandidate(
@@ -149,12 +167,12 @@ def build_action_candidates(game: dict, *,
                 kind=screen.lower(), label=label,
                 command={"command": "choose", "choice": index},
                 goal_tags=["choose"], description=str(_get(item, "description", "text", default=label)),
-            ), forbidden_indices)
+            ), forbidden_indices, diagnostics)
         if screen in {"CARD_REWARD", "EVENT", "GRID", "CARD_SELECT", "HAND_SELECT"}:
             _add(out, game, ActionCandidate(
                 candidate_id=f"{screen.lower()}:leave", kind="leave", label="跳过/离开",
                 command={"command": "return"}, goal_tags=["preserve_resources"],
-            ), forbidden_indices)
+            ), forbidden_indices, diagnostics)
         return out
 
     if screen in {"SHOP", "SHOP_SCREEN"}:
@@ -165,20 +183,28 @@ def build_action_candidates(game: dict, *,
         index = 0
         for kind, key in (("card", "cards"), ("relic", "relics"), ("potion", "potions")):
             for item in (_get(state, key, default=[]) or []):
+                candidate_id = f"shop:item:{index}"
+                label = _label(item, kind)
                 if _item_unavailable(item):
+                    _reject(diagnostics, candidate_id, label, "商品已售出、禁用或不可用")
                     index += 1
                     continue
                 try:
                     raw_price = _get(item, "price", "cost", default=None)
                     if raw_price is None:
+                        _reject(diagnostics, candidate_id, label, "商品价格缺失")
                         index += 1
                         continue
                     price = int(raw_price)
                 except (TypeError, ValueError):
+                    _reject(diagnostics, candidate_id, label, "商品价格格式无效")
                     index += 1
                     continue
-                label = _label(item, kind)
-                if price <= gold and (kind != "potion" or potion_purchase_allowed(game, item, state)):
+                if price > gold:
+                    _reject(diagnostics, candidate_id, label, "金币不足")
+                elif kind == "potion" and not potion_purchase_allowed(game, item, state):
+                    _reject(diagnostics, candidate_id, label, "药水槽已满")
+                else:
                     tags = ["spend_gold", kind]
                     if kind == "potion":
                         tags.append("combat_resource")
@@ -189,7 +215,7 @@ def build_action_candidates(game: dict, *,
                         goal_tags=tags,
                         risk_tags=["gold_commitment"],
                         description=str(_get(item, "description", default=label)),
-                    ), forbidden_indices)
+                    ), forbidden_indices, diagnostics)
                 index += 1
         purge_cost = _get(state, "purge_cost", default=None)
         if purge_cost is not None:
@@ -202,11 +228,13 @@ def build_action_candidates(game: dict, *,
                 candidate_id=f"shop:purge:{index}", kind="purge", label=f"删牌（{purge_cost} 金）",
                 command={"command": "choose", "choice": index}, cost=purge_cost,
                 goal_tags=["thin_deck", "spend_gold"], risk_tags=["gold_commitment"],
-            ), forbidden_indices)
+            ), forbidden_indices, diagnostics)
+        elif _get(state, "purge_cost", default=None) is not None:
+            _reject(diagnostics, f"shop:purge:{index}", "删牌", "删牌费用无效或金币不足")
         _add(out, game, ActionCandidate(
             candidate_id="shop:leave", kind="leave", label="离开商店",
             command={"command": "return"}, goal_tags=["preserve_resources"],
-        ), forbidden_indices)
+        ), forbidden_indices, diagnostics)
         return out
 
     if screen == "COMBAT":
@@ -214,15 +242,22 @@ def build_action_candidates(game: dict, *,
         hand = _get(combat, "hand", default=[]) or []
         live = _live_monsters(game)
         for index, card in enumerate(hand):
-            if not isinstance(card, dict) or card.get("is_playable") is False:
+            if not isinstance(card, dict):
+                _reject(diagnostics, f"combat:play:{index}", f"卡牌 {index}", "手牌数据无效")
+                continue
+            if card.get("is_playable") is False:
+                _reject(diagnostics, f"combat:play:{index}", _label(card), "游戏标记为当前不可打出")
                 continue
             # A missing cost is not evidence of a zero-cost card.  Only accept
             # it when CommunicationMod explicitly marked the card playable;
             # otherwise leave the end-turn candidate as the honest fallback.
             if card.get("cost") is None and card.get("is_playable") is not True:
+                _reject(diagnostics, f"combat:play:{index}", _label(card), "费用未知且未标记可打出")
                 continue
             targeted = bool(card.get("has_target", str(card.get("type", "")).upper() == "ATTACK"))
             targets = live if targeted else [(None, {})]
+            if targeted and not targets:
+                _reject(diagnostics, f"combat:play:{index}", _label(card), "没有有效敌方目标")
             for target, monster in targets:
                 command = {"command": "play", "card": index}
                 if target is not None:
@@ -240,12 +275,15 @@ def build_action_candidates(game: dict, *,
                     goal_tags=tags,
                     uncertainty="牌面效果未完整解析" if card.get("damage") is None and card.get("block") is None else "",
                     description=str(card.get("description", identity)),
-                ), forbidden_indices)
+                ), forbidden_indices, diagnostics)
         for slot, potion in enumerate(_get(game, "potions", default=[]) or []):
             if not isinstance(potion, dict) or not potion.get("can_use"):
+                _reject(diagnostics, f"combat:potion:{slot}", _label(potion, "药水"), "药水当前不可用")
                 continue
             targeted = bool(potion.get("requires_target"))
             targets = live if targeted else [(None, {})]
+            if targeted and not targets:
+                _reject(diagnostics, f"combat:potion:{slot}", _label(potion), "药水缺少有效目标")
             for target, monster in targets:
                 command = {"command": "potion", "action": "use", "slot": slot}
                 if target is not None:
@@ -256,11 +294,11 @@ def build_action_candidates(game: dict, *,
                     (f" → {_label(monster, '目标')}" if target is not None else ""),
                     command=command, target=target, goal_tags=["potion", "survive"],
                     risk_tags=["consume_resource"],
-                ), forbidden_indices)
+                ), forbidden_indices, diagnostics)
         _add(out, game, ActionCandidate(
             candidate_id="combat:end", kind="end", label="结束回合",
             command={"command": "end"}, goal_tags=["preserve_energy"],
-        ), forbidden_indices)
+        ), forbidden_indices, diagnostics)
         return out
 
     return out

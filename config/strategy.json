@@ -9,7 +9,6 @@
   },
   "deck_policy": {
     "max_cards": 25,
-    "synergy_weight": 0.6,
     "prefer": []
   },
   "brain": {

@@ -575,8 +575,10 @@ def check_brain_config(rep: Report) -> None:
     else:
         rep.add(PASS, "Score gate", f"{configured} (the experimentally selected one)")
 
-    brain = strategy.get("brain", {}) or {}
-    strategic_backend = os.environ.get("BRAIN_BACKEND") or brain.get("backend", "openai")
+    from spirebrain.runtime_config import resolve_runtime_config
+
+    runtime = resolve_runtime_config(ROOT, strategy=strategy)
+    strategic_backend = runtime.brain_backend
     if str(strategic_backend).lower() in {"openai", "gpt"}:
         env_file = ROOT / ".env"
         has_key = bool(os.environ.get("OPENAI_API_KEY"))
@@ -586,49 +588,47 @@ def check_brain_config(rep: Report) -> None:
                           for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines()
                           if "=" in line)
         if has_key:
-            rep.add(PASS, "Strategic GPT brain", f"backend={strategic_backend}")
+            rep.add(PASS, "Strategic GPT brain",
+                    f"backend={strategic_backend} source={runtime.sources['brain_backend']} "
+                    f"config={runtime.config_id}")
         else:
             rep.add(WARN, "Strategic GPT brain", "no OPENAI_API_KEY; JEV/rules fallback will be used",
                     "put OPENAI_API_KEY=... in .env, or set BRAIN_BACKEND=mock/disabled")
     else:
-        rep.add(PASS, "Strategic brain", f"backend={strategic_backend}")
+        rep.add(PASS, "Strategic brain",
+                f"backend={strategic_backend} source={runtime.sources['brain_backend']} "
+                f"config={runtime.config_id}")
 
 
 def check_backend(rep: Report, live: bool) -> None:
-    env_file = ROOT / ".env"
-    key_in_env = bool(os.environ.get("OPENROUTER_API_KEY"))
-    key_in_file = env_file.exists() and "OPENROUTER_API_KEY" in env_file.read_text(
-        encoding="utf-8", errors="replace")
-    # The .env file is what a real launch reads (run_agent.py loads it), so the
-    # probe must read it too — checking for its existence is not the same as
-    # having the key in this process. Mirrors run_agent._load_dotenv, minimal.
-    if key_in_file and not key_in_env:
-        for raw in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
-            line = raw.strip()
-            if line.startswith("OPENROUTER_API_KEY=") and not key_in_env:
-                os.environ["OPENROUTER_API_KEY"] = line.split("=", 1)[1].strip().strip('"').strip("'")
-                key_in_env = True
-    backend = os.environ.get("JEV_BACKEND") or "mock"
-    if key_in_env or key_in_file:
-        where = "process environment" if key_in_env else ".env"
-        rep.add(PASS, "JEV key", f"present in {where} (not printed)")
-    else:
-        rep.add(WARN, "JEV key", "no OPENROUTER_API_KEY",
-                "offline mock backend will be used; put the key in .env for real JEV")
-    rep.add(PASS, "Default backend", backend)
+    from spirebrain.runtime_config import load_dotenv, resolve_runtime_config
+
+    load_dotenv(ROOT / ".env")
+    runtime = resolve_runtime_config(ROOT)
+    backend = runtime.jev_backend
+    key_names = {
+        "openrouter": "OPENROUTER_API_KEY", "llm": "OPENROUTER_API_KEY",
+        "official": "TYPESAFE_API_KEY", "cloudflare": "CLOUDFLARE_API_TOKEN",
+    }
+    key_name = key_names.get(backend)
+    has_key = bool(os.environ.get(key_name, "")) if key_name else True
+    if key_name and has_key:
+        rep.add(PASS, "JEV key", f"present for {backend} (not printed)")
+    elif key_name:
+        rep.add(WARN, "JEV key", f"no {key_name}",
+                f"configure a credential for the selected {backend} provider, or select mock")
+    rep.add(PASS, "Effective JEV backend",
+            f"{backend} source={runtime.sources['jev_backend']} config={runtime.config_id}")
 
     if not live:
         return
-    if not (key_in_env or key_in_file):
-        rep.add(WARN, "Live JEV probe", "skipped — no key")
+    if key_name and not has_key:
+        rep.add(WARN, "Live JEV probe", "skipped — selected provider key is missing")
         return
     try:
-        # The class lives in client_real.py; openrouter_client holds the
-        # LLM-structured stand-in. Wrong module here made the probe fail with
-        # an ImportError that looked like a key problem (found 2026-09-22).
-        from spirebrain.jev_brain.client_real import OpenRouterJevClient
+        from spirebrain.jev_brain.client import NoulSpec, get_client
 
-        client = OpenRouterJevClient()
+        client = get_client(backend)
         resp = client.ask("A test message.", {"ok": __import__(
             "spirebrain.jev_brain.client", fromlist=["NoulSpec"]).NoulSpec(
             instructions="Is this a test message?")})

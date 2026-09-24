@@ -587,7 +587,7 @@ def _build_agent(strategy_path: str | None, backend: str | None, acceptance: str
     if dashboard_url:
         from spirebrain.overlay.server import BridgeFeed
         feed = BridgeFeed(url=dashboard_url)
-    return SpireBrainAgent(jev_backend=backend or "mock",
+    return SpireBrainAgent(jev_backend=backend,
                            strategy_path=strategy_path, acceptance=acceptance,
                            feed=feed, brain_backend=brain_backend)
 
@@ -682,7 +682,10 @@ def main(argv: list[str]) -> int:
     if log_path:
         transport.log_path = Path(log_path)
     # ASCII only in every stderr line - see _announce_stall.
-    print(f"[stdio] ready - backend={backend or 'mock'} "
+    resolved_jev = agent.jev.backend_name
+    resolved_brain = agent.strategic.backend_name
+    print(f"[stdio] ready - JEV={resolved_jev} brain={resolved_brain} "
+          f"config={agent.runtime_config.config_id} "
           f"acceptance={acceptance or 'margin'} mode={transport.mode}; "
           f"waiting for state on stdin",
           file=sys.stderr)

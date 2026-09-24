@@ -263,7 +263,8 @@ def parse_config(text: str) -> dict:
 
 def default_command(backend: str = DEFAULT_BACKEND, *, auto_start: bool = False,
                    klass: str | None = None, ascension: int | None = None,
-                   mode: str | None = None, dashboard_url: str | None = None) -> str:
+                   mode: str | None = None, dashboard_url: str | None = None,
+                   brain_backend: str | None = None) -> str:
     """`<python> <repo>/run_agent.py --backend <backend> [agent flags]`.
 
     Never the module file: running a script puts *that script's* directory first
@@ -288,6 +289,8 @@ def default_command(backend: str = DEFAULT_BACKEND, *, auto_start: bool = False,
     2026-09-22 20:49) is why this parameter exists; `start.py` always passes it.
     """
     agent = f"{sys.executable} {ROOT / 'run_agent.py'} --backend {backend}"
+    if brain_backend:
+        agent += f" --brain-backend {brain_backend}"
     if klass:
         agent += f" --class {klass}"
     if ascension is not None:

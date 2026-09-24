@@ -22,12 +22,14 @@ class StrategicOrchestrator:
     """The only object the router needs to know about the GPT layer."""
 
     def __init__(self, *, backend: str = "openai", model: str | None = None,
+                 endpoint: str | None = None,
                  timeout_ms: int = 6000, max_plan_steps: int = 5,
                  memory_events: int = 20, max_output_tokens: int = 900,
                  client=None, log_dir=None, async_planning: bool | None = None) -> None:
         provider = client if client is not None else get_strategic_brain(
             backend,
             model=model,
+            endpoint=endpoint,
             timeout_ms=timeout_ms,
             max_output_tokens=max_output_tokens,
         )

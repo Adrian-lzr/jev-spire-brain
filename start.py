@@ -99,7 +99,8 @@ def start_dashboard(port: int, open_browser: bool) -> tuple[object, str]:
     return server, url
 
 
-def mod_config_command(url: str, backend: str, auto_start: bool, mode: str) -> str:
+def mod_config_command(url: str, backend: str, auto_start: bool, mode: str,
+                       brain_backend: str | None = None) -> str:
     """The exact command line CommunicationMod should launch, with the dashboard wired.
 
     The mode is part of the command, never left implicit: this string is the only
@@ -111,7 +112,8 @@ def mod_config_command(url: str, backend: str, auto_start: bool, mode: str) -> s
 
     # The /publish endpoint, not the page: the agent POSTs events to it, and
     # default_command appends it when given the bare base URL.
-    command = default_command(backend, auto_start=auto_start, mode=mode,
+    command = default_command(backend, brain_backend=brain_backend,
+                              auto_start=auto_start, mode=mode,
                               dashboard_url=url)
     return command
 
@@ -147,7 +149,14 @@ def main(argv: list[str] | None = None) -> int:
     do_setup = "--setup" in argv or do_setup_saved()
     open_browser = "--browser" in argv and "--no-browser" not in argv
     port = int(_value(argv, "port") or DEFAULT_PORT)
-    backend = _value(argv, "backend") or detect_backend()
+    from spirebrain.runtime_config import resolve_runtime_config
+
+    runtime = resolve_runtime_config(ROOT, cli={
+        "backend": _value(argv, "backend"),
+        "brain_backend": _value(argv, "brain-backend"),
+    })
+    backend = runtime.jev_backend
+    brain_backend = runtime.brain_backend
     mode = ("play" if "--play" in argv else
             "advise" if "--advise" in argv else (_value(argv, "mode") or "advise"))
     if mode not in ("advise", "play"):
@@ -159,6 +168,9 @@ def main(argv: list[str] | None = None) -> int:
     auto_start = mode == "play"
 
     print("Jev Spire Brain — start\n")
+    print(f"providers: JEV={backend} ({runtime.sources['jev_backend']}), "
+          f"brain={brain_backend} ({runtime.sources['brain_backend']}); "
+          f"config={runtime.config_id}")
     if mode == "advise":
         print("mode: ADVISE (军师模式) - the agent will recommend, never play:")
         print("      it sends the game only polls, and it will not start a run for you.")
@@ -222,7 +234,7 @@ def main(argv: list[str] | None = None) -> int:
             server.shutdown()
         return 0
 
-    command = mod_config_command(url, backend, auto_start, mode)
+    command = mod_config_command(url, backend, auto_start, mode, brain_backend)
     print("\n[3/3] tell the game to launch the brain:")
     print(f"      {command}")
     if mode == "advise":
@@ -257,16 +269,10 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def detect_backend() -> str:
-    """openrouter when a key exists, mock otherwise — never ask the user to choose."""
-    import os
+    """Compatibility helper returning the same resolved JEV provider as startup."""
+    from spirebrain.runtime_config import resolve_runtime_config
 
-    if os.environ.get("OPENROUTER_API_KEY"):
-        return "openrouter"
-    env_file = ROOT / ".env"
-    if env_file.exists() and "OPENROUTER_API_KEY" in env_file.read_text(
-            encoding="utf-8", errors="replace"):
-        return "openrouter"
-    return "mock"
+    return resolve_runtime_config(ROOT).jev_backend
 
 
 def do_setup_saved() -> bool:

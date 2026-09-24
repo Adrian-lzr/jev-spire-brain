@@ -200,6 +200,13 @@ guide rules without blocking the game. Set `BRAIN_BACKEND=mock` for an offline
 strategic-brain demo, or `BRAIN_BACKEND=jev`/`disabled` to keep the old path.
 Strategic calls are recorded separately in `logs/brain_calls.jsonl`.
 
+Model settings can also be edited in the local dashboard: start `python run_dashboard.py`,
+open `http://127.0.0.1:8787`, then select **模型配置**. The dialog configures the
+strategic backend/model/endpoint and JEV provider credentials, reports connection
+tests without revealing saved keys, and writes settings to the project `.env` file.
+Restart the game agent after saving for changes to take effect. The dashboard binds
+to loopback only; keep `.env` private and do not commit it.
+
 Everything start.py does, done manually:
 
 ```bash

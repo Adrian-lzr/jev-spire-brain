@@ -21,40 +21,16 @@ import os
 import sys
 from pathlib import Path
 
+from spirebrain.runtime_config import load_dotenv
+
 ROOT = Path(__file__).resolve().parent
-
-
-def _load_dotenv(path: Path) -> int:
-    """Minimal KEY=VALUE loader — stdlib only, no python-dotenv dependency.
-
-    Deliberately simple: `#` comments, blank lines, optional `export`, and
-    surrounding quotes stripped. It does not interpolate, and it will not
-    override a variable that is already set in the real environment (the
-    environment wins, which is what you want when debugging by hand).
-    """
-    if not path.exists():
-        return 0
-    loaded = 0
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        if key.startswith("export "):
-            key = key[len("export "):].strip()
-        value = value.strip().strip('"').strip("'")
-        if key and key not in os.environ:
-            os.environ[key] = value
-            loaded += 1
-    return loaded
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
-    _load_dotenv(ROOT / ".env")
+    load_dotenv(ROOT / ".env")
 
     from spirebrain.driver.stdio import main as stdio_main
 

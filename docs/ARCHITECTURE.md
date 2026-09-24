@@ -1,96 +1,78 @@
-# 架构与代码质量：现状测量 + 重构计划
+# Jev Spire Brain 架构说明
 
-> 建档 2026-09-22。本文是**测量与计划**，不是宣传：每个数字都在本机跑出来过，
-> 每条改造都写了验收方式。没做的部分明确标为"未做"。
+本文描述当前仓库中的实际实现（2026-09-24），不是未来功能清单。项目的目标是为《杀戮尖塔》提供游戏内实时建议：玩家继续操作，agent 只在 `advise` 模式观察状态并给出当前一步建议。
 
-## 1. 现状测量（2026-09-22）
+## 1. 运行链路
 
-### 1.1 体量
+```text
+CommunicationMod
+  -> stdio 兼容层
+  -> GameSnapshot / normalize_game_state
+  -> SpireBrainAgent
+       -> GuideBook 硬规则与角色覆盖检查
+       -> ActionBroker 合法候选和过滤诊断
+       -> 场景处理器（地图、选牌、事件、火堆、商店、战斗、遗物）
+       -> StrategicOrchestrator（GPT 战略计划，异步/缓存）
+       -> JEV tactical client（候选内局部判断）
+       -> check_action() / CommunicationMod 命令
+  -> overlay feed（游戏内面板）和 dashboard（浏览器）
+```
 
-| 区域 | 行数 | 文件数 | 说明 |
-|---|---|---|---|
-| `driver/` | 2391 | 3 | 传输 + 路由 + 玩家识别 |
-| `jev_brain/` | 2214 | 7 | 大脑接口 + 状态 + 决策点 |
-| `overlay/` | 898 | 4 | 面板服务与网页 |
-| `tactical/` | **125** | 3 | 战斗出牌 + HP 预算——**过薄** |
-| `cards/` | 新增 | 4 | 卡牌知识层（本次新增） |
-| `tests/` | 4597 | 19 | 281 个测试函数 |
+模型不能直接生成游戏命令。最终命令必须来自本地候选，并通过合法性检查；硬规则优先级高于 GPT 意图，GPT 意图高于 JEV 局部排序，最后才是本地兜底。
 
-单文件最大的四个：`stdio.py` 1147、`decisions.py` 723（含本次新增）、
-`witness.py` 713、`doctor.py` 663。
+## 2. 主要边界
 
-### 1.2 已确认的坏味道（按危害排序）
+### 状态边界
 
-| # | 问题 | 证据 | 危害 |
-|---|---|---|---|
-| 1 | `stdio.py` 是巨石：传输、守卫、advise 模式、屏梯子、日志、CLI 全在一个文件 | 1147 行 / `run()`、`_advise`、`_ladder_command`、`_log`、`main` 同文件 | 改任何一处都要读 1000 行；本次两次死亡 bug 都出在这个文件 |
-| 2 | 同一件事有两套实现 | `state.card_line` vs `gamedata.card_line`；`decisions._describe` 在 `CardRewardJudge` 与 `BossRelicJudge` 各一份；`_state_from` 的 thin/run 双路径在 7 个决策类里都有 | 修一处漏一处（`card_line` 的差异曾导致效果文本缺失） |
-| 3 | 决策点标签三处重复 | `witness.py` 的中文标签 / `dashboard.html` 的 `POINT_META` / `FeedClient.java` 的 `pointZh()` | 跨语言重复，改一个忘两个 → 面板显示英文或空白 |
-| 4 | `tactical/` 太薄 | 125 行，`combat_greedy.py` 自述 "Phase 4 upgrade path" | 战斗内出牌（玩家最频繁的决策）没有知识层参与 |
-| 5 | 配置里有死项 | `config/strategy.json` 的 `synergy_weight` 全仓库无读取点 | 配置文件说谎：看起来可调，实际无效 |
-| 6 | 测试盲区 | `gamedata.py`、`analysis/*`、`openrouter_client.py` 均为 0 直接引用 | 出事只能靠真机发现（本机 `gamedata` 是卡牌文本的唯一来源，却没有测试） |
+`spirebrain/driver/live_state.py` 的 `GameSnapshot.from_communication()` 是 CommunicationMod 原始字典进入决策层的唯一归一化入口。它补齐角色、战斗屏幕和稳定 `state_id`，并保留原始字段供兼容代码使用。`run_id` 变化或新局/死亡/通关时，`RunMemory` 清空。
 
-## 2. 重构计划（按 收益/风险 排序）
+### 配置边界
 
-### 阶段 A — 拆 `stdio.py`（收益最高，风险中）
+`spirebrain/runtime_config.py` 提供统一解析结果，所有启动器、agent、doctor 和 dashboard 都使用它。优先级固定为：
 
-**目标**：`stdio.py` 只做"字节流 ↔ 消息"，其余全部搬走。
+```text
+命令行 > 进程环境变量 > 项目 .env > config/strategy.json > 默认值
+```
 
-| 新文件 | 从 `stdio.py` 搬什么 | 验收 |
-|---|---|---|
-| `driver/transport.py` | `StdioTransport` 的读写循环、`run()`、`_log`、`to_command_line` | `tests/test_stdio.py` 全绿且不改断言 |
-| `driver/guards.py` | 停滞守卫、动作上限、屏梯子（`_ladder_command`、`_screen_signature`） | `tests/test_guards.py` 全绿 |
-| `driver/modes.py` | advise 模式的轮询/去重/发布（`_advise`、`_poll`、`advised_fp`） | `tests/test_advise.py` 全绿 |
-| `driver/encoding.py` | `_scrub_surrogates` + stdin/stderr 的编码策略 | `tests/test_poison.py` 全绿 |
+配置结果携带来源和 `config_id` 指纹。API Key 只从环境变量或 `.env` 读取，不能进入 public config、决策轨迹或普通日志。dashboard 显示实际生效的 JEV/GPT 后端、来源和指纹，保存后提示重启 agent。
 
-**硬性约束**：纯搬运，**不顺手改行为**。先搬 + 全绿，再谈优化。
-搬完 `stdio.py` 应 < 300 行，只留组装与 CLI。
+### 场景边界
 
-### 阶段 B — 消重（争议最小，风险低）
+`spirebrain/driver/scenes.py` 的 `SceneRouter` 统一屏幕到处理器的映射，并保留 GRID/CARD_SELECT/HAND_SELECT 兼容判断。场景处理器负责生成该场景的语义候选，不负责绕过统一执行校验。
 
-1. `card_line` 两套 → 以 `gamedata` 版为准，`state` 版删掉并改调用点（3 处）。
-2. `_describe` 两份 → 提到 `jev_brain/prompt.py`，两个 Judge 共用。
-3. 决策点标签 → **单一来源**：Python 生成一份 JSON（`spirebrain/data/points.json`），
-   Java 侧读它、网页侧 fetch 它。这是唯一能真正消灭三处重复的做法；
-   在此之前，用一条契约测试钉住"Python 的标签集合 == Java 里硬编码的集合"（可解析
-   `FeedClient.java` 文本比对，虽然土但有效）。
+### 决策证据边界
 
-### 阶段 C — `_state_from` 双路径收敛
+`spirebrain/driver/trace.py` 写入 `logs/decision_trace.jsonl`。每条记录包含 schema 版本、`run_id/state_id/plan_id`、场景、规则 ID、候选和过滤原因、provider、延迟、最终候选、来源、兜底、不确定性及玩家实际行动。记录只保存结构化短理由，不保存隐藏思维链、完整请求或密钥；写入失败不会阻塞游戏。
 
-7 个决策类都保留 `thin` / `run` 两条构造路径，是明确的临时补丁（注释自述）。
-计划：只保留 `RunContext` 一条路径，`thin` 仅作为 `RunContext` 的构造便捷函数存在。
-验收：`tests/test_decisions.py` + `test_new_modules.py` 全绿，
-且 `decisions.py` 里 `_state_from` 的调用点从 7 处降为 1 处。
+## 3. GPT、JEV 与规则的职责
 
-### 阶段 D — 补齐测试盲区
+GPT 是战略层：在新局、换幕、地图、奖励、商店、精英/Boss、构筑或资源发生重大变化时生成最多 2-5 步的短计划。普通战斗中的每张牌不重复请求 GPT，使用仍有效的计划和本地战术层。
 
-| 模块 | 该测什么 |
-|---|---|
-| `gamedata.py` | 加载失败时的降级、`lookup_keys` 的 id 优先、`card_effect` 带/不带升级 |
-| `openrouter_client.py` | 超时、限流、非 JSON 响应、`MAX_REQUEST_BYTES` 截断 |
-| `analysis/*` | 至少一个端到端：给一段 `advice.jsonl`，产出非空统计 |
+JEV 是战术层：只能在本地已确认合法、且符合战略约束的候选中选择或评分，返回候选 ID、置信度和短判断。JEV 不生成自由格式命令。
 
-### 阶段 E — 死配置与文档一致性
+`GuideBook` 和 `check_action()` 是硬约束：角色未覆盖、资源不足、无效目标、药水槽已满、明确危险动作等情况直接过滤或降级。GPT 超时、无 Key、无效 JSON、断网时保留缓存计划或退回 JEV+规则；两者都不可用时只显示状态不足，并在 `advise` 模式发送 `wait/state`。
 
-1. `strategy.json` 的 `synergy_weight`：要么接进 `deck.grade()` 的权重，要么删除。
-   （本次已把协同权重写死在 `knowledge._SYNERGY_RULES`，倾向删除该配置项。）
-2. README / ROADMAP / SETUP 里与代码不符的段落用一条检查脚本兜住
-   （`doctor` 已经在做类似的事，扩展它）。
+## 4. 游戏内建议与浏览器面板
 
-## 3. 已知的性能/正确性风险（不是坏味道，但要记账）
+游戏内面板始终显示当前一步、战略目标、简短原因、来源和合法备用建议。建议状态绑定当前 `state_id`/`plan_id`，旧异步结果不能覆盖新状态。浏览器面板在此基础上展示候选、过滤原因、决策链、provider 延迟、fallback 和玩家采纳记录。完整隐藏思维链不会展示。
 
-* `deck.profile()` 每屏候选都会重新读一遍卡组的效果文本（`gamedata` 是缓存的，
-  但 `profile` 每次都重新遍历）。当前卡组 ≤ 40 张、候选 ≤ 4 张，实测无感；
-  若将来给战斗内出牌也接入评估，需要加缓存。
-* `_scrub_surrogates` 递归整棵消息树，每屏一次。消息约 4–50 KB，实测无感。
+## 5. 评测与可行性
 
-## 4. 本次已做（2026-09-22 夜）
+当前项目已经具备成为《杀戮尖塔》专用 agent 的工程基础：状态归一化、候选动作、规则约束、双层模型、异步降级、游戏内反馈和结构化轨迹均有明确接口。首版只承诺铁甲战士；其他角色会显示覆盖不足，不套用铁甲战士规则。
 
-* 新增 `spirebrain/cards/`（4 个文件）与 `tools/extract_card_meta.py`。
-* `CardRewardJudge` 改造为"模型 + 卡组证据"双边决策（含模型弃权时的本地拍板、
-  以及无证据时弃权）。
-* `state.deck_keys()` 新增，消除"游戏条目 vs 卡牌 ID"在调用点的重复转换。
-* 新增 `tests/test_cards.py`（16 个测试）与全量回归 281 个测试函数。
+回放和单元测试可以衡量建议合法率、场景覆盖、采纳率、JEV/GPT fallback 率、不确定率和决策延迟，但这些指标不等于胜率。只有在相同难度和成对种子的真实对照实验中完成至少 100 对局并报告 95% 置信区间后，才能宣称胜率变化；在此之前只能报告建议质量指标。
 
-**未做**：阶段 A–E 全部。它们是大块的、需要单独一轮的机械改造，
-不适合和"新增能力"混在同一次提交里——那正是本项目两次线上事故的成因。
+## 6. 当前已知边界与后续顺序
+
+1. `stdio.py` 仍同时承担传输生命周期和部分兼容路由；后续可按行为边界拆出 transport/guards/modes，但必须保持现有协议和 `advise` 约束。
+2. Python、网页和 Java overlay 的决策点标签还没有完全收敛到单一生成文件，需要契约测试防止漂移。
+3. `gamedata.py`、真实 provider、`analysis/*` 的直接测试仍需补齐，尤其是超时、HTTP 错误、无效 JSON 和缓存降级。
+4. `deck_policy.synergy_weight` 已删除，因为仓库没有读取点；流派协同规则继续由 `spirebrain/cards/knowledge.py` 管理，避免保留失效配置。
+5. 需要建立固定场景回放集，再根据最弱场景改进战斗目标、商店预算和未知卡牌效果模型；不能只凭单局体验调整策略。
+
+## 7. 兼容契约
+
+- 默认模式是 `advise`，实际发送给游戏的命令严格限制为 `wait` 或 `state`。
+- 旧的 JEV-only 后端仍可通过 `brain.backend=jev` 或启动参数使用。
+- CommunicationMod 原始字典、stdio 命令协议和旧测试入口保持兼容。
+- 所有模型结果都必须匹配当前状态代际；过期异步结果直接丢弃。

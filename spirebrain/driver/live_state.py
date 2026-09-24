@@ -7,6 +7,35 @@ and a `combat` object. Keep the raw fields too: they remain the source of truth.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class GameSnapshot:
+    """Normalized CommunicationMod state plus stable identity for a decision."""
+
+    payload: dict
+    state_id: str
+    run_id: str
+    screen_type: str
+    character: str
+
+    @classmethod
+    def from_communication(cls, game: dict) -> "GameSnapshot":
+        payload = normalize_game_state(game if isinstance(game, dict) else {})
+        from spirebrain.brain.planner import stable_state_id
+
+        character = str(payload.get("character") or payload.get("class") or "").upper()
+        run_id = str(payload.get("run_id") or payload.get("runId") or payload.get("seed")
+                     or f"local:{character}")
+        return cls(
+            payload=payload,
+            state_id=stable_state_id(payload),
+            run_id=run_id,
+            screen_type=str(payload.get("screen_type") or payload.get("screen") or "").upper(),
+            character=character,
+        )
+
 
 def normalize_game_state(game: dict) -> dict:
     state = dict(game)

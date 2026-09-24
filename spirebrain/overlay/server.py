@@ -26,14 +26,20 @@ run it is watching.
 from __future__ import annotations
 
 import json
+import ipaddress
 import queue
 import sys
 import threading
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from spirebrain.overlay.feed import EVENT_KINDS, DecisionFeed
+from spirebrain.overlay.config import (
+    MAX_CONFIG_BYTES, get_public_config, get_secret, save_config,
+    test_brain_connection, test_jev_connection,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 DASHBOARD = Path(__file__).resolve().parent / "dashboard.html"
@@ -215,7 +221,8 @@ class DashboardServer:
     """Bind a port, hold one DecisionFeed, serve the page and the stream."""
 
     def __init__(self, feed: DecisionFeed | None = None,
-                 port: int = 8787, page_path: str | Path | None = None) -> None:
+                 port: int = 8787, page_path: str | Path | None = None,
+                 env_path: str | Path | None = None) -> None:
         # `is None`, not `or`: DecisionFeed defines __len__, so an empty (but
         # real) feed is falsy and `feed or DecisionFeed()` would silently swap
         # in a second feed — the one the agent publishes to would then not be
@@ -223,7 +230,8 @@ class DashboardServer:
         self.feed = feed if feed is not None else DecisionFeed()
         self.port = port
         self.page_path = Path(page_path) if page_path else DASHBOARD
-        self._handler = _make_handler(self.feed, self.page_path)
+        self.env_path = Path(env_path) if env_path else ROOT / ".env"
+        self._handler = _make_handler(self.feed, self.page_path, self.env_path)
         try:
             self.httpd = _ExclusiveHTTPServer(("127.0.0.1", port), self._handler)
         except OSError as exc:
@@ -243,7 +251,7 @@ class DashboardServer:
         self.httpd.shutdown()
 
 
-def _make_handler(feed: DecisionFeed, page_path: Path):
+def _make_handler(feed: DecisionFeed, page_path: Path, env_path: Path):
     class Handler(BaseHTTPRequestHandler):
         # Quiet by default: the game may inherit this process's console, and a
         # log line per event would be noise. Errors still surface.
@@ -260,17 +268,50 @@ def _make_handler(feed: DecisionFeed, page_path: Path):
                 self._send_json(200, {"ok": True, "events": len(feed)})
             elif path == "/state":
                 self._send_json(200, _state_snapshot(feed))
+            elif path == "/api/config":
+                if not self._is_local_request():
+                    self._send_json(403, {"error": "本地请求被拒绝"})
+                    return
+                self._send_json(200, get_public_config(env_path))
             else:
                 self._send_json(404, {"error": f"no route {path!r}"})
 
         def do_POST(self):  # noqa: N802 - stdlib name
             path = self.path.split("?", 1)[0]
-            if path != "/publish":
+            if path not in ("/publish", "/api/config/save", "/api/config/test-brain",
+                            "/api/config/test-jev"):
                 self._send_json(404, {"error": f"no route {path!r}"})
                 return
             try:
+                if path != "/publish" and not self._is_local_request():
+                    self._send_json(403, {"error": "本地请求被拒绝"})
+                    return
                 length = int(self.headers.get("Content-Length") or 0)
+                if length < 0 or length > (MAX_CONFIG_BYTES if path.startswith("/api/config/") else 1024 * 1024):
+                    self._send_json(413, {"error": "请求内容过大"})
+                    return
                 body = json.loads(self.rfile.read(length) or b"{}")
+                if not isinstance(body, dict):
+                    raise ValueError("请求内容格式无效")
+                if path == "/api/config/save":
+                    self._send_json(200, {"ok": True, "config": save_config(env_path, body)})
+                    return
+                if path == "/api/config/test-brain":
+                    key = str(body.get("api_key") or get_secret(env_path, "openai_api_key"))
+                    result = test_brain_connection(body.get("settings") or {}, key)
+                    self._send_json(200, result)
+                    return
+                if path == "/api/config/test-jev":
+                    backend = str(body.get("backend", ""))
+                    secret_field = ("openrouter_api_key" if backend in ("openrouter", "llm")
+                                    else "cloudflare_api_token" if backend == "cloudflare"
+                                    else "typesafe_api_key")
+                    key = str(body.get("api_key") or get_secret(env_path, secret_field))
+                    account_id = str(body.get("account_id") or get_secret(
+                        env_path, "cloudflare_account_id"))
+                    result = test_jev_connection(backend, key, account_id)
+                    self._send_json(200, result)
+                    return
                 kind = str(body.get("kind", ""))
                 if kind not in EVENT_KINDS:
                     raise ValueError(f"kind must be one of {EVENT_KINDS}")
@@ -278,7 +319,30 @@ def _make_handler(feed: DecisionFeed, page_path: Path):
                 event = feed.publish(kind, payload)
                 self._send_json(200, {"ok": True, "seq": event["seq"]})
             except Exception as exc:  # noqa: BLE001 - report, keep serving
-                self._send_json(400, {"error": str(exc)})
+                # Config parse/write errors may contain user input; never echo it.
+                message = str(exc) if path == "/publish" else "配置请求无效或无法保存"
+                self._send_json(400, {"error": message})
+
+        def _is_local_request(self) -> bool:
+            try:
+                if not ipaddress.ip_address(self.client_address[0]).is_loopback:
+                    return False
+                host = urlsplit("//" + (self.headers.get("Host") or ""))
+                if host.hostname not in ("127.0.0.1", "localhost", "::1"):
+                    return False
+                if host.port not in (None, self.server.server_port):
+                    return False
+                origin_value = self.headers.get("Origin")
+                if origin_value:
+                    origin = urlsplit(origin_value)
+                    if origin.scheme != "http" or origin.hostname not in (
+                            "127.0.0.1", "localhost", "::1"):
+                        return False
+                    if origin.port not in (None, self.server.server_port):
+                        return False
+                return True
+            except (ValueError, TypeError):
+                return False
 
         def _serve_events(self):
             client = _Client()
