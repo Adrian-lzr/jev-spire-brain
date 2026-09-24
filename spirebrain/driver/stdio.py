@@ -19,7 +19,6 @@ Anything that still cannot be confirmed offline is flagged `PHASE 1 VERIFY`.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import sys
@@ -57,6 +56,10 @@ from spirebrain.driver.protocol import (
 )
 from spirebrain.driver.witness import PlayerTracker
 from spirebrain.driver.live_state import normalize_game_state
+from spirebrain.driver.decision_state import (
+    state_id as semantic_state_id,
+    recommendation_key,
+)
 
 # Names that used to live in this module and are still imported from it. Kept as
 # thin aliases rather than a shim object: a caller that wants the new home should
@@ -189,7 +192,9 @@ class StdioTransport:
             poll_frames=self.poll_frames,
             warn_stream=self.warn_stream,
             ensure_offered=self._ensure_offered,
-            fingerprint=self._fingerprint,
+            # Advice deduplication includes the legal command/candidate view;
+            # the auto-player stall guard below continues to use semantic state.
+            fingerprint=lambda state: recommendation_key(state),
             message_count=lambda: self.messages,
         )
 
@@ -222,19 +227,8 @@ class StdioTransport:
 
     @staticmethod
     def _fingerprint(game: dict) -> str:
-        """Stable hash of exactly the state decide() will see.
-
-        sort_keys so dict ordering cannot fake a change; default=str so one odd
-        value degrades to its repr instead of raising inside the hot loop.
-        """
-        try:
-            blob = json.dumps(game, sort_keys=True, default=str, ensure_ascii=False)
-        except (TypeError, ValueError):
-            blob = repr(game)
-        # "replace", not strict: a lone surrogate reaching this deep (scrub
-        # missed it, or a replay fed the transport directly) degrades to a
-        # stable hash instead of killing the agent - measured 2026-09-22 20:49.
-        return hashlib.sha1(blob.encode("utf-8", "replace")).hexdigest()
+        """Stable hash of semantic game fields, excluding poll noise."""
+        return semantic_state_id(game)
 
     @staticmethod
     def _screen_signature(game: dict) -> str:

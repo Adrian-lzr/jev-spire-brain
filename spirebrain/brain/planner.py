@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import time
 from typing import Any
@@ -10,22 +9,12 @@ from typing import Any
 from .memory import RunMemory
 from .protocol import BrainResponse, ActionCandidate, StrategicPlan
 from spirebrain.strategy import strategy_context
+from spirebrain.driver.decision_state import state_id as semantic_state_id
 
 
 def stable_state_id(game: dict) -> str:
-    """Hash the state used by planning, tolerating odd live payload values."""
-    if isinstance(game, dict):
-        # These fields belong to the transport envelope rather than the game
-        # state.  Excluding them makes the advisor's fingerprint, worker plan
-        # and browser state ID agree even when CommunicationMod advertises a
-        # different safe verb set on the same screen.
-        game = {k: v for k, v in game.items()
-                if k not in {"available_commands", "ready_for_command"}}
-    try:
-        raw = json.dumps(game, sort_keys=True, default=str, ensure_ascii=False)
-    except (TypeError, ValueError):
-        raw = repr(game)
-    return hashlib.sha1(raw.encode("utf-8", "replace")).hexdigest()
+    """Compatibility wrapper around the shared semantic state identity."""
+    return semantic_state_id(game)
 
 
 def compact_state(game: dict) -> dict:
@@ -120,6 +109,7 @@ class StrategicPlanner:
                     error=f"战略计划引用了当前不存在的候选：{', '.join(unknown[:5])}",
                     fallback=True,
                 )
+            result.plan.bind_candidates(candidates)
             if memory is not None:
                 memory.set_plan(result.plan)
         return result

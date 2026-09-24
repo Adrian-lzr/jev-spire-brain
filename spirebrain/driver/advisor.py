@@ -39,6 +39,7 @@ from spirebrain.driver.witness import (
     label_for,
 )
 from spirebrain.overlay.feed import advice_event, outcome_event
+from spirebrain.driver.decision_state import state_id as semantic_state_id
 
 
 def screen_of(game: Any) -> str:
@@ -93,6 +94,7 @@ class AdviseSession:
         self.tracker = tracker if tracker is not None else PlayerTracker()
         self._worker_agent = agent.clone_for_advice() if hasattr(agent, "clone_for_advice") else None
         self._latest_fp: str | None = None
+        self._latest_state_id: str | None = None
         self._generation = 0
         self._work_lock = threading.Lock()
         self._work_running = False
@@ -112,6 +114,7 @@ class AdviseSession:
         self.advised_fp = None
         self._issued_state_ids.clear()
         self._latest_fp = None
+        self._latest_state_id = None
         self._generation += 1
         with self._work_lock:
             self._queued_work = None
@@ -130,7 +133,10 @@ class AdviseSession:
         every ~1/3 second, and re-asking JEV on each one would turn a $0.001
         decision into a per-second bill for a player who is simply thinking.
         """
-        fp = self._fingerprint(game)
+        # Include the legal command view in the recommendation identity.  Poll
+        # metadata and animation noise are removed by the shared projection.
+        fp = self._fingerprint(dict(game, available_commands=available))
+        state_version = semantic_state_id(game)
         outcome = self.tracker.resolve(game)
         if outcome is not None:
             self._handle_outcome_for_strategy(outcome)
@@ -142,7 +148,8 @@ class AdviseSession:
             if fp != self.advised_fp:
                 self.advised_fp = fp
                 self._latest_fp = fp
-                self._publish_status(fp, "unavailable", "当前界面暂无可判断的操作",
+                self._latest_state_id = state_version
+                self._publish_status(state_version, "unavailable", "当前界面暂无可判断的操作",
                                      "请继续手动操作，进入可识别界面后建议会自动恢复。",
                                      point=SCREEN_POINT.get(screen_of(game), "navigation"))
             self._drain_completed()
@@ -151,6 +158,7 @@ class AdviseSession:
         if fp != self.advised_fp:
             self.advised_fp = fp
             self._latest_fp = fp
+            self._latest_state_id = state_version
             # A state can legitimately recur later (for example, returning to
             # the same shop after a cancel).  The generation distinguishes that
             # new request from a late result produced for the earlier visit.
@@ -202,12 +210,12 @@ class AdviseSession:
         except Exception as exc:  # noqa: BLE001
             quick = {"status": "thinking", "reason": f"本地规则暂不可用：{type(exc).__name__}"}
         if quick.get("status") == "unsupported":
-            self._publish_status(fp, "unsupported", quick.get("label", "角色未覆盖"),
+            self._publish_status(semantic_state_id(game), "unsupported", quick.get("label", "角色未覆盖"),
                                  quick.get("reason", ""), "unavailable",
                                  point=SCREEN_POINT.get(screen_of(game), "navigation"))
             return
         if quick.get("command"):
-            self._record_action(payload, quick["command"], self.agent, fp,
+            self._record_action(payload, quick["command"], self.agent, semantic_state_id(game),
                                 reason_override=quick.get("reason", ""),
                                 source_type=quick.get("source_type", "guide_rule"),
                                 source=quick.get("source", ""),
@@ -217,7 +225,7 @@ class AdviseSession:
             if quick.get("source_type") == "guide_rule":
                 return  # a hard rule has already settled this decision
         else:
-            self._publish_status(fp, "thinking", quick.get("label", "正在分析当前局面…"),
+            self._publish_status(semantic_state_id(game), "thinking", quick.get("label", "正在分析当前局面…"),
                                  quick.get("reason", ""), "pending",
                                  quick.get("guide_rules", []),
                                  point=SCREEN_POINT.get(screen_of(game), "navigation"))
@@ -255,8 +263,8 @@ class AdviseSession:
             if error is not None or command is None:
                 # An immediate hard-rule recommendation remains visible on API
                 # failure. Otherwise show a clear unavailable status.
-                if self.tracker.pending is None or self.tracker.pending.state_id != fp:
-                    self._publish_status(fp, "unavailable", "当前建议暂不可用",
+                if self.tracker.pending is None or self.tracker.pending.state_id != self._latest_state_id:
+                    self._publish_status(self._latest_state_id or fp, "unavailable", "当前建议暂不可用",
                                          f"模型调用失败：{type(error).__name__ if error else 'unknown'}",
                                          "unavailable",
                                          point=SCREEN_POINT.get(screen_of(payload), "navigation"))
@@ -268,7 +276,8 @@ class AdviseSession:
                         feed.publish("decision", dict(entry))
                     except Exception:  # noqa: BLE001 - diagnostics are optional
                         pass
-            self._record_action(payload, command, self._worker_agent, fp,
+            self._record_action(payload, command, self._worker_agent,
+                                semantic_state_id(payload),
                                 history_entry=entry)
 
     def _advise_once(self, game: dict, available: Any) -> None:
@@ -284,7 +293,7 @@ class AdviseSession:
                   file=self.warn_stream, flush=True)
             return
 
-        self._record_action(payload, command, self.agent, self._fingerprint(game))
+        self._record_action(payload, command, self.agent, semantic_state_id(game))
 
     def _record_action(self, payload: dict, command: dict, decision_agent: Any,
                        state_id: str, *, reason_override: str = "",
