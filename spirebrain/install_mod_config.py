@@ -414,11 +414,20 @@ def main(argv: list[str]) -> int:
     written: list[Path] = []
     for target in paths:
         target.parent.mkdir(parents=True, exist_ok=True)
+        desired = text.encode("ascii")
+        if target.exists():
+            try:
+                if target.read_bytes() == desired:
+                    print(f"unchanged {target}")
+                    written.append(target)
+                    continue
+            except OSError:
+                pass
         if target.exists():
             backup = target.with_suffix(f".properties.bak-{time.strftime('%Y%m%d-%H%M%S')}")
             shutil.copy2(target, backup)
             print(f"backed up {backup.name} (in {backup.parent.name}\\)")
-        target.write_bytes(text.encode("ascii"))
+        target.write_bytes(desired)
         written.append(target)
 
     # Verification: read the bytes back the way the mod does and check the value.

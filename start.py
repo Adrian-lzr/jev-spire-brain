@@ -123,17 +123,33 @@ def write_mod_config(command: str) -> bool:
     from spirebrain.install_mod_config import main as modcfg_main
 
     code = modcfg_main([f"--command={command}", "--auto-start", "--write"])
-    if code == 0:
-        # One `--setup` is forever: the marker makes every later plain
-        # `python start.py` keep the config fresh without the flag. The config
-        # embeds this repo's absolute path, so a moved repo needs one more
-        # `--setup` — which the doctor's path checks would surface anyway.
-        try:
-            (ROOT / "config" / ".setup-done").write_text(
-                "written by start.py --setup; delete to re-prompt\n", encoding="utf-8")
-        except OSError:
-            pass
     return code == 0
+
+
+def communication_config_status(command: str) -> dict:
+    """Read-only status of the external CommunicationMod configuration."""
+    from spirebrain.install_mod_config import family_config_paths, parse_config
+
+    paths = family_config_paths()
+    result = {"valid": False, "paths": [str(p) for p in paths],
+              "issues": [], "configured": []}
+    for path in paths:
+        if not path.exists():
+            result["issues"].append(f"配置不存在: {path}")
+            continue
+        try:
+            values = parse_config(path.read_bytes().decode("latin-1"))
+        except (OSError, UnicodeError) as exc:
+            result["issues"].append(f"配置无法读取: {path} ({type(exc).__name__})")
+            continue
+        actual = values.get("command", "")
+        result["configured"].append({"path": str(path), "command": actual})
+        if not actual:
+            result["issues"].append(f"配置缺少 command: {path}")
+        elif actual != command:
+            result["issues"].append(f"配置已过期或参数不一致: {path}")
+    result["valid"] = bool(result["configured"]) and not result["issues"]
+    return result
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -146,7 +162,8 @@ def main(argv: list[str] | None = None) -> int:
                 pass
 
     demo = "--demo" in argv
-    do_setup = "--setup" in argv or do_setup_saved()
+    # Only an explicit --setup may write the user's game configuration.
+    do_setup = "--setup" in argv
     open_browser = "--browser" in argv and "--no-browser" not in argv
     port = int(_value(argv, "port") or DEFAULT_PORT)
     from spirebrain.runtime_config import resolve_runtime_config
@@ -235,10 +252,17 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     command = mod_config_command(url, backend, auto_start, mode, brain_backend)
+    config_status = communication_config_status(command)
     print("\n[3/3] tell the game to launch the brain:")
     print(f"      {command}")
     if mode == "advise":
         print("      (advisor mode: no --auto-start - starting a run stays yours)")
+    if not config_status["valid"]:
+        print("      setup status: needs setup (read-only check)")
+        for issue in config_status["issues"][:6]:
+            print(f"      - {issue}")
+    else:
+        print("      setup status: current CommunicationMod config matches this launch")
     if do_setup:
         print("      --setup: writing this into CommunicationMod's config (backs up the old one)…")
         if write_mod_config(command):
@@ -276,10 +300,7 @@ def detect_backend() -> str:
 
 
 def do_setup_saved() -> bool:
-    """Did the user ask for setup previously? A marker file remembers one `--setup`.
-
-    Mass-audience rule: a choice made once should not have to be made again.
-    """
+    """Legacy compatibility helper; startup no longer trusts this marker."""
     return (ROOT / "config" / ".setup-done").exists()
 
 

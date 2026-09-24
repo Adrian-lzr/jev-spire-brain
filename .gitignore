@@ -24,3 +24,6 @@ Thumbs.db
 # in java/src are the real deliverable, and the installed jar lives in the game's
 # mods\ folder rather than in the repo)
 java/target/
+
+# Machine-local setup completion marker (legacy; startup does not trust it).
+config/.setup-done
