@@ -104,6 +104,7 @@ class StrategicPlan:
     # each preference to the candidate signature present at generation time.
     candidate_bindings: dict[str, str] = field(default_factory=dict, repr=False)
     avoid_bindings: dict[str, str] = field(default_factory=dict, repr=False)
+    bindings_bound: bool = field(default=False, repr=False)
 
     @classmethod
     def from_dict(cls, data: dict, *, state_id: str, run_id: str,
@@ -222,6 +223,7 @@ class StrategicPlan:
         }
 
     def bind_candidates(self, candidates: list[ActionCandidate]) -> None:
+        self.bindings_bound = True
         bindings = {candidate.candidate_id: candidate.candidate_signature
                     for candidate in candidates if candidate.legal}
         self.candidate_bindings = {

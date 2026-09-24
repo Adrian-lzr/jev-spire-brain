@@ -383,7 +383,9 @@ def reconcile(*, game: dict, candidates: list[ActionCandidate], fallback: dict,
             # Plans produced by the current planner always carry bindings. An
             # old in-memory plan without them is treated as legacy-compatible;
             # once a binding exists, an ID alone is never sufficient.
-            return not bindings or bindings.get(candidate_id) == candidate.candidate_signature
+            if not getattr(plan, "bindings_bound", False):
+                return True
+            return bindings.get(candidate_id) == candidate.candidate_signature
         preferred = [constrained[candidate_id] for candidate_id in plan.preferred_candidates
                      if candidate_id in constrained
                      and binding_matches(candidate_id, constrained[candidate_id], bound)
@@ -396,9 +398,10 @@ def reconcile(*, game: dict, candidates: list[ActionCandidate], fallback: dict,
         elif preferred:
             selected = preferred[0]
             source = "gpt_strategy"
-        if (selected is None
-                or selected.candidate_id in plan.avoid_candidates
-                and binding_matches(selected.candidate_id, selected, avoid_bound)
+        selected_is_avoided = (selected is not None
+                               and selected.candidate_id in plan.avoid_candidates
+                               and binding_matches(selected.candidate_id, selected, avoid_bound))
+        if (selected is None or selected_is_avoided
                 or not _constraint_allows(selected, plan.resource_constraints, game)):
             selected = next((c for c in legal
                              if (c.candidate_id not in plan.avoid_candidates

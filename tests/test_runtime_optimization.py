@@ -36,6 +36,23 @@ def test_plan_preference_requires_candidate_signature_match():
     assert decision.primary_candidate is new
 
 
+def test_bound_plan_does_not_avoid_unbound_id_in_a_new_state():
+    game = {"screen_type": "COMBAT", "energy": 1}
+    old = ActionCandidate("combat:play:0:0", "play", "Strike",
+                          command={"command": "play", "card": 0, "target": 0})
+    new = ActionCandidate("combat:play:0:0", "play", "Defend",
+                          command={"command": "play", "card": 0})
+    plan = StrategicPlan("p", "state", "local", current_objective="survive",
+                         avoid_candidates=[old.candidate_id])
+    # The old state had no legal avoid candidate, so bind_candidates records no
+    # avoid signature. The new same-ID object must not inherit that prohibition.
+    plan.bind_candidates([])
+    command, decision = reconcile(game=game, candidates=[new], fallback=new.command,
+                                  plan=plan, state_id="new")
+    assert command == new.command
+    assert decision.primary_candidate is new
+
+
 def test_jev_auth_failure_is_fast_and_does_not_retry():
     class Fake(OfficialJevClient):
         def __init__(self):
