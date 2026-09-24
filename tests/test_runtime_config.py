@@ -55,3 +55,14 @@ def test_decision_trace_is_bounded_and_redacts_credentials(tmp_path: Path):
     assert "ignored_secret" not in record
     assert "super-secret" not in json.dumps(record)
     assert "redacted" in record["reason"]
+
+
+def test_runtime_config_supports_mainland_openai_compatible_presets(tmp_path: Path):
+    config = resolve_runtime_config(
+        tmp_path,
+        environ={"BRAIN_BACKEND": "deepseek"},
+        strategy={"brain": {}, "jev": {"backend": "mock"}},
+    )
+    assert config.brain_backend == "deepseek"
+    assert config.openai_model == "deepseek-chat"
+    assert config.openai_endpoint.endswith("/v1/chat/completions")

@@ -579,11 +579,16 @@ def check_brain_config(rep: Report) -> None:
 
     runtime = resolve_runtime_config(ROOT, strategy=strategy)
     strategic_backend = runtime.brain_backend
-    if str(strategic_backend).lower() in {"openai", "gpt"}:
+    if str(strategic_backend).lower() in {
+        "openai", "gpt", "deepseek", "qwen", "tongyi", "zhipu", "glm",
+        "moonshot", "kimi", "siliconflow", "doubao", "openai-compatible",
+        "openai_compatible", "compatible", "local", "vllm", "ollama",
+    }:
         env_file = ROOT / ".env"
-        has_key = bool(os.environ.get("OPENAI_API_KEY"))
+        has_key = bool(os.environ.get("BRAIN_API_KEY") or os.environ.get("OPENAI_API_KEY"))
         if not has_key and env_file.exists():
-            has_key = any(line.strip().startswith("OPENAI_API_KEY=")
+            has_key = any((line.strip().startswith("OPENAI_API_KEY=")
+                           or line.strip().startswith("BRAIN_API_KEY="))
                           and line.split("=", 1)[1].strip().strip('"').strip("'")
                           for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines()
                           if "=" in line)
@@ -592,8 +597,8 @@ def check_brain_config(rep: Report) -> None:
                     f"backend={strategic_backend} source={runtime.sources['brain_backend']} "
                     f"config={runtime.config_id}")
         else:
-            rep.add(WARN, "Strategic GPT brain", "no OPENAI_API_KEY; JEV/rules fallback will be used",
-                    "put OPENAI_API_KEY=... in .env, or set BRAIN_BACKEND=mock/disabled")
+            rep.add(WARN, "Strategic GPT brain", "no strategic brain API key; JEV/rules fallback will be used",
+                    "put BRAIN_API_KEY=... (or OPENAI_API_KEY=...) in .env, or set BRAIN_BACKEND=mock/disabled")
     else:
         rep.add(PASS, "Strategic brain",
                 f"backend={strategic_backend} source={runtime.sources['brain_backend']} "

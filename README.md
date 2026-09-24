@@ -187,9 +187,14 @@ python start.py --setup     # also writes the game's mod config (backs up the ol
 `--setup` is remembered — after the first time, plain `python start.py` is the
 whole routine.
 
-The advisor now has an optional strategic GPT layer above JEV. Put
-`OPENAI_API_KEY=...` in `.env` to enable it (the default model is configured by
-`OPENAI_MODEL`, currently `gpt-4.1-mini`). GPT creates a short run plan and
+The advisor now has an optional strategic model layer above JEV. Put
+`OPENAI_API_KEY=...` (or the provider-neutral `BRAIN_API_KEY=...`) in `.env` to
+enable it. The client speaks the common OpenAI-compatible Chat Completions
+protocol, so mainland providers can be selected without code changes:
+`BRAIN_BACKEND=deepseek|qwen|zhipu|moonshot|siliconflow|doubao`, with
+`BRAIN_MODEL` and `BRAIN_ENDPOINT` when overriding the built-in presets. The
+legacy `OPENAI_MODEL` / `OPENAI_BRAIN_ENDPOINT` names remain supported. GPT (or
+the selected model) creates a short run plan and
 resource goal; JEV and the local legality layer choose the concrete candidate.
 Network-backed strategic requests run in a bounded background worker in both
 advisor and play modes, so a slow API cannot stall the CommunicationMod pipe;
@@ -198,14 +203,20 @@ The game overlay shows the current step, GPT goal and a legal alternative. A
 missing key, timeout or malformed response falls back to the existing JEV and
 guide rules without blocking the game. Set `BRAIN_BACKEND=mock` for an offline
 strategic-brain demo, or `BRAIN_BACKEND=jev`/`disabled` to keep the old path.
-Strategic calls are recorded separately in `logs/brain_calls.jsonl`.
+Strategic calls are recorded separately in `logs/brain_calls.jsonl`. Compatible
+providers may return a compact `steps`/`plan` list; only candidate IDs and short
+reasons are adapted into a local plan, and all actual commands still pass local
+candidate generation and legality checks.
 
-Model settings can also be edited in the local dashboard: start `python run_dashboard.py`,
-open `http://127.0.0.1:8787`, then select **模型配置**. The dialog configures the
+Model settings are intended to be edited in the local player console, not by hand
+in a file. Start `python start.py`; it opens `http://127.0.0.1:8787` automatically.
+Use **快速配置** to choose a provider, test the connection, and press **应用并启动军师**.
+The dialog configures the
 strategic backend/model/endpoint and JEV provider credentials, reports connection
 tests without revealing saved keys, and writes settings to the project `.env` file.
+The file is an implementation detail; players do not need to open or edit it.
 Restart the game agent after saving for changes to take effect. The dashboard binds
-to loopback only; keep `.env` private and do not commit it.
+to loopback only; credentials never leave the local machine.
 
 Everything start.py does, done manually:
 

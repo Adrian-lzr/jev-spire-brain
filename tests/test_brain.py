@@ -158,6 +158,88 @@ def test_openai_without_key_is_a_nonfatal_fallback(monkeypatch):
     assert "OPENAI_API_KEY" in result.error
 
 
+def test_openai_compatible_endpoint_uses_chat_completions_payload():
+    client = OpenAIStrategicClient(
+        api_key="test", model="gpt-5.6-sol",
+        endpoint="https://codex.example/v1/chat/completions",
+    )
+    body = client._request_body({"state_id": "s", "run_id": "r"})
+    assert body["model"] == "gpt-5.6-sol"
+    assert body["messages"][0]["role"] == "system"
+    assert "response_format" not in body
+    assert "input" not in body
+
+
+def test_openai_compatible_endpoint_can_opt_into_structured_output():
+    client = OpenAIStrategicClient(
+        api_key="test", model="gpt-test",
+        endpoint="https://codex.example/v1/chat/completions",
+        structured_output=True,
+    )
+    body = client._request_body({"state_id": "s", "run_id": "r"})
+    assert body["response_format"]["type"] == "json_schema"
+
+
+def test_strategic_backend_accepts_mainland_compatible_provider():
+    from spirebrain.brain.gpt_client import get_strategic_brain
+
+    client = get_strategic_brain(
+        "deepseek", model="deepseek-chat",
+        endpoint="https://api.deepseek.com/v1/chat/completions",
+        api_key="test",
+    )
+    assert client.backend_name == "deepseek"
+    assert client.endpoint.endswith("/v1/chat/completions")
+
+
+def test_openai_client_accepts_common_plan_wrapper():
+    import json
+
+    base = {
+        "plan_id": "p", "state_id": "s", "run_id": "r",
+        "current_objective": "survive", "long_term_goal": "win",
+        "priority": ["survive"], "preferred_candidates": [],
+        "avoid_candidates": [], "resource_constraints": {},
+        "next_steps": ["wait"], "replan_triggers": [], "reason": "ok",
+        "uncertainty": "", "expires_after": 1,
+    }
+    body = {"choices": [{"message": {"content": json.dumps({"plan": base})}}]}
+
+    class Response:
+        def read(self): return json.dumps(body).encode()
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+
+    client = OpenAIStrategicClient(
+        api_key="test", endpoint="https://example.test/v1/chat/completions",
+        opener=lambda request, timeout: Response(),
+    )
+    result = client.plan({"state_id": "s", "run_id": "r"})
+    assert result.plan is not None
+    assert not result.fallback
+
+
+def test_openai_client_normalizes_compact_steps_response():
+    import json
+
+    body = {"choices": [{"message": {"content": json.dumps({
+        "steps": [{"candidate_id": "combat:end", "reason": "先保留能量"}],
+    })}}]}
+
+    class Response:
+        def read(self): return json.dumps(body).encode()
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+
+    client = OpenAIStrategicClient(
+        api_key="test", endpoint="https://example.test/v1/chat/completions",
+        opener=lambda request, timeout: Response(),
+    )
+    result = client.plan({"state_id": "s", "run_id": "r", "max_plan_steps": 2})
+    assert result.plan is not None
+    assert result.plan.preferred_candidates == ["combat:end"]
+
+
 def test_planner_rejects_unknown_candidate_reference():
     class InvalidProvider:
         backend_name = "mock"

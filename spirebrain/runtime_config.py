@@ -10,6 +10,22 @@ from pathlib import Path
 from typing import Mapping
 
 
+# Common mainland providers expose an OpenAI-compatible chat endpoint.  These
+# defaults are only used when the user selects a backend and leaves model or
+# endpoint blank; explicit BRAIN_* / OPENAI_* values always win.
+BRAIN_PROVIDER_PRESETS = {
+    "deepseek": ("deepseek-chat", "https://api.deepseek.com/v1/chat/completions"),
+    "qwen": ("qwen-plus", "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"),
+    "tongyi": ("qwen-plus", "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"),
+    "zhipu": ("glm-4.5", "https://open.bigmodel.cn/api/paas/v4/chat/completions"),
+    "glm": ("glm-4.5", "https://open.bigmodel.cn/api/paas/v4/chat/completions"),
+    "moonshot": ("kimi-k2-0711-preview", "https://api.moonshot.cn/v1/chat/completions"),
+    "kimi": ("kimi-k2-0711-preview", "https://api.moonshot.cn/v1/chat/completions"),
+    "siliconflow": ("deepseek-ai/DeepSeek-V3", "https://api.siliconflow.cn/v1/chat/completions"),
+    "doubao": ("doubao-seed-1-6-250615", "https://ark.cn-beijing.volces.com/api/v3/chat/completions"),
+}
+
+
 def read_dotenv(path: str | Path) -> dict[str, str]:
     values: dict[str, str] = {}
     try:
@@ -108,6 +124,19 @@ def resolve_runtime_config(root: str | Path, *, cli: Mapping[str, str | None] | 
         sources[name] = "default"
         return default
 
+    def pick_alias(name: str, env_names: tuple[str, ...], file_value,
+                   default: str) -> str:
+        """Pick the first configured alias while retaining its source."""
+        for env_name in env_names:
+            value = pick(name, env_name, None, "")
+            if value:
+                return value
+        if file_value is not None and str(file_value).strip():
+            sources[name] = "strategy.json"
+            return str(file_value).strip()
+        sources[name] = "default"
+        return default
+
     has_openrouter_key = bool(
         str(env.get("OPENROUTER_API_KEY", "") or dot.get("OPENROUTER_API_KEY", "")).strip()
     )
@@ -116,9 +145,15 @@ def resolve_runtime_config(root: str | Path, *, cli: Mapping[str, str | None] | 
                        cli_name="backend").lower()
     brain_backend = pick("brain_backend", "BRAIN_BACKEND", brain.get("backend"), "openai",
                          cli_name="brain_backend").lower()
-    openai_model = pick("openai_model", "OPENAI_MODEL", brain.get("model"), "gpt-4.1-mini")
-    openai_endpoint = pick("openai_endpoint", "OPENAI_BRAIN_ENDPOINT", None,
-                           "https://api.openai.com/v1/responses")
+    preset_model, preset_endpoint = BRAIN_PROVIDER_PRESETS.get(
+        brain_backend, ("gpt-4.1-mini", "https://api.openai.com/v1/responses")
+    )
+    openai_model = pick_alias("openai_model", ("BRAIN_MODEL", "OPENAI_MODEL"),
+                              brain.get("model"), preset_model)
+    openai_endpoint = pick_alias(
+        "openai_endpoint", ("BRAIN_ENDPOINT", "OPENAI_BRAIN_ENDPOINT"), None,
+        preset_endpoint,
+    )
 
     def number(name: str, env_name: str, file_value, default: int,
                minimum: int, maximum: int) -> int:

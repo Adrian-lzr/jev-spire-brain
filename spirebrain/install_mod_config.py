@@ -264,7 +264,8 @@ def parse_config(text: str) -> dict:
 def default_command(backend: str = DEFAULT_BACKEND, *, auto_start: bool = False,
                    klass: str | None = None, ascension: int | None = None,
                    mode: str | None = None, dashboard_url: str | None = None,
-                   brain_backend: str | None = None) -> str:
+                   brain_backend: str | None = None,
+                   open_dashboard: bool = False) -> str:
     """`<python> <repo>/run_agent.py --backend <backend> [agent flags]`.
 
     Never the module file: running a script puts *that script's* directory first
@@ -307,6 +308,8 @@ def default_command(backend: str = DEFAULT_BACKEND, *, auto_start: bool = False,
         else:
             agent += " --auto-start"
     if dashboard_url:
+        if open_dashboard:
+            agent += " --open-dashboard"
         # The publish endpoint, not the page: the agent POSTs events to it.
         # Last on the line, matching the contract test_start pins.
         if not dashboard_url.rstrip("/").endswith("/publish"):

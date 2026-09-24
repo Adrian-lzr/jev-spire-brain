@@ -23,6 +23,8 @@ import json
 import os
 import sys
 import time
+import webbrowser
+from urllib.parse import urlsplit, urlunsplit
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -655,6 +657,16 @@ def main(argv: list[str]) -> int:
         print(f"[stdio] decisions stream to {dashboard_url} "
               f"(start run_dashboard.py to watch; silent when it is not up)",
               file=sys.stderr)
+        if "--open-dashboard" in argv:
+            parts = urlsplit(dashboard_url)
+            page_url = urlunsplit((parts.scheme, parts.netloc, "", "", ""))
+            if page_url.startswith(("http://127.0.0.1", "http://localhost", "http://[::1]")):
+                try:
+                    webbrowser.open(page_url)
+                    print(f"[stdio] opened dashboard window: {page_url}", file=sys.stderr)
+                except Exception as exc:  # browser availability must not kill the pipe
+                    print(f"[stdio] dashboard window unavailable: {type(exc).__name__}",
+                          file=sys.stderr)
     if mode == "advise":
         # Say what this process will and will not do, in the log the mod keeps.
         # A player who launches the agent and sees the game not being played

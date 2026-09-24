@@ -103,6 +103,69 @@ def _extract_text(body: dict) -> str:
     raise ValueError("模型响应中没有文本内容")
 
 
+def _unwrap_plan(data: Any) -> Any:
+    """Accept common gateway wrappers while keeping the plan schema strict."""
+    if not isinstance(data, dict):
+        return data
+    for key in ("plan", "strategic_plan", "result", "data"):
+        nested = data.get(key)
+        if isinstance(nested, dict):
+            # Only unwrap when the nested object looks like our plan.  A model
+            # cannot use this convenience to smuggle arbitrary commands past
+            # StrategicPlan.from_dict's unknown-field check.
+            if "plan_id" in nested or "current_objective" in nested or "steps" in nested:
+                return nested
+    return data
+
+
+def _coerce_steps_plan(data: Any, *, state_id: str, run_id: str,
+                       max_steps: int) -> Any:
+    """Normalize the compact ``steps`` shape used by several Chinese gateways.
+
+    The adapter copies only candidate IDs and display reasons.  It never copies
+    a provider command, index, or free-form action into the execution layer.
+    Full StrategicPlan responses continue through the strict schema unchanged.
+    """
+    if not isinstance(data, dict):
+        return data
+    raw_steps = data.get("steps")
+    if not isinstance(raw_steps, list):
+        # Some gateways reserve ``plan`` for a list of next actions.
+        raw_steps = data.get("plan")
+    if not isinstance(raw_steps, list):
+        return data
+    steps = [item for item in raw_steps if isinstance(item, dict)][:max_steps]
+    preferred: list[str] = []
+    reasons: list[str] = []
+    for item in steps:
+        candidate = item.get("candidate_id")
+        if isinstance(candidate, str) and candidate.strip() and candidate.strip() not in preferred:
+            preferred.append(candidate.strip()[:240])
+        reason = item.get("reason")
+        if isinstance(reason, str) and reason.strip():
+            reasons.append(reason.strip()[:500])
+    objective = data.get("current_objective") or data.get("objective")
+    if not isinstance(objective, str) or not objective.strip():
+        objective = reasons[0] if reasons else "按当前合法候选推进"
+    return {
+        "plan_id": str(data.get("plan_id") or f"gateway-{state_id[:12]}"),
+        "state_id": state_id,
+        "run_id": run_id,
+        "current_objective": objective[:500],
+        "long_term_goal": str(data.get("long_term_goal") or "完成当前局面并保留资源")[:500],
+        "priority": ["survive", "follow_strategy", "advance"],
+        "preferred_candidates": preferred,
+        "avoid_candidates": [],
+        "resource_constraints": data.get("resource_constraints")
+        if isinstance(data.get("resource_constraints"), dict) else {},
+        "next_steps": preferred[:max_steps] or ["等待新的合法状态"],
+        "replan_triggers": ["screen_change", "hp_change", "gold_change"],
+        "reason": reasons[0] if reasons else "模型返回了当前候选步骤，已由本地合法性层校验。",
+        "uncertainty": str(data.get("uncertainty") or "")[:300],
+        "expires_after": 1,
+    }
+
+
 class UnavailableStrategicClient:
     # A disabled backend has no I/O.  Keeping this explicit lets the
     # orchestrator answer synchronously in tests and in the JEV-only mode.
@@ -168,26 +231,42 @@ class OpenAIStrategicClient:
 
     def __init__(self, *, api_key: str | None = None, model: str | None = None,
                  endpoint: str | None = None, timeout_ms: int = 6000,
-                 max_output_tokens: int = 900, opener=None) -> None:
-        self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "").strip()
+                 max_output_tokens: int = 900, opener=None,
+                 structured_output: bool | None = None,
+        provider_name: str = "openai") -> None:
+        self.provider_name = provider_name or "openai"
+        self.backend_name = self.provider_name
+        self.api_key = api_key or os.environ.get("BRAIN_API_KEY", "").strip() \
+            or os.environ.get("OPENAI_API_KEY", "").strip()
         # With no key, plan() returns a local fallback immediately. Running that
         # path on a daemon thread only creates lifecycle races during shutdown
         # and temporary-directory cleanup; real network calls remain async.
         self.async_required = bool(self.api_key)
-        self.model = model or os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
+        self.model = model or os.environ.get("BRAIN_MODEL", "").strip() \
+            or os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
         self.endpoint = endpoint or os.environ.get(
+            "BRAIN_ENDPOINT", ""
+        ).strip() or os.environ.get(
             "OPENAI_BRAIN_ENDPOINT", "https://api.openai.com/v1/responses"
         )
         self.timeout_ms = max(500, int(timeout_ms))
         self.max_output_tokens = max(128, int(max_output_tokens))
         self.opener = opener or urllib.request.urlopen
+        # Compatible gateways often reject vendor-specific json_schema output;
+        # local StrategicPlan validation remains strict and is the default.
+        if structured_output is None:
+            structured_output = os.environ.get("OPENAI_STRUCTURED_OUTPUT", "0").lower() in {
+                "1", "true", "yes", "on"
+            }
+        self.structured_output = bool(structured_output)
 
     def plan(self, payload: dict) -> BrainResponse:
         request_id = uuid.uuid4().hex[:16]
         if not self.api_key:
             return BrainResponse(backend=self.backend_name, model=self.model,
                                  request_id=request_id,
-                                 error="未配置 OPENAI_API_KEY", fallback=True)
+                                 error="未配置战略大脑 API Key（BRAIN_API_KEY/OPENAI_API_KEY）",
+                                 fallback=True)
         started = time.monotonic()
         try:
             body = self._request_body(payload)
@@ -201,13 +280,30 @@ class OpenAIStrategicClient:
                 },
                 method="POST",
             )
-            with self.opener(request, timeout=self.timeout_ms / 1000) as response:
-                raw = response.read()
+            try:
+                with self.opener(request, timeout=self.timeout_ms / 1000) as response:
+                    raw = response.read()
+            except urllib.error.HTTPError as exc:
+                # Preserve a short provider diagnostic without auth headers or
+                # the request body in logs.
+                detail = exc.read(512).decode("utf-8", "replace").strip()
+                detail = " ".join(detail.split())[:300]
+                suffix = f" ({detail})" if detail else ""
+                return self._failure(
+                    request_id, started,
+                    f"HTTP {exc.code} from strategic provider{suffix}",
+                )
             decoded = json.loads(raw.decode("utf-8"))
             text = _extract_text(decoded)
             if len(text.encode("utf-8", "replace")) > 64 * 1024:
                 raise PlanValidationError("模型响应超过 64KB 限制")
-            data = json.loads(_json_text(text))
+            data = _unwrap_plan(json.loads(_json_text(text)))
+            data = _coerce_steps_plan(
+                data,
+                state_id=str(payload.get("state_id", "")),
+                run_id=str(payload.get("run_id", "local")),
+                max_steps=int(payload.get("max_plan_steps", 5) or 5),
+            )
             plan = StrategicPlan.from_dict(
                 data,
                 state_id=str(payload.get("state_id", "")),
@@ -241,20 +337,21 @@ class OpenAIStrategicClient:
     def _request_body(self, payload: dict) -> dict:
         user_text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         if "chat/completions" in self.endpoint:
-            return {
+            body = {
                 "model": self.model,
                 "messages": [
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": user_text},
                 ],
-                "temperature": 0.1,
                 "max_tokens": self.max_output_tokens,
-                "response_format": {
+            }
+            if self.structured_output:
+                body["response_format"] = {
                     "type": "json_schema",
                     "json_schema": {"name": "strategic_plan", "strict": True,
                                      "schema": PLAN_SCHEMA},
-                },
-            }
+                }
+            return body
         return {
             "model": self.model,
             "input": [
@@ -321,6 +418,14 @@ def get_strategic_brain(backend: str | None = None, **kwargs):
                                           else "disabled")
     if selected == "mock":
         return MockStrategicClient(**{k: v for k, v in kwargs.items() if k in {"preferred", "objective"}})
-    if selected in {"openai", "gpt"}:
-        return OpenAIStrategicClient(**kwargs)
+    compatible = {
+        "openai", "gpt", "deepseek", "qwen", "tongyi", "zhipu", "glm",
+        "moonshot", "kimi", "siliconflow", "doubao", "openai-compatible",
+        "openai_compatible", "compatible", "local", "vllm", "ollama",
+    }
+    if selected in compatible:
+        return OpenAIStrategicClient(
+            provider_name=selected,
+            **kwargs,
+        )
     return UnavailableStrategicClient(f"未知战略大脑后端：{selected}", backend_name=selected)

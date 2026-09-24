@@ -60,6 +60,13 @@
   .config-foot { display: flex; align-items: center; gap: 10px; padding: 12px 20px; border-top: 1px solid var(--line); }
   .config-foot .spacer { flex: 1; }
   .config-btn.primary { background: var(--blue); color: #08111e; border-color: var(--blue); font-weight: 600; }
+  .launchbar { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; padding: 10px 18px; background: #241d23; border-bottom: 1px solid #60424a; }
+  .launchbar strong { color: var(--amber); font-weight: 600; }
+  .launchbar span { color: var(--muted); font-size: 12px; }
+  .launchbar button { border: 1px solid var(--amber); background: #5a3826; color: #ffe6b0; border-radius: 6px; padding: 7px 12px; font: inherit; cursor: pointer; }
+  .launchbar button:hover { background: #754a2d; }
+  .launchbar .spacer { flex: 1; }
+  .launch-result { color: var(--teal); font-size: 12px; }
   @media (max-width: 600px) { .config-grid { grid-template-columns: 1fr; } .config-field.full { grid-column: auto; } header .counter { display: none; } }
 
   /* left: run state */
@@ -172,6 +179,11 @@
   <span class="sub" id="counter"></span>
   <button class="config-open" id="openConfig" type="button">模型配置</button>
 </header>
+<div class="launchbar">
+  <strong>准备开始游戏</strong><span>先选择模型并测试连接，然后应用到 ModTheSpire。默认是军师模式，只给建议不替玩家操作。</span>
+  <span class="spacer"></span><span id="launchResult" class="launch-result"></span>
+  <button id="openSetup" type="button">打开快速配置</button><button id="applySetup" type="button">应用并启动军师</button>
+</div>
 
 <dialog class="config" id="configDialog" aria-labelledby="configTitle">
   <form id="configForm">
@@ -179,12 +191,12 @@
     <div class="config-body">
       <section class="config-section">
         <h3>战略大脑 · GPT</h3>
-        <div class="config-help">负责构筑方向、资源预算和阶段目标。API Key 仅保存在本机项目 .env 文件。</div>
+        <div class="config-help">负责构筑方向、资源预算和阶段目标。你只需在此窗口选择模型并测试连接，密钥由程序安全保存在本机。</div>
         <div class="config-grid">
-          <div class="config-field"><label for="brainBackend">运行后端</label><select id="brainBackend" name="brain_backend"><option value="openai">OpenAI API</option><option value="jev">旧版 JEV 兼容模式</option><option value="mock">Mock 离线测试</option><option value="disabled">关闭战略大脑</option></select></div>
-          <div class="config-field"><label for="openaiModel">模型名称</label><input id="openaiModel" name="openai_model" maxlength="128" autocomplete="off" placeholder="gpt-4.1-mini"></div>
-          <div class="config-field full"><label for="openaiEndpoint">API 地址</label><input id="openaiEndpoint" name="openai_endpoint" maxlength="512" autocomplete="url" placeholder="https://api.openai.com/v1/responses"></div>
-          <div class="config-field full"><label for="openaiKey">OpenAI API Key <span id="openaiKeyState" class="secret-state"></span></label><input id="openaiKey" type="password" name="openai_api_key" maxlength="4096" autocomplete="new-password" placeholder="留空则保留当前密钥"><label class="config-clear"><input type="checkbox" name="clear_openai">清除已保存密钥</label></div>
+          <div class="config-field"><label for="brainBackend">运行后端</label><select id="brainBackend" name="brain_backend"><option value="openai">OpenAI 兼容接口</option><option value="deepseek">DeepSeek</option><option value="qwen">通义千问</option><option value="zhipu">智谱 GLM</option><option value="moonshot">月之暗面 Kimi</option><option value="siliconflow">硅基流动</option><option value="doubao">火山引擎豆包</option><option value="openai-compatible">其他 OpenAI 兼容接口</option><option value="jev">旧版 JEV 兼容模式</option><option value="mock">Mock 离线测试</option><option value="disabled">关闭战略大脑</option></select></div>
+          <div class="config-field"><label for="openaiModel">模型名称</label><input id="openaiModel" name="openai_model" maxlength="128" autocomplete="off" placeholder="例如 gpt-5.6-sol / deepseek-chat"></div>
+          <div class="config-field full"><label for="openaiEndpoint">兼容 API 地址</label><input id="openaiEndpoint" name="openai_endpoint" maxlength="512" autocomplete="url" placeholder="https://api.deepseek.com/v1/chat/completions"></div>
+          <div class="config-field full"><label for="openaiKey">战略大脑 API Key <span id="openaiKeyState" class="secret-state"></span></label><input id="openaiKey" type="password" name="openai_api_key" maxlength="4096" autocomplete="new-password" placeholder="支持国产模型 Key；留空则保留当前密钥"><label class="config-clear"><input type="checkbox" name="clear_openai">清除已保存密钥</label></div>
         </div>
         <div class="config-test"><button class="config-btn" type="button" id="testBrain">测试 GPT 连接</button><span id="brainResult" class="config-result" role="status"></span></div>
       </section>
@@ -303,8 +315,8 @@ async function readConfig() {
   if (!response.ok) throw new Error("读取配置失败");
   publicConfig = await response.json();
   document.getElementById("brainBackend").value = publicConfig.brain_backend || "openai";
-  document.getElementById("openaiModel").value = publicConfig.openai_model || "gpt-4.1-mini";
-  document.getElementById("openaiEndpoint").value = publicConfig.openai_endpoint || "https://api.openai.com/v1/responses";
+  document.getElementById("openaiModel").value = publicConfig.brain_model || publicConfig.openai_model || "gpt-4.1-mini";
+  document.getElementById("openaiEndpoint").value = publicConfig.brain_endpoint || publicConfig.openai_endpoint || "https://api.openai.com/v1/responses";
   document.getElementById("jevBackend").value = publicConfig.jev_backend || "mock";
   document.getElementById("openaiKeyState").textContent = publicConfig.secrets.openai_api_key ? "· 本机已配置" : "· 未配置";
   document.getElementById("openrouterKeyState").textContent = publicConfig.secrets.openrouter_api_key ? "· 本机已配置" : "· 未配置";
@@ -347,6 +359,45 @@ document.getElementById("openConfig").addEventListener("click", async () => {
   configDialog.showModal();
   try { await readConfig(); }
   catch (error) { document.getElementById("saveResult").textContent = error.message; }
+});
+document.getElementById("openSetup").addEventListener("click", async () => {
+  document.getElementById("saveResult").textContent = "";
+  configDialog.showModal();
+  try { await readConfig(); } catch (error) { document.getElementById("saveResult").textContent = error.message; }
+});
+document.getElementById("applySetup").addEventListener("click", async event => {
+  const button = event.currentTarget;
+  const result = document.getElementById("launchResult");
+  button.disabled = true;
+  result.textContent = "正在应用…";
+  try {
+    const values = configValues();
+    const saved = await postConfig("/api/config/save", values);
+    const setup = await postConfig("/api/launcher/setup", {
+      jev_backend: values.jev_backend || "mock",
+      brain_backend: values.brain_backend || "openai",
+      mode: "advise",
+    });
+    result.textContent = setup.message || "已应用，请启动游戏";
+    result.style.color = "var(--teal)";
+  } catch (error) {
+    result.textContent = error.message;
+    result.style.color = "var(--red)";
+  } finally { button.disabled = false; }
+});
+const brainPresets = {
+  deepseek: ["deepseek-chat", "https://api.deepseek.com/v1/chat/completions"],
+  qwen: ["qwen-plus", "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"],
+  zhipu: ["glm-4.5", "https://open.bigmodel.cn/api/paas/v4/chat/completions"],
+  moonshot: ["kimi-k2-0711-preview", "https://api.moonshot.cn/v1/chat/completions"],
+  siliconflow: ["deepseek-ai/DeepSeek-V3", "https://api.siliconflow.cn/v1/chat/completions"],
+  doubao: ["doubao-seed-1-6-250615", "https://ark.cn-beijing.volces.com/api/v3/chat/completions"],
+};
+document.getElementById("brainBackend").addEventListener("change", event => {
+  const preset = brainPresets[event.target.value];
+  if (!preset) return;
+  document.getElementById("openaiModel").value = preset[0];
+  document.getElementById("openaiEndpoint").value = preset[1];
 });
 document.getElementById("closeConfig").addEventListener("click", () => configDialog.close());
 document.getElementById("cancelConfig").addEventListener("click", () => configDialog.close());

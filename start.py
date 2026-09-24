@@ -114,7 +114,7 @@ def mod_config_command(url: str, backend: str, auto_start: bool, mode: str,
     # default_command appends it when given the bare base URL.
     command = default_command(backend, brain_backend=brain_backend,
                               auto_start=auto_start, mode=mode,
-                              dashboard_url=url)
+                              dashboard_url=url, open_dashboard=True)
     return command
 
 
@@ -164,7 +164,10 @@ def main(argv: list[str] | None = None) -> int:
     demo = "--demo" in argv
     # Only an explicit --setup may write the user's game configuration.
     do_setup = "--setup" in argv
-    open_browser = "--browser" in argv and "--no-browser" not in argv
+    # The dashboard is the low-friction control window: open it by default so a
+    # player launching the game can configure providers without memorising a URL.
+    # --no-browser remains available for headless/CI runs.
+    open_browser = "--no-browser" not in argv
     port = int(_value(argv, "port") or DEFAULT_PORT)
     from spirebrain.runtime_config import resolve_runtime_config
 

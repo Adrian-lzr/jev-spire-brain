@@ -260,7 +260,11 @@ def _make_handler(feed: DecisionFeed, page_path: Path, env_path: Path):
 
         def do_GET(self):  # noqa: N802 - stdlib name
             path = self.path.split("?", 1)[0]
-            if path == "/events":
+            if path == "/publish":
+                self.send_response(302)
+                self.send_header("Location", "/")
+                self.end_headers()
+            elif path == "/events":
                 self._serve_events()
             elif path in ("/", "/index.html"):
                 self._serve_page()
@@ -279,7 +283,7 @@ def _make_handler(feed: DecisionFeed, page_path: Path, env_path: Path):
         def do_POST(self):  # noqa: N802 - stdlib name
             path = self.path.split("?", 1)[0]
             if path not in ("/publish", "/api/config/save", "/api/config/test-brain",
-                            "/api/config/test-jev"):
+                            "/api/config/test-jev", "/api/launcher/setup"):
                 self._send_json(404, {"error": f"no route {path!r}"})
                 return
             try:
@@ -297,7 +301,7 @@ def _make_handler(feed: DecisionFeed, page_path: Path, env_path: Path):
                     self._send_json(200, {"ok": True, "config": save_config(env_path, body)})
                     return
                 if path == "/api/config/test-brain":
-                    key = str(body.get("api_key") or get_secret(env_path, "openai_api_key"))
+                    key = str(body.get("api_key") or get_secret(env_path, "brain_api_key"))
                     result = test_brain_connection(body.get("settings") or {}, key)
                     self._send_json(200, result)
                     return
@@ -311,6 +315,30 @@ def _make_handler(feed: DecisionFeed, page_path: Path, env_path: Path):
                         env_path, "cloudflare_account_id"))
                     result = test_jev_connection(backend, key, account_id)
                     self._send_json(200, result)
+                    return
+                if path == "/api/launcher/setup":
+                    from spirebrain.install_mod_config import default_command, main as install_main
+                    backend = str(body.get("jev_backend") or "mock")
+                    brain_backend = str(body.get("brain_backend") or "openai")
+                    mode = str(body.get("mode") or "advise")
+                    if backend not in {"mock", "openrouter", "official", "llm", "cloudflare"}:
+                        raise ValueError("JEV 后端无效")
+                    if brain_backend not in {"openai", "gpt", "deepseek", "qwen", "tongyi", "zhipu", "glm", "moonshot", "kimi", "siliconflow", "doubao", "openai-compatible", "jev", "mock", "disabled"}:
+                        raise ValueError("战略大脑后端无效")
+                    if mode not in {"advise", "play"}:
+                        raise ValueError("运行模式无效")
+                    command = default_command(
+                        backend, mode=mode, auto_start=mode == "play",
+                        brain_backend=brain_backend,
+                        dashboard_url=f"http://127.0.0.1:{self.server.server_port}/publish",
+                        open_dashboard=True,
+                    )
+                    code = install_main([f"--command={command}", "--write"])
+                    self._send_json(200 if code == 0 else 500, {
+                        "ok": code == 0,
+                        "mode": mode,
+                        "message": "已应用到游戏。请在 ModTheSpire 启动或重启外部进程。" if code == 0 else "应用失败，请查看启动窗口。",
+                    })
                     return
                 kind = str(body.get("kind", ""))
                 if kind not in EVENT_KINDS:

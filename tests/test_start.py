@@ -58,6 +58,7 @@ def test_mod_config_command_names_the_mode_and_drops_auto_start_when_advising():
     playing = start_mod.mod_config_command(url, "mock", auto_start=True, mode="play")
     assert "--mode play" in playing
     assert "--auto-start" in playing
+    assert "--open-dashboard" in advising
 
 
 def test_detect_backend_never_raises_and_picks_mock_without_key(monkeypatch=None):

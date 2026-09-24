@@ -18,11 +18,14 @@ from spirebrain.runtime_config import read_dotenv, resolve_runtime_config
 
 CONFIG_KEYS = {
     "brain_backend": "BRAIN_BACKEND",
+    "brain_model": "BRAIN_MODEL",
+    "brain_endpoint": "BRAIN_ENDPOINT",
     "openai_model": "OPENAI_MODEL",
     "openai_endpoint": "OPENAI_BRAIN_ENDPOINT",
     "jev_backend": "JEV_BACKEND",
 }
 SECRET_KEYS = {
+    "brain_api_key": "BRAIN_API_KEY",
     "openai_api_key": "OPENAI_API_KEY",
     "openrouter_api_key": "OPENROUTER_API_KEY",
     "typesafe_api_key": "TYPESAFE_API_KEY",
@@ -49,6 +52,8 @@ def get_public_config(path: Path) -> dict:
     effective = resolve_runtime_config(path.parent, dotenv=values).public_dict()
     return {
         "brain_backend": effective["brain_backend"],
+        "brain_model": effective["openai_model"],
+        "brain_endpoint": effective["openai_endpoint"],
         "openai_model": effective["openai_model"],
         "openai_endpoint": effective["openai_endpoint"],
         "jev_backend": effective["jev_backend"],
@@ -63,6 +68,9 @@ def get_public_config(path: Path) -> dict:
 def get_secret(path: Path, field: str) -> str:
     """Resolve a secret for a provider request without exposing it to clients."""
     env_name = SECRET_KEYS[field]
+    if field == "brain_api_key":
+        return (os.environ.get("BRAIN_API_KEY") or _values(path).get("BRAIN_API_KEY")
+                or os.environ.get("OPENAI_API_KEY") or _values(path).get("OPENAI_API_KEY", ""))
     return os.environ.get(env_name) or _values(path).get(env_name, "")
 
 
