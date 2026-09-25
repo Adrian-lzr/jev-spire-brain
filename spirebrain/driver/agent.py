@@ -50,6 +50,12 @@ from spirebrain.jev_brain.state import (
 from spirebrain.cards import best_removal, best_upgrade
 from spirebrain.brain.action_broker import build_action_candidates, potion_purchase_allowed
 from spirebrain.brain.orchestrator import StrategicOrchestrator
+from spirebrain.brain.protocol import (
+    DecisionContext,
+    DecisionProposal,
+    FinalDecision,
+    RunSession,
+)
 from spirebrain.brain.planner import stable_state_id
 from spirebrain.guide.rules import GuideAwareClient, GuideBook, GuideResult
 from spirebrain.overlay.feed import DecisionFeed, decision_event, run_state_event
@@ -219,6 +225,9 @@ class SpireBrainAgent:
         self._decision_sequence = 0
         self._decision_started_at = 0.0
         self._traced_requests: set[str] = set()
+        self.run_session = RunSession(mode="advise")
+        self._advice_revisions: dict[str, int] = {}
+        self._last_final_decision: FinalDecision | None = None
         # Phase 1.5, the interaction layer: an optional live feed of everything
         # the brain is thinking. None (the default) changes nothing — the feed
         # is an observability side-channel, never a dependency.
@@ -267,6 +276,9 @@ class SpireBrainAgent:
                 return {"status": "ready", "command": suggestion.command,
                         "reason": suggestion.reason, "source_type": "rule_fallback",
                         "source": "游戏实时战斗状态；本地战术规则",
+                        "combat_facts": dict(suggestion.facts),
+                        "selection_basis": suggestion.facts.get("decision_basis", "local_tactical_rule"),
+                        "uncertain": bool(suggestion.uncertain),
                         **strategic_detail,
                         "guide_rules": guide.evidence()}
         return {"status": "thinking", "label": "正在分析当前局面…",
@@ -281,6 +293,14 @@ class SpireBrainAgent:
         game = snapshot.payload
         self.snapshot = snapshot
         self._observed_state_id = stable_state_id(game)
+        run_id = str(_get(game, "run_id", "runId", default="") or "")
+        seed = str(_get(game, "seed", default="") or "")
+        screen_name = str(_get(game, "screen_type", "screen", default="")).upper()
+        if screen_name in {"MENU", "DEATH", "VICTORY", "GAME_OVER"}:
+            self.run_session.reset(run_id, seed=seed)
+            self._advice_revisions.clear()
+        elif run_id:
+            self.run_session.observe(run_id, seed=seed)
         act = max(1, _as_int(_get(game, "act", default=1), 1))
         max_hp = max(1, _as_int(_get(game, "max_hp", default=80), 80))
         current_hp = max(0, _as_int(_get(game, "current_hp", "hp", default=max_hp), max_hp))
@@ -316,6 +336,10 @@ class SpireBrainAgent:
             previous_run = self.strategic.memory.run_id
             self.strategic.memory.observe(game, state_id=self._observed_state_id)
             run_changed = bool(previous_run and self.strategic.memory.run_id != previous_run)
+            if not self.run_session.run_id:
+                self.run_session.observe(self.strategic.memory.run_id, seed=seed)
+            elif run_changed and self.run_session.run_id != self.strategic.memory.run_id:
+                self.run_session.observe(self.strategic.memory.run_id, seed=seed)
             if run_changed or str(_get(game, "screen_type", default="")).upper() in {
                     "MENU", "DEATH", "VICTORY", "GAME_OVER"}:
                 self._shop_decided_on_floor = None
@@ -372,7 +396,7 @@ class SpireBrainAgent:
                 {"reason": rule.reason, "guide_rules": self.guide_result.evidence(),
                  "source_type": "guide_rule", "rule_id": rule.id, "source": rule.source},
             )
-            return self._record(decision, dict(self.guide_result.command))
+            return self._finalize_and_record(decision, dict(self.guide_result.command))
         handler = self.scene_router.resolve(screen)
         if handler is None and self.scene_router.is_grid(screen):
             handler = self._on_grid
@@ -407,8 +431,28 @@ class SpireBrainAgent:
         return handler(game)
 
     # -- shared helpers ---------------------------------------------------- #
-    def _record(self, decision, command: dict) -> dict:
+    def _finalize_and_record(self, decision, command: dict) -> dict:
         detail = dict(decision.detail)
+        # Confidence is layered evidence, not one made-up probability.  Keep
+        # provider confidence, local tactical confidence and the final basis
+        # separate all the way to the trace and overlay.
+        raw_model_value = detail.get("raw_model_confidence", detail.get("model_confidence"))
+        try:
+            raw_model_confidence = (float(raw_model_value)
+                                    if raw_model_value is not None else None)
+        except (TypeError, ValueError):
+            raw_model_confidence = None
+        local_value = detail.get("local_confidence")
+        if local_value is None and not (decision.used_fallback and
+                                        float(decision.confidence or 0.0) == 0.0):
+            local_value = decision.confidence
+        try:
+            local_confidence = float(local_value) if local_value is not None else None
+        except (TypeError, ValueError):
+            local_confidence = None
+        detail["raw_model_confidence"] = raw_model_confidence
+        detail["local_confidence"] = local_confidence
+        detail.setdefault("selection_basis", detail.get("source_type", "rule_fallback"))
         # A model may only select an already enumerated, legal candidate.  The
         # hard guide path and risk-posture probe are intentionally excluded.
         if (self._active_game is not None
@@ -453,28 +497,93 @@ class SpireBrainAgent:
             legality_reason = why_not if not legal else ""
             if not legal:
                 detail["source_type"] = "rule_constraint"
+                detail["selection_basis"] = "hard_legality_constraint"
                 detail["constraint_reason"] = why_not
                 detail["reason"] = f"硬规则拦截当前动作：{why_not}"
                 command = {"command": "state", "reason_source": "rule_constraint",
                            "reason": why_not}
         detail.setdefault("guide_rules", self.guide_result.evidence())
         detail.setdefault("source_type", "rule_fallback" if decision.used_fallback else "jev")
+        # The broker may have replaced the proposal and its metadata.  Re-read
+        # the layers after arbitration so a GPT/JEV override cannot retain the
+        # old rule source or confidence by accident.
+        raw_model_value = detail.get("raw_model_confidence", detail.get("model_confidence"))
+        try:
+            raw_model_confidence = (float(raw_model_value)
+                                    if raw_model_value is not None else None)
+        except (TypeError, ValueError):
+            raw_model_confidence = None
+        local_value = detail.get("local_confidence")
+        if local_value is None and not (decision.used_fallback and
+                                        float(decision.confidence or 0.0) == 0.0):
+            local_value = decision.confidence
+        try:
+            local_confidence = float(local_value) if local_value is not None else None
+        except (TypeError, ValueError):
+            local_confidence = None
+        detail["raw_model_confidence"] = raw_model_confidence
+        detail["local_confidence"] = local_confidence
+        detail.setdefault("selection_basis", detail.get("source_type", "rule_fallback"))
         decision.detail = detail
         state_for_trace = self.snapshot.state_id if self.snapshot else self._observed_state_id
-        run_id = self.strategic.memory.run_id
+        run_id = self.run_session.run_id or self.strategic.memory.run_id
+        self.run_session.observe(run_id)
         decision_id = f"{run_id}:{state_for_trace[:16]}:{self._decision_sequence}"
-        request_id = str(detail.get("brain_request_id", "") or "")
+        revision = self._advice_revisions.get(state_for_trace, 0) + 1
+        self._advice_revisions[state_for_trace] = revision
+        context = DecisionContext(
+            run=self.run_session, state_id=state_for_trace, decision_id=decision_id,
+            config_id=self.runtime_config.config_id, generation=self._decision_sequence,
+            advice_revision=revision, state=dict(self._active_game or {}),
+        )
+        proposal = DecisionProposal(
+            point=decision.point, command=dict(command), source_type=detail.get("source_type", ""),
+            reason=str(detail.get("reason", "") or ""),
+            rule_ids=[str(rule.get("id")) for rule in (detail.get("guide_rules") or [])
+                      if isinstance(rule, dict) and rule.get("id")],
+            model_confidence=raw_model_confidence,
+            jev_confidence=(float(detail.get("jev_confidence"))
+                           if detail.get("jev_confidence") is not None else None),
+            raw_model_confidence=raw_model_confidence,
+            local_confidence=local_confidence,
+            selection_basis=str(detail.get("selection_basis", "") or ""),
+            uncertain=bool(detail.get("uncertain", False)), detail=dict(detail),
+        )
+        candidate_id = str(detail.get("candidate_id", "") or "")
+        candidate = next((c for c in self._active_candidates if c.candidate_id == candidate_id), None)
+        alternative = None
+        alternative_id = str(detail.get("alternative_candidate_id", "") or "")
+        if alternative_id:
+            alternative = next((c for c in self._active_candidates if c.candidate_id == alternative_id), None)
+        final = FinalDecision(
+            context=context, command=dict(command), proposal=proposal,
+            source_type=str(detail.get("source_type", "rule_fallback")),
+            reason=str(detail.get("reason", "") or ""), candidate=candidate,
+            alternative_candidate=alternative, constraint_reason=str(detail.get("constraint_reason", "") or ""),
+            request_id=str(detail.get("brain_request_id", "") or ""),
+            plan_id=str(detail.get("plan_id", "") or ""), uncertain=bool(detail.get("uncertain", False)),
+            raw_model_confidence=raw_model_confidence,
+            local_confidence=local_confidence,
+            selection_basis=str(detail.get("selection_basis", "") or ""),
+            legal=legal_result, legality_reason=legality_reason, legacy_decision=decision,
+            detail=detail,
+        )
+        return self._record(final)
+
+    def _record(self, final: FinalDecision) -> dict:
+        """Record-only boundary: the command and metadata are already final."""
+        detail = dict(final.detail)
+        decision = final.legacy_decision
+        command = dict(final.command)
+        request_id = final.request_id
         if request_id and request_id not in self._traced_requests:
             self._traced_requests.add(request_id)
             response = self._active_brain_response
             usage = getattr(response, "usage", {}) or {}
             self.trace.record("provider_request", {
-                "run_id": run_id,
-                "state_id": state_for_trace,
-                "decision_id": decision_id,
-                "request_id": request_id,
-                "plan_id": detail.get("plan_id", ""),
-                "brain_backend": self.strategic.backend_name,
+                "run_id": final.run_id, "state_id": final.state_id,
+                "decision_id": final.decision_id, "request_id": request_id,
+                "plan_id": final.plan_id, "brain_backend": self.strategic.backend_name,
                 "request_latency_ms": (int(detail["brain_latency_ms"])
                                         if detail.get("brain_latency_ms") is not None else None),
                 "cost_usd": usage.get("cost_usd", usage.get("cost")),
@@ -482,68 +591,64 @@ class SpireBrainAgent:
                 "fallback_reason": detail.get("brain_error", "") or None,
                 "timeout": "timeout" in str(detail.get("brain_error", "")).lower(),
             })
-        self.history.append({
-            "point": decision.point,
-            "value": decision.value,
-            "confidence": round(float(decision.confidence), 4),
-            "fallback": decision.used_fallback,
-            "detail": decision.detail,
-            "command": command,
-        })
+        if decision is not None:
+            self.history.append({
+                "point": decision.point, "value": decision.value,
+                "confidence": round(float(decision.confidence), 4),
+                "fallback": bool(decision.used_fallback), "detail": detail, "command": command,
+                "decision_id": final.decision_id, "state_id": final.state_id,
+                "run_id": final.run_id, "run_epoch": final.context.run_epoch,
+                "advice_revision": final.advice_revision, "source_type": final.source_type,
+            })
         try:
-            self.strategic.memory.record_action(command, state_id=stable_state_id(self._active_game)
-                                                if self._active_game is not None else self.strategic.last_state_id,
-                                                result=detail.get("reason", ""))
+            self.strategic.memory.record_action(command, state_id=final.state_id,
+                                                result=final.reason)
         except Exception:  # noqa: BLE001
             pass
-        if self.feed is not None:
+        if self.feed is not None and decision is not None:
             try:
-                self.feed.publish("decision", decision_event(decision, command))
-            except Exception:  # noqa: BLE001 - the dashboard must not break the run
+                self.feed.publish("decision", {**decision_event(decision, command),
+                                                "decision_id": final.decision_id,
+                                                "state_id": final.state_id,
+                                                "run_id": final.run_id,
+                                                "run_epoch": final.context.run_epoch,
+                                                "advice_revision": final.advice_revision,
+                                                "source_type": final.source_type,
+                                                "uncertain": final.uncertain})
+            except Exception:  # noqa: BLE001
                 pass
-        rule_ids = [str(rule.get("id")) for rule in (detail.get("guide_rules") or [])
-                    if isinstance(rule, dict) and rule.get("id")]
         self.trace.record("decision", {
-            "run_id": run_id,
-            "state_id": state_for_trace,
-            "decision_id": decision_id,
-            "request_id": request_id or None,
-            "plan_id": detail.get("plan_id", ""),
-            "screen": str(_get(self._active_game, "screen_type", default="")).upper(),
-            "point": decision.point,
+            "run_id": final.run_id, "state_id": final.state_id,
+            "decision_id": final.decision_id, "request_id": request_id or None,
+            "plan_id": final.plan_id, "screen": str(_get(self._active_game, "screen_type", default="")).upper(),
+            "point": decision.point if decision is not None else final.proposal.point,
             "brain_backend": self.strategic.backend_name,
             "jev_backend": str(getattr(self.jev, "backend_name", "unknown")),
-            "source_type": detail.get("source_type", ""),
-            "rule_ids": rule_ids,
+            "source_type": final.source_type, "rule_ids": final.proposal.rule_ids,
             "candidates": [candidate.to_dict() for candidate in self._active_candidates],
             "filtered_candidates": self._candidate_diagnostics,
-            "selected_candidate_id": detail.get("candidate_id", ""),
-            "candidate_signature": next((c.get("candidate_signature") for c in detail.get("candidates", [])
-                                          if isinstance(c, dict) and c.get("candidate_id") == detail.get("candidate_id")), None),
-            "command": command,
-            "alternative": {
-                "command": detail.get("alternative_command"),
-                "label": detail.get("alternative_label", ""),
-            },
-            "reason": detail.get("reason", ""),
-            "confidence": float(decision.confidence or 0.0),
-            "jev_confidence": float(detail.get("jev_confidence", 0.0) or 0.0),
-            # Keep latency_ms as a compatibility alias; new analysis separates
-            # request time from total decision time below.
+            "selected_candidate_id": final.candidate.candidate_id if final.candidate else "",
+            "candidate_signature": final.candidate.candidate_signature if final.candidate else None,
+            "command": command, "reason": final.reason,
+            "confidence": final.proposal.model_confidence,
+            "raw_model_confidence": final.raw_model_confidence,
+            "local_confidence": final.local_confidence,
+            "jev_confidence": final.proposal.jev_confidence,
+            "selection_basis": final.selection_basis,
             "latency_ms": (int(detail["brain_latency_ms"])
                            if detail.get("brain_latency_ms") is not None else None),
             "request_latency_ms": (int(detail["brain_latency_ms"])
                                    if detail.get("brain_latency_ms") is not None else None),
             "decision_latency_ms": int((time.monotonic() - self._decision_started_at) * 1000)
             if self._decision_started_at else None,
-            "fallback": bool(decision.used_fallback or detail.get("fallback")),
-            "fallback_reason": detail.get("brain_error") or detail.get("constraint_reason") or None,
-            "legal": legal_result,
-            "legality_reason": legality_reason or None,
-            "uncertain": bool(detail.get("uncertain", False)),
+            "fallback": bool((decision and decision.used_fallback) or detail.get("fallback")),
+            "fallback_reason": detail.get("brain_error") or final.constraint_reason or None,
+            "legal": final.legal, "legality_reason": final.legality_reason or None,
+            "uncertain": final.uncertain,
             "act": _as_int(_get(self._active_game, "act", default=0)),
             "floor": _as_int(_get(self._active_game, "floor", "floor_num", default=0)),
         })
+        self._last_final_decision = final
         return command
 
     def _budget(self) -> HPBudget:
@@ -578,7 +683,7 @@ class SpireBrainAgent:
         d = MapRouter(self.jev, self._budget(), run=self.run).decide(choices, probes)
         index = {str(n["id"]): n["original_index"] for n in nodes}
         choice = index.get(str(d.value), 0)
-        return self._record(d, {"command": "choose", "choice": choice})
+        return self._finalize_and_record(d, {"command": "choose", "choice": choice})
 
     # -- 2. card reward ---------------------------------------------------- #
     def _on_card_reward(self, game) -> dict:
@@ -610,8 +715,8 @@ class SpireBrainAgent:
         if d.value == "skip":
             # There is no `skip` verb in the protocol: RETURN *is* skip
             # ("equivalent to SKIP, CANCEL, and LEAVE").
-            return self._record(d, {"command": "return"})
-        return self._record(d, {"command": "choose", "choice": index.get(str(d.value), 0)})
+            return self._finalize_and_record(d, {"command": "return"})
+        return self._finalize_and_record(d, {"command": "choose", "choice": index.get(str(d.value), 0)})
 
     # -- 3. event ---------------------------------------------------------- #
     def _on_event(self, game) -> dict:
@@ -632,7 +737,7 @@ class SpireBrainAgent:
             return {"command": "state", "reason_source": "no_safe_candidate"}
 
         d = EventChooser(self.jev, goal=self.goal, run=self.run).decide(event_text, available)
-        return self._record(d, {"command": "choose", "choice": index.get(str(d.value), 0)})
+        return self._finalize_and_record(d, {"command": "choose", "choice": index.get(str(d.value), 0)})
 
     # -- 4. rest site ------------------------------------------------------ #
     def _on_rest(self, game) -> dict:
@@ -655,7 +760,7 @@ class SpireBrainAgent:
             d = RestSiteDecider(self.jev, self._budget(), self.goal,
                                 run=self.run).decide(hp_ratio=self._hp_ratio(), upgradable={})
             self._pending_upgrade = None
-            return self._record(d, {"command": "choose", "choice": rest_i})
+            return self._finalize_and_record(d, {"command": "choose", "choice": rest_i})
 
         deck = self._deck(game)
         # One label list feeds both the question and the grid index, so they can
@@ -708,14 +813,14 @@ class SpireBrainAgent:
                 # Still resting (the fallback stood, or the deck named nothing):
                 # no grid intent, answer the rest-site screen with rest.
                 self._pending_upgrade = None
-                return self._record(d, {"command": "choose", "choice": rest_i})
+                return self._finalize_and_record(d, {"command": "choose", "choice": rest_i})
             # An upgrade was chosen ON THIS SCREEN (model or deck): the command
             # is the smith slot, and the following grid gets the card's index.
             # Saying "upgrade Whirlwind" while choosing rest would be exactly
             # the kind of advice/command split a player cannot trust.
             _, index = _unique_labels(labels)
             self._pending_upgrade = index.get(str(d.value), 0)
-            return self._record(d, {"command": "choose", "choice": smith_i})
+            return self._finalize_and_record(d, {"command": "choose", "choice": smith_i})
 
         # The deck gets a vote, as it does on card rewards. The upgrade table is
         # the one the sources actually document ("Whirlwind first, then True Grit
@@ -743,7 +848,7 @@ class SpireBrainAgent:
         # card gets upgraded — visible in the run, harmless, but worth checking.
         _, index = _unique_labels(labels)
         self._pending_upgrade = index.get(str(d.value), 0)
-        return self._record(d, {"command": "choose", "choice": smith_i})
+        return self._finalize_and_record(d, {"command": "choose", "choice": smith_i})
 
     def _on_grid(self, game) -> dict:
         """Card-grid screens: fulfil the pending upgrade, else name the removal.
@@ -775,14 +880,14 @@ class SpireBrainAgent:
         if confirm_offered and self._grid_picked is not None:
             # Finalize the pick we made one state ago.
             self._grid_picked = None
-            return self._record(
+            return self._finalize_and_record(
                 Decision("grid", "confirm", 0.0, True,
                          {"reason": "已选定卡牌，确认当前选择。", "source_type": "rule_fallback"}),
                 {"command": "confirm"})
         if confirm_offered:
             # A confirm-only grid we did not pick (opened by the player?).
             # Confirm is still the only way through; keep it honest in history.
-            confirmed = self._record(
+            confirmed = self._finalize_and_record(
                 Decision("grid", "confirm", 0.0, True,
                          {"reason": "当前界面只提供确认，继续完成选择。",
                           "source_type": "rule_fallback"}),
@@ -819,7 +924,7 @@ class SpireBrainAgent:
             out = {"command": "choose", "choice": choice, "reason": reason}
             if detail_note:
                 out["local_removal"] = detail_note
-            picked = self._record(
+            picked = self._finalize_and_record(
                 Decision("grid", choice, 0.0, True,
                          {"reason": reason, "source_type": "rule_fallback",
                           "local_removal": detail_note} if detail_note else
@@ -835,7 +940,7 @@ class SpireBrainAgent:
         out = {"command": "choose", "choice": choice}
         if reason:
             out["reason"] = reason
-        picked = self._record(
+        picked = self._finalize_and_record(
             Decision("grid", choice, 0.0, True,
                      {"reason": reason or "按当前选卡意图执行。", "source_type": "rule_fallback"}),
             out)
@@ -954,10 +1059,10 @@ class SpireBrainAgent:
             remove_candidate="a starter Strike or Defend",
         )
         if d.value == "leave":
-            return self._record(d, {"command": "return"})
+            return self._finalize_and_record(d, {"command": "return"})
         if d.value == "remove":
             # The purge service sits after the shelves; PURGE is not a verb.
-            return self._record(d, {"command": "choose", "choice": len(raw)})
+            return self._finalize_and_record(d, {"command": "choose", "choice": len(raw)})
         choice = next((i for i, r in enumerate(raw)
                        if not r["disabled"] and r["price"] <= gold
                        and r["name"] == str(d.value)), None)
@@ -965,7 +1070,7 @@ class SpireBrainAgent:
             choice = next((i for i, r in enumerate(raw)
                            if not r["disabled"] and r["price"] <= gold
                            and str(d.value).startswith(r["name"])), 0)
-        return self._record(d, {"command": "choose", "choice": choice})
+        return self._finalize_and_record(d, {"command": "choose", "choice": choice})
 
     # -- 6. boss relic ----------------------------------------------------- #
     def _on_boss_reward(self, game) -> dict:
@@ -987,7 +1092,7 @@ class SpireBrainAgent:
             return {"command": "choose", "choice": 0}
         d = BossRelicJudge(self.jev, goal=self.goal, run=self.run,
                            acceptance=self.acceptance).decide(descriptions)
-        return self._record(d, {"command": "choose", "choice": index.get(str(d.value), 0)})
+        return self._finalize_and_record(d, {"command": "choose", "choice": index.get(str(d.value), 0)})
 
     # -- 7. combat --------------------------------------------------------- #
     def _on_combat(self, game) -> dict:
@@ -1028,7 +1133,7 @@ class SpireBrainAgent:
         if incoming > self._budget().remaining_budget:
             gate = CombatRiskGate(self.jev, self._budget(), run=self.run)
             d = gate.decide(str(_get(combat, "encounter_name", default="a fight")), incoming)
-            self._record(d, {"command": "(posture only)"})
+            self._finalize_and_record(d, {"command": "(posture only)"})
             defensive_posture = str(d.detail.get("posture", "")) == "defensive"
             if defensive_posture:
                 # Defensive posture is a risk preference, not a blanket ban on
@@ -1036,7 +1141,7 @@ class SpireBrainAgent:
                 # removes the incoming threat completely; only unverified
                 # attacks are excluded from the defensive candidate set.
                 lethal_command = (suggestion.command if suggestion is not None
-                                  and "击败" in suggestion.reason else None)
+                                  and suggestion.facts.get("lethal_confirmed") else None)
                 safe = [candidate for candidate in self._active_candidates
                         if candidate.kind in {"end", "potion"}
                         or "block" in candidate.goal_tags
@@ -1047,7 +1152,7 @@ class SpireBrainAgent:
         if suggestion is not None:
             if defensive_posture and str(suggestion.command.get("command", "")).lower() == "play":
                 # A verified kill remains preferable to a defensive fallback.
-                if "击败" in suggestion.reason and any(
+                if suggestion.facts.get("lethal_confirmed") and any(
                         candidate.command == suggestion.command for candidate in self._active_candidates):
                     safe = next(candidate for candidate in self._active_candidates
                                 if candidate.command == suggestion.command)
@@ -1059,10 +1164,15 @@ class SpireBrainAgent:
                 safe = safe or next((candidate for candidate in self._active_candidates
                                      if candidate.kind == "end"), None)
                 if safe is not None:
+                    keeps_lethal = bool(suggestion.facts.get("lethal_confirmed")
+                                        and safe.command == suggestion.command)
                     suggestion = type(suggestion)(
                         command=dict(safe.command),
                         reason="硬规则要求优先防守，避免本回合明确超出生命预算。",
                         uncertain=bool(safe.uncertainty),
+                        facts={**suggestion.facts,
+                               "lethal_confirmed": keeps_lethal,
+                               "decision_basis": "defensive_constraint"},
                     )
             tactical = self._jev_tactical_pick(game)
             tactical_confidence = 0.0
@@ -1072,12 +1182,21 @@ class SpireBrainAgent:
                     command=dict(tactical_candidate.command),
                     reason=f"JEV 在 GPT 战略目标内选择：{tactical_candidate.label}。",
                     uncertain=bool(tactical_candidate.uncertainty),
+                    facts={**suggestion.facts, "decision_basis": "jev_tactical_pick",
+                           "jev_selected_candidate": tactical_candidate.candidate_id},
                 )
-            return self._record(Decision("combat", suggestion.command, tactical_confidence,
+            return self._finalize_and_record(Decision("combat", suggestion.command, tactical_confidence,
                                          tactical is None,
                                          {"reason": suggestion.reason,
                                           "source_type": "rule_fallback",
-                                          "uncertain": suggestion.uncertain}),
+                                          "uncertain": suggestion.uncertain,
+                                          "combat_facts": dict(suggestion.facts),
+                                          "selection_basis": suggestion.facts.get(
+                                              "decision_basis", "local_tactical_rule"),
+                                          "local_confidence": (tactical_confidence
+                                                                if tactical is not None else None),
+                                          "jev_confidence": (tactical_confidence
+                                                             if tactical is not None else None)}),
                                 suggestion.command)
         return {"command": "state", "reason": "战斗状态不足，暂无法给出可靠的一步建议"}
 

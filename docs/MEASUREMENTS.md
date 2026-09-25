@@ -322,6 +322,11 @@ untouched and must not be spent on a harness whose HP semantics are still wrong.
 
 # Offline metrics
 
+For a reproducible clean-checkout gate, run `python tools/verify_offline.py`. It
+executes pytest, compileall, the cross-language contract check, the committed
+synthetic metrics fixture and the replay fixture independently, then returns a
+non-zero status only after all results have been printed.
+
 Run `python -m spirebrain.analysis.metrics --input logs/decision_trace.jsonl`
 to summarize samples, runs, semantic states, scene coverage, legality,
 latency p50/p95, provider calls, fallback reasons and `unobserved` outcomes.

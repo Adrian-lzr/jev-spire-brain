@@ -322,10 +322,15 @@ python tests\test_stdio.py               # prove the pipe logic offline
 ```bash
 python -m spirebrain.analysis.replay --input tests/fixtures/replay
 python -m spirebrain.analysis.metrics --input tests/fixtures/metrics/decision_trace.jsonl
+python tools/verify_offline.py           # tests + compile + contracts + metrics + replay
 ```
 
 指标输入缺失时命令会以非零状态退出；合成 fixture 只用于验证管道和字段契约，
 不代表真实游戏胜率。
+
+`tools/verify_offline.py` 会逐项执行离线检查并在某项失败后继续输出其余结果，
+适合作为干净检出和 CI 的单一入口。当前执行起点、配置摘要、已知限制和未验证的
+真实游戏行为记录在 [`docs/BASELINE_2026-09-24.md`](docs/BASELINE_2026-09-24.md)。
 
 `doctor` exists because "is the mod installed?" turned out to need six manual
 checks, and one of them is genuinely non-obvious: a Steam Workshop **subscription**

@@ -79,6 +79,15 @@ JEV 是战术层：只能在本地已确认合法、且符合战略约束的候�
 
 ## 8. 离线回放与指标
 
+机器相关路径通过 `spirebrain.environment.EnvironmentAdapter` 注入。它承载
+`LOCALAPPDATA`/`APPDATA`、`STS_GAME_DIR` 和 Steam 根目录；生产调用默认读取
+当前进程环境，离线测试显式传入临时目录，因此不需要开发者的游戏安装。卡牌
+本地化回放使用 `tests/fixtures/gamedata/localization.json`。
+
+`python tools/verify_offline.py` 是 CI 与干净检出的独立检查入口：它分别运行
+测试、Python 编译、跨语言静态契约、合成指标和回放，即使前一项失败也会继续
+输出后续结果。Java 构建仍需本地游戏依赖，CI 不伪造构建通过。
+
 `python -m spirebrain.analysis.replay --input tests/fixtures/replay` 将合成
 CommunicationMod 消息送入真实 stdio/advisor 管道，强制使用本地 mock，检查
 `advise` 是否只输出 `wait`/`state`，并报告建议与规则回退数量。fixture 明确标记
@@ -108,3 +117,23 @@ Authentication failures stop immediately. Timeout, HTTP and fallback counters
 are kept in memory and never include credentials. Java overlay compilation is a
 local-only check when game JARs are installed; CI runs the static JSON contract
 checker instead.
+
+# Decision finalization and evidence
+
+The router has one finalization boundary, `SpireBrainAgent._finalize_and_record()`.
+It performs strategic arbitration and the final `check_action()` call, then
+creates a `FinalDecision`. `_record()` only serializes that object to history,
+trace and overlay; it does not plan, replace commands or infer facts.
+
+`RunSession` is mutable live state, while `DecisionContext` captures an
+immutable `RunSessionSnapshot` (`run_id`, `run_epoch`, seed and mode). This
+prevents a later run from rewriting an earlier decision's identity. The same
+decision carries `state_id`, `decision_id`, `request_id`, `plan_id` and
+`advice_revision` for replay joins.
+
+Confidence is layered and nullable: provider/model confidence (when a provider
+actually supplies one), local/JEV confidence, and `selection_basis` are emitted
+separately. A rule fallback does not get a fabricated combined probability.
+Combat evidence is structured in `combat_facts` (for example
+`lethal_confirmed`, target identity and incoming damage); risk handling never
+parses the Chinese display reason to decide whether a kill is safe.

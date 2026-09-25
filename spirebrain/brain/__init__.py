@@ -8,8 +8,14 @@ gets to invent a wire command.
 from .protocol import (
     ActionCandidate,
     BrainResponse,
+    DecisionContext,
+    DecisionProposal,
     ExecutionDecision,
+    FinalDecision,
+    ObservedAction,
     PlanValidationError,
+    RunSession,
+    RunSessionSnapshot,
     StateSnapshot,
     StrategicPlan,
 )
@@ -17,8 +23,14 @@ from .protocol import (
 __all__ = [
     "ActionCandidate",
     "BrainResponse",
+    "DecisionContext",
+    "DecisionProposal",
     "ExecutionDecision",
+    "FinalDecision",
+    "ObservedAction",
     "PlanValidationError",
+    "RunSession",
+    "RunSessionSnapshot",
     "StateSnapshot",
     "StrategicPlan",
 ]

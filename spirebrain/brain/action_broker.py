@@ -32,6 +32,41 @@ def _label(obj: Any, default: str = "item") -> str:
                    default=default))
 
 
+def _entity_id(obj: Any, *, kind: str, slot: int | str = "") -> str:
+    """Stable object identity with a conservative slot fallback.
+
+    Display names are not identities: two Strike cards, two same-name enemies
+    and two copies of a shop item can coexist.  CommunicationMod does not
+    expose an instance id on every version, so the live slot is retained as a
+    last-resort disambiguator and included in the candidate signature.
+    """
+    if isinstance(obj, dict):
+        # ``id``/``card_id`` is usually a definition id, not an instance id;
+        # only fields explicitly documented as unique may stand alone.
+        explicit_instance = _get(obj, "instance_id", "entity_id", "unique_id", default=None)
+        if explicit_instance is not None and str(explicit_instance).strip():
+            return f"{kind}:instance:{explicit_instance}"
+        definition = _get(obj, "id", "card_id", "relic_id", "potion_id", default=None)
+        if definition is not None and str(definition).strip():
+            return f"{kind}:{definition}:slot:{slot}"
+        label = _label(obj, kind)
+    else:
+        label = _label(obj, kind)
+    return f"{kind}:{label}:slot:{slot}"
+
+
+def _upgrade_state(item: Any) -> str:
+    if not isinstance(item, dict):
+        return ""
+    value = _get(item, "upgrades", "upgrade_level", default=None)
+    if value is None:
+        value = 1 if item.get("is_upgraded") else 0
+    try:
+        return f"+{max(0, int(value))}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def _item_unavailable(item: Any) -> bool:
     """CommunicationMod versions use several names for a vanished shelf item."""
     if item is None:
@@ -146,6 +181,8 @@ def build_action_candidates(game: dict, *,
             _add(out, game, ActionCandidate(
                 candidate_id=f"map:{index}", kind="map", label=f"路线 {symbol} ({node_id})",
                 command={"command": "choose", "choice": index},
+                entity_id=f"map:{node_id}:{symbol}",
+                validity={"slot": index, "node_id": node_id, "symbol": symbol},
                 goal_tags=["advance", symbol],
                 risk_tags=["elite"] if symbol == "E" else [],
                 description=f"选择地图节点 {symbol}，位置 {node_id}。",
@@ -166,6 +203,9 @@ def build_action_candidates(game: dict, *,
                 candidate_id=f"{screen.lower()}:{index}",
                 kind=screen.lower(), label=label,
                 command={"command": "choose", "choice": index},
+                entity_id=_entity_id(item, kind=screen.lower(), slot=index),
+                upgrade_state=_upgrade_state(item),
+                validity={"slot": index},
                 goal_tags=["choose"], description=str(_get(item, "description", "text", default=label)),
             ), forbidden_indices, diagnostics)
         if screen in {"CARD_REWARD", "EVENT", "GRID", "CARD_SELECT", "HAND_SELECT"}:
@@ -212,6 +252,8 @@ def build_action_candidates(game: dict, *,
                         candidate_id=f"shop:item:{index}", kind=kind,
                         label=f"{label}（{price} 金）",
                         command={"command": "choose", "choice": index}, cost=price,
+                        entity_id=_entity_id(item, kind=kind, slot=index),
+                        validity={"slot": index, "price": price},
                         goal_tags=tags,
                         risk_tags=["gold_commitment"],
                         description=str(_get(item, "description", default=label)),
@@ -227,6 +269,8 @@ def build_action_candidates(game: dict, *,
             _add(out, game, ActionCandidate(
                 candidate_id=f"shop:purge:{index}", kind="purge", label=f"删牌（{purge_cost} 金）",
                 command={"command": "choose", "choice": index}, cost=purge_cost,
+                entity_id=f"shop:purge:slot:{index}",
+                validity={"slot": index, "price": purge_cost},
                 goal_tags=["thin_deck", "spend_gold"], risk_tags=["gold_commitment"],
             ), forbidden_indices, diagnostics)
         elif _get(state, "purge_cost", default=None) is not None:
@@ -272,6 +316,11 @@ def build_action_candidates(game: dict, *,
                     candidate_id=f"combat:play:{index}:{target if target is not None else 'none'}",
                     kind="play", label=f"出 {identity}" + (f" → {_label(monster, '目标')}" if target is not None else ""),
                     command=command, cost=card.get("cost"), target=target,
+                    entity_id=_entity_id(card, kind="card", slot=index),
+                    upgrade_state=_upgrade_state(card),
+                    validity={"hand_slot": index,
+                              "target_entity_id": (_entity_id(monster, kind="enemy", slot=target)
+                                                    if target is not None else "")},
                     goal_tags=tags,
                     uncertainty="牌面效果未完整解析" if card.get("damage") is None and card.get("block") is None else "",
                     description=str(card.get("description", identity)),
@@ -293,6 +342,10 @@ def build_action_candidates(game: dict, *,
                     kind="potion", label=f"使用 {_label(potion, '药水')}" +
                     (f" → {_label(monster, '目标')}" if target is not None else ""),
                     command=command, target=target, goal_tags=["potion", "survive"],
+                    entity_id=_entity_id(potion, kind="potion", slot=slot),
+                    validity={"potion_slot": slot,
+                              "target_entity_id": (_entity_id(monster, kind="enemy", slot=target)
+                                                    if target is not None else "")},
                     risk_tags=["consume_resource"],
                 ), forbidden_indices, diagnostics)
         _add(out, game, ActionCandidate(
@@ -428,6 +481,12 @@ def reconcile(*, game: dict, candidates: list[ActionCandidate], fallback: dict,
     alternative = None
     if selected is not None:
         alternative = next((c for c in legal if c.candidate_id != selected.candidate_id), None)
+    if source == "gpt_strategy":
+        selection_basis = "strategic_preference"
+    elif source == "jev_tactical":
+        selection_basis = "jev_tactical_within_strategy"
+    else:
+        selection_basis = "local_fallback"
     detail = ExecutionDecision(
         primary_candidate=selected,
         alternative_candidate=alternative,
@@ -437,6 +496,9 @@ def reconcile(*, game: dict, candidates: list[ActionCandidate], fallback: dict,
         state_id=state_id,
         plan_id=plan.plan_id if plan else "",
         jev_confidence=float(jev_confidence or 0.0),
+        local_confidence=(float(jev_confidence or 0.0)
+                          if float(jev_confidence or 0.0) > 0 else None),
+        selection_basis=selection_basis,
         uncertain=bool((selected and selected.uncertainty) or (plan and plan.uncertainty)),
         candidates=[c.model_dict() for c in legal],
     )

@@ -19,6 +19,7 @@ import threading
 from typing import Any
 
 from .protocol import BrainResponse, PlanValidationError, StrategicPlan
+from spirebrain.redaction import redact_text, redact_value
 
 
 PLAN_SCHEMA = {
@@ -284,14 +285,12 @@ class OpenAIStrategicClient:
                 with self.opener(request, timeout=self.timeout_ms / 1000) as response:
                     raw = response.read()
             except urllib.error.HTTPError as exc:
-                # Preserve a short provider diagnostic without auth headers or
-                # the request body in logs.
-                detail = exc.read(512).decode("utf-8", "replace").strip()
-                detail = " ".join(detail.split())[:300]
-                suffix = f" ({detail})" if detail else ""
+                # Do not copy the response body into an error. Gateways can
+                # echo request fragments or credentials, and the status code
+                # is sufficient for retry/fallback classification.
                 return self._failure(
                     request_id, started,
-                    f"HTTP {exc.code} from strategic provider{suffix}",
+                    f"HTTP {exc.code} from strategic provider",
                 )
             decoded = json.loads(raw.decode("utf-8"))
             text = _extract_text(decoded)
@@ -320,9 +319,11 @@ class OpenAIStrategicClient:
                 usage=usage if isinstance(usage, dict) else {},
             )
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            return self._failure(request_id, started, f"网络错误：{type(exc).__name__}: {exc}")
+            # Exception text may include an endpoint with a query-string key.
+            return self._failure(request_id, started,
+                                 f"网络错误：{type(exc).__name__}")
         except (ValueError, KeyError, TypeError, json.JSONDecodeError, PlanValidationError) as exc:
-            return self._failure(request_id, started, f"计划解析失败：{exc}")
+            return self._failure(request_id, started, redact_text(f"计划解析失败：{exc}"))
 
     def _failure(self, request_id: str, started: float, error: str) -> BrainResponse:
         return BrainResponse(
@@ -384,9 +385,9 @@ class LoggingStrategicClient:
             result = self.inner.plan(payload)
         except Exception as exc:  # keep the wrapper transparent to the caller
             result = BrainResponse(backend=self.backend_name,
-                                   error=f"{type(exc).__name__}: {exc}", fallback=True)
+                                   error=redact_text(f"{type(exc).__name__}: {exc}"), fallback=True)
         plan = result.plan.model_dict() if result.plan is not None else None
-        record = {
+        record = redact_value({
             "ts": time.time(),
             "backend": result.backend or self.backend_name,
             "model": result.model,
@@ -399,7 +400,7 @@ class LoggingStrategicClient:
             "run_id": payload.get("run_id", ""),
             "trigger": payload.get("trigger", ""),
             "plan": plan,
-        }
+        })
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with self._lock, self.path.open("a", encoding="utf-8") as stream:

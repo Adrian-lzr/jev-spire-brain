@@ -5,11 +5,183 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import hashlib
 import json
+import time
 from typing import Any, Protocol
 
 
 class PlanValidationError(ValueError):
     """Raised when a strategic model returns an unsafe or incomplete plan."""
+
+
+@dataclass
+class RunSession:
+    """Identity for one game run and the generation that invalidates old work."""
+
+    run_id: str = ""
+    run_epoch: int = 0
+    seed: str = ""
+    mode: str = "advise"
+
+    def snapshot(self) -> "RunSessionSnapshot":
+        """Return the immutable identity used by a completed decision.
+
+        ``RunSession`` is intentionally mutable because a live process moves
+        from one run to the next.  A trace or overlay event must not change
+        retroactively when that happens, so decision objects copy the identity
+        at their boundary.
+        """
+        return RunSessionSnapshot(
+            run_id=self.run_id, run_epoch=self.run_epoch,
+            seed=self.seed, mode=self.mode,
+        )
+
+    def observe(self, run_id: str, *, seed: str = "", mode: str | None = None) -> bool:
+        """Bind a run, incrementing ``run_epoch`` only when its identity changes."""
+        run_id = str(run_id or "")
+        changed = bool(self.run_id and run_id and run_id != self.run_id)
+        if changed:
+            self.run_epoch += 1
+        if run_id:
+            self.run_id = run_id
+        if seed:
+            self.seed = str(seed)
+        if mode:
+            self.mode = str(mode)
+        return changed
+
+    def reset(self, run_id: str = "", *, seed: str = "") -> None:
+        self.run_epoch += 1
+        self.run_id = str(run_id or "")
+        self.seed = str(seed or "")
+
+
+@dataclass(frozen=True)
+class RunSessionSnapshot:
+    """Immutable run identity captured by a decision or observed action."""
+
+    run_id: str = ""
+    run_epoch: int = 0
+    seed: str = ""
+    mode: str = "advise"
+
+
+@dataclass
+class DecisionContext:
+    """All identity and budget data shared by candidate and decision layers."""
+
+    run: RunSession | RunSessionSnapshot
+    state_id: str
+    decision_id: str
+    config_id: str = ""
+    budget_ms: int | None = None
+    generation: int = 0
+    advice_revision: int = 0
+    created_at: float = field(default_factory=time.monotonic)
+    state: dict = field(default_factory=dict, repr=False)
+
+    def __post_init__(self) -> None:
+        # Never retain the mutable live session inside an auditable decision.
+        if isinstance(self.run, RunSession):
+            self.run = self.run.snapshot()
+        elif not isinstance(self.run, RunSessionSnapshot):
+            self.run = RunSessionSnapshot(
+                run_id=str(getattr(self.run, "run_id", "") or ""),
+                run_epoch=int(getattr(self.run, "run_epoch", 0) or 0),
+                seed=str(getattr(self.run, "seed", "") or ""),
+                mode=str(getattr(self.run, "mode", "advise") or "advise"),
+            )
+
+    @property
+    def run_id(self) -> str:
+        return self.run.run_id
+
+    @property
+    def run_epoch(self) -> int:
+        return self.run.run_epoch
+
+    def matches(self, *, run_id: str, run_epoch: int, state_id: str,
+                generation: int | None = None) -> bool:
+        return (self.run_id == str(run_id) and self.run_epoch == int(run_epoch)
+                and self.state_id == str(state_id)
+                and (generation is None or self.generation == int(generation)))
+
+
+@dataclass
+class DecisionProposal:
+    """A source-layer suggestion before legality and arbitration are final."""
+
+    point: str
+    command: dict
+    candidate: "ActionCandidate | None" = None
+    source_type: str = "rule_fallback"
+    reason: str = ""
+    rule_ids: list[str] = field(default_factory=list)
+    model_confidence: float | None = None
+    jev_confidence: float | None = None
+    # These are deliberately separate.  A provider's raw confidence is not a
+    # measure of the local tactical choice, and neither is a synthetic final
+    # probability.  ``model_confidence`` is retained for compatibility; new
+    # producers should use ``raw_model_confidence``.
+    raw_model_confidence: float | None = None
+    local_confidence: float | None = None
+    selection_basis: str = ""
+    uncertain: bool = False
+    detail: dict = field(default_factory=dict)
+
+
+@dataclass
+class FinalDecision:
+    """Immutable-at-the-boundary decision consumed by trace, feed and transport."""
+
+    context: DecisionContext
+    command: dict
+    proposal: DecisionProposal
+    source_type: str
+    reason: str
+    candidate: "ActionCandidate | None" = None
+    alternative_candidate: "ActionCandidate | None" = None
+    constraint_reason: str = ""
+    request_id: str = ""
+    plan_id: str = ""
+    uncertain: bool = False
+    raw_model_confidence: float | None = None
+    local_confidence: float | None = None
+    selection_basis: str = ""
+    legal: bool | None = None
+    legality_reason: str = ""
+    legacy_decision: Any = None
+    detail: dict = field(default_factory=dict)
+
+    @property
+    def decision_id(self) -> str:
+        return self.context.decision_id
+
+    @property
+    def state_id(self) -> str:
+        return self.context.state_id
+
+    @property
+    def run_id(self) -> str:
+        return self.context.run_id
+
+    @property
+    def advice_revision(self) -> int:
+        return self.context.advice_revision
+
+
+@dataclass
+class ObservedAction:
+    """An action inferred from a later state, with explicit uncertainty."""
+
+    run_id: str
+    run_epoch: int
+    state_id: str
+    kind: str = "unknown"
+    entity_id: str = ""
+    target_entity_id: str = ""
+    evidence: dict = field(default_factory=dict)
+    confidence: float | None = None
+    verdict: str = "unobserved"
 
 
 @dataclass
@@ -32,12 +204,17 @@ class ActionCandidate:
     # the strategic model can only select an ID, never author a command.
     command_template: dict | str | None = None
     candidate_signature: str = ""
+    entity_id: str = ""
+    upgrade_state: str = ""
+    validity: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.command and isinstance(self.command_template, dict):
             self.command = dict(self.command_template)
         if self.command_template is None:
             self.command_template = dict(self.command)
+        if not self.entity_id:
+            self.entity_id = str(self.target if self.target is not None else self.label)
         if not self.candidate_signature:
             # The command keeps the current slot/target while the label carries
             # the semantic object identity.  Together they prevent an index
@@ -47,6 +224,9 @@ class ActionCandidate:
                 "label": self.label,
                 "target": self.target,
                 "command": self.command,
+                "entity_id": self.entity_id,
+                "upgrade_state": self.upgrade_state,
+                "validity": self.validity,
             }
             raw = json.dumps(identity, sort_keys=True, ensure_ascii=False, default=str,
                              separators=(",", ":"))
@@ -71,6 +251,12 @@ class ActionCandidate:
             out["description"] = self.description
         if self.uncertainty:
             out["uncertainty"] = self.uncertainty
+        if self.entity_id:
+            out["entity_id"] = self.entity_id
+        if self.upgrade_state:
+            out["upgrade_state"] = self.upgrade_state
+        if self.validity:
+            out["validity"] = dict(self.validity)
         return out
 
     def to_dict(self) -> dict:
@@ -288,6 +474,9 @@ class ExecutionDecision:
     state_id: str = ""
     plan_id: str = ""
     jev_confidence: float = 0.0
+    local_confidence: float | None = None
+    raw_model_confidence: float | None = None
+    selection_basis: str = ""
     uncertain: bool = False
     candidates: list[dict] = field(default_factory=list)
 
@@ -299,6 +488,9 @@ class ExecutionDecision:
             "plan_id": self.plan_id,
             "brain_source": self.source_type,
             "jev_confidence": self.jev_confidence,
+            "local_confidence": self.local_confidence,
+            "model_confidence": self.raw_model_confidence,
+            "selection_basis": self.selection_basis,
             "alternative_command": dict(alternative.command) if alternative else None,
             "alternative_label": alternative.label if alternative else "",
             "alternative_reason": (

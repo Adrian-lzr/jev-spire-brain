@@ -53,6 +53,7 @@ from spirebrain.jev_brain.client import (
     ScoreSpec,
     dump_state,
 )
+from spirebrain.redaction import redact_text
 
 ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 
@@ -311,26 +312,30 @@ class LlmStructuredClient(JevClient):
             try:
                 body = self._post(payload)
             except urllib.error.HTTPError as err:
-                detail = err.read().decode("utf-8", "replace")[:300] if err.fp else ""
+                # Do not persist provider response bodies: they may echo the
+                # request or an Authorization header.
+                detail = ""
                 if err.code in TRANSIENT_STATUS and attempt < self.max_retries:
                     last_err = err
                     time.sleep(self.backoff * (2**attempt))
                     continue
-                raise OpenRouterError(f"HTTP {err.code}: {detail}") from err
+                raise OpenRouterError(redact_text(f"HTTP {err.code}: {detail}")) from err
             except (urllib.error.URLError, TimeoutError, OSError) as err:
                 if attempt < self.max_retries:
                     last_err = err
                     time.sleep(self.backoff * (2**attempt))
                     continue
-                raise OpenRouterError(f"network failure: {err}") from err
+                raise OpenRouterError(f"network failure: {type(err).__name__}") from err
 
             latency_ms = int((time.perf_counter() - t0) * 1000)
 
             if isinstance(body.get("error"), dict):  # OpenRouter sometimes 200s an error
-                raise OpenRouterError(f"api error: {body['error'].get('message', body['error'])}")
+                raise OpenRouterError(redact_text(
+                    f"api error: {body['error'].get('message', body['error'])}"))
             choices = body.get("choices") or []
             if not choices:
-                raise OpenRouterError(f"no choices in response: {json.dumps(body)[:300]}")
+                raise OpenRouterError(redact_text(
+                    f"no choices in response: {json.dumps(body)[:300]}"))
 
             content = choices[0].get("message", {}).get("content") or ""
             answers = parse_structured_answers(extract_json(content), questions)

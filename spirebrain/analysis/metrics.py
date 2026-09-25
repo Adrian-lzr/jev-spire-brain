@@ -7,6 +7,8 @@ import json
 from collections import Counter
 from pathlib import Path
 
+from spirebrain.redaction import redact_text
+
 
 def _percentile(values: list[float], p: float) -> float | None:
     if not values:
@@ -71,7 +73,7 @@ def summarize(records: list[dict], *, source: str = "") -> dict:
             value = r.get("latency_ms", r.get("brain_latency_ms"))
             if isinstance(value, (int, float)) and value >= 0:
                 legacy_latency.append(float(value))
-    fallback = Counter(str(r.get("fallback_reason") or r.get("reason") or "unknown")
+    fallback = Counter(redact_text(r.get("fallback_reason") or r.get("reason") or "unknown")
                        for r in records if r.get("fallback") is True)
     outcomes = [r for r in records if r.get("event_type") == "outcome"]
     real_results = [r for r in outcomes if r.get("result") in {"win", "loss", "death"}]

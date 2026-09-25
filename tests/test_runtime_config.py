@@ -57,6 +57,77 @@ def test_decision_trace_is_bounded_and_redacts_credentials(tmp_path: Path):
     assert "redacted" in record["reason"]
 
 
+def test_decision_trace_keeps_current_identity_and_confidence_fields(tmp_path: Path):
+    path = tmp_path / "trace.jsonl"
+    trace = DecisionTrace(path, config_id="cfg-test")
+    assert trace.record("advice", {
+        "run_id": "run-1", "run_epoch": 3, "state_id": "state-1",
+        "decision_id": "decision-1", "advice_revision": 2,
+        "candidate_id": "combat:play:0:0", "brain_error": "temporary",
+        "raw_model_confidence": 0.42, "local_confidence": 0.8,
+        "selection_basis": "gpt_strategy", "combat_facts": {"lethal": True},
+    })
+    record = json.loads(path.read_text(encoding="utf-8"))
+    assert record["run_epoch"] == 3
+    assert record["advice_revision"] == 2
+    assert record["candidate_id"] == "combat:play:0:0"
+    assert record["raw_model_confidence"] == 0.42
+    assert record["local_confidence"] == 0.8
+    assert record["combat_facts"]["lethal"] is True
+
+
+def test_brain_log_redacts_nested_provider_errors_and_plan_text(tmp_path: Path):
+    from spirebrain.brain.gpt_client import LoggingStrategicClient
+    from spirebrain.brain.protocol import BrainResponse, StrategicPlan
+
+    class Provider:
+        backend_name = "mock"
+
+        def plan(self, payload):
+            plan = StrategicPlan.from_dict({
+                "plan_id": "p", "state_id": payload["state_id"],
+                "run_id": payload["run_id"], "current_objective": "API key: super-secret",
+                "long_term_goal": "survive", "priority": [],
+                "preferred_candidates": [], "avoid_candidates": [],
+                "resource_constraints": {"note": "Bearer super-secret"},
+                "next_steps": [], "replan_triggers": [], "reason": "ok",
+                "uncertainty": "", "expires_after": 1,
+            }, state_id=payload["state_id"], run_id=payload["run_id"])
+            return BrainResponse(plan=plan, backend="mock", error="Authorization: Bearer super-secret")
+
+    path = tmp_path / "brain_calls.jsonl"
+    LoggingStrategicClient(Provider(), path).plan({"state_id": "s", "run_id": "r"})
+    text = path.read_text(encoding="utf-8")
+    assert "super-secret" not in text
+    assert "[redacted]" in text
+
+
+def test_redaction_handles_json_quoted_api_key_fields():
+    from spirebrain.redaction import redact_text
+
+    text = '{"api_key":"super-secret", "access_token": "other-secret"}'
+    redacted = redact_text(text)
+    assert "super-secret" not in redacted
+    assert "other-secret" not in redacted
+
+
+def test_openai_http_error_does_not_copy_provider_response_body():
+    import io
+    import urllib.error
+    from spirebrain.brain.gpt_client import OpenAIStrategicClient
+
+    body = b'{"error":"Authorization: Bearer super-secret"}'
+
+    def opener(request, timeout):
+        raise urllib.error.HTTPError("https://provider.test", 401, "no", None,
+                                     io.BytesIO(body))
+
+    result = OpenAIStrategicClient(api_key="test", opener=opener).plan(
+        {"state_id": "s", "run_id": "r"})
+    assert result.error == "HTTP 401 from strategic provider"
+    assert "super-secret" not in result.error
+
+
 def test_runtime_config_supports_mainland_openai_compatible_presets(tmp_path: Path):
     config = resolve_runtime_config(
         tmp_path,
