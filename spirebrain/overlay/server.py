@@ -131,6 +131,7 @@ def _state_snapshot(feed: DecisionFeed) -> dict:
                 "tally": event.get("tally"),
                 "state_id": event.get("state_id"),
                 "status": event.get("status", "ready"),
+                "display_status": event.get("display_status", event.get("status", "ready")),
                 "source_type": event.get("source_type", ""),
                 "source": event.get("source", ""),
                 "guide_rules": event.get("guide_rules") or [],

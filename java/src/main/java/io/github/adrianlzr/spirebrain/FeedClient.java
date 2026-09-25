@@ -65,6 +65,8 @@ public final class FeedClient {
         public String stateId = "";
         public String planId = "";
         public String adviceStatus = "";
+        /** Semantic display state shared by browser and game overlay. */
+        public String displayStatus = "";
         public double adviceConfidence = 0.0;
         public boolean uncertain = false;
         /** True when confidence is 0: rules answered, the model was not asked. */
@@ -84,6 +86,12 @@ public final class FeedClient {
 
         // -- run state ------------------------------------------------------ //
         public int hp, maxHp, budgetRemaining, budgetMax;
+        public String mode = "advise";
+        public String configId = "";
+        public String dashboardStatus = "";
+        public String gameConnectionStatus = "";
+        public String stateReceiverStatus = "";
+        public String modelConnectionStatus = "";
 
         // -- agent presence ------------------------------------------------- //
         /** "waiting_for_run": the agent is ALIVE at the main menu, not absent. */
@@ -201,6 +209,7 @@ public final class FeedClient {
             snap.stateId = advice.optString("state_id", "");
             snap.planId = advice.optString("plan_id", "");
             snap.adviceStatus = advice.optString("status", "ready");
+            snap.displayStatus = advice.optString("display_status", snap.adviceStatus);
             String sourceType = advice.optString("source_type", "");
             switch (sourceType) {
                 case "guide_rule":
@@ -300,6 +309,12 @@ public final class FeedClient {
             snap.budgetRemaining = run.optInt("budget_remaining", 0);
             int reserved = run.optInt("reserved", 0);
             snap.budgetMax = Math.max(1, snap.maxHp - reserved);
+            snap.mode = run.optString("mode", "advise");
+            snap.configId = run.optString("config_id", "");
+            snap.dashboardStatus = run.optString("dashboard_status", "");
+            snap.gameConnectionStatus = run.optString("game_connection_status", "");
+            snap.stateReceiverStatus = run.optString("state_receiver_status", "");
+            snap.modelConnectionStatus = run.optString("model_connection_status", "");
         } else {
             snap.maxHp = 80;
             snap.budgetMax = 80;

@@ -77,6 +77,17 @@ def test_mock_plan_selects_only_a_legal_candidate():
     assert decision.alternative_candidate is not None
 
 
+def test_alternative_candidate_obeys_same_resource_constraints():
+    state = _combat()
+    candidates = build_action_candidates(state)
+    plan = StrategicPlan("p", "s", "local", current_objective="survive",
+                         resource_constraints={"max_cost": 0})
+    command, decision = reconcile(game=state, candidates=candidates,
+                                  fallback={"command": "end"}, plan=plan,
+                                  state_id="s")
+    assert decision.alternative_candidate is None
+
+
 def test_memory_resets_on_game_over():
     memory = RunMemory()
     memory.observe(_combat(), state_id="one")

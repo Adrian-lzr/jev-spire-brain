@@ -18,6 +18,8 @@ FIELDS = {
     "state_id": "stateId", "plan_id": "planId", "strategic_goal": "strategicGoal",
     "alternative_label": "alternativeLabel", "alternative_condition": "alternativeCondition",
     "uncertain": "uncertain", "source_type": "adviceSource", "confidence": "adviceConfidence",
+    "display_status": "displayStatus",
+    "mode": "mode", "config_id": "configId", "model_connection_status": "modelConnectionStatus",
 }
 
 

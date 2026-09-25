@@ -483,7 +483,10 @@ function renderState(s) {
   if (nextStateId) currentStateId = nextStateId;
   const box = document.getElementById("runstate");
   box.innerHTML = "";
-  const rows = [["角色", s.character], ["幕", s.act], ["层", s.floor], ["金块", s.gold], ["卡组", s.deck_size + " 张"]];
+  const rows = [["角色", s.character], ["幕", s.act], ["层", s.floor], ["金块", s.gold], ["卡组", s.deck_size + " 张"],
+                ["模式", s.mode], ["配置", s.config_id], ["面板", s.dashboard_status],
+                ["游戏连接", s.game_connection_status], ["状态接收", s.state_receiver_status],
+                ["模型连接", s.model_connection_status]];
   for (const [k, v] of rows) {
     if (v === undefined || v === null || v === "") continue;
     const kv = el("div", "kv");
@@ -688,10 +691,14 @@ function renderAdvice(ev) {
                        rule_constraint: "硬规则约束", rule_fallback: "规则兜底", pending: "正在分析",
                        unavailable: "暂不可用"};
   const sourceName = sourceNames[ev.source_type] || (conf > 0 ? "JEV 判断" : "规则判断");
+  const displayNames = {local_advice: "本地快速建议", model_analysis: "模型分析中",
+                        complete_advice: "完整建议", fallback: "降级建议", expired: "建议已过期"};
   why.textContent = ev.reason || "";
   const box = document.getElementById("advicemeta");
   box.innerHTML = "";
   box.append(el("span", "badge", sourceName));
+  if (ev.display_status && displayNames[ev.display_status])
+    box.append(el("span", "badge", displayNames[ev.display_status]));
   if (ev.status === "ready" && conf > 0) box.append(el("span", "badge", "置信度 " + conf.toFixed(2)));
   if (ev.raw_model_confidence !== null && ev.raw_model_confidence !== undefined)
     box.append(el("span", "badge", "模型 " + Number(ev.raw_model_confidence).toFixed(2)));

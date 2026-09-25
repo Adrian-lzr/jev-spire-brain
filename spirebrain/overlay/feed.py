@@ -182,6 +182,17 @@ def run_state_event(agent) -> dict:
             })
         except Exception:  # optional observability must never affect gameplay
             pass
+    runtime = getattr(agent, "runtime_config", None)
+    session = getattr(agent, "run_session", None)
+    state.update({
+        "mode": getattr(session, "mode", "advise") or "advise",
+        "config_id": getattr(runtime, "config_id", "") if runtime else "",
+        "dashboard_status": "connected" if getattr(agent, "feed", None) is not None else "disabled",
+        "game_connection_status": "connected" if getattr(agent, "_active_game", None) is not None else "waiting",
+        "state_receiver_status": "receiving" if getattr(agent, "_observed_state_id", "") else "waiting",
+        "model_connection_status": ("ready" if strategic and getattr(strategic, "backend_name", "") not in {"disabled", "unavailable"}
+                                     else "fallback"),
+    })
     return state
 
 
@@ -216,6 +227,14 @@ def advice_event(advice, tally: dict | None = None,
     for screens answered by navigation rules rather than the model, which is why
     the dashboard renders 0 as "规则" and not as a 0% certainty.
     """
+    status = getattr(advice, "status", "ready") or "ready"
+    display_status = {
+        "fast_advice": "local_advice",
+        "model_ready": "complete_advice",
+        "thinking": "model_analysis",
+        "unavailable": "fallback",
+        "expired": "expired",
+    }.get(status, status)
     return {
         "record_kind": "advice_history",
         "point": advice.point,
@@ -245,7 +264,8 @@ def advice_event(advice, tally: dict | None = None,
         "request_latency_ms": advice.brain_latency_ms or None,
         "first_advice_latency_ms": advice.first_advice_latency_ms,
         "decision_latency_ms": advice.decision_latency_ms,
-        "status": getattr(advice, "status", "ready") or "ready",
+        "status": status,
+        "display_status": display_status,
         "source_type": advice.source_type,
         "source": advice.source,
         "guide_rules": advice.guide_rules,

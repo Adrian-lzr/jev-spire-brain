@@ -480,7 +480,17 @@ def reconcile(*, game: dict, candidates: list[ActionCandidate], fallback: dict,
 
     alternative = None
     if selected is not None:
-        alternative = next((c for c in legal if c.candidate_id != selected.candidate_id), None)
+        # Alternatives are player-visible recommendations too: apply the same
+        # plan bindings, avoid list and resource constraints as the primary
+        # choice. Never show a fallback that the strategic layer would reject.
+        alternative = next((c for c in legal
+                            if c.candidate_id != selected.candidate_id
+                            and (not plan or
+                                 ((c.candidate_id not in plan.avoid_candidates)
+                                  or not binding_matches(c.candidate_id, c, avoid_bound)))
+                            and _constraint_allows(c,
+                                                   plan.resource_constraints if plan else {},
+                                                   game)), None)
     if source == "gpt_strategy":
         selection_basis = "strategic_preference"
     elif source == "jev_tactical":
