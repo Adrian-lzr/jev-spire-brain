@@ -181,6 +181,14 @@ def test_openai_compatible_endpoint_uses_chat_completions_payload():
     assert "input" not in body
 
 
+def test_strategic_gateway_never_builds_responses_payload():
+    client = OpenAIStrategicClient(api_key="test", endpoint="https://gateway.test/v1")
+    body = client._request_body({"state_id": "s", "run_id": "r"})
+    assert "messages" in body
+    assert "input" not in body
+    assert "text" not in body
+
+
 def test_openai_compatible_endpoint_can_opt_into_structured_output():
     client = OpenAIStrategicClient(
         api_key="test", model="gpt-test",

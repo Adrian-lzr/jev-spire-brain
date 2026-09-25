@@ -148,15 +148,21 @@ class SpireBrainAgent:
                  acceptance: str | None = None,
                  feed: DecisionFeed | None = None,
                  brain_backend: str | None = None,
+                 brain_model: str | None = None, brain_endpoint: str | None = None,
+                 jev_endpoint: str | None = None,
                  brain_client=None, async_planning: bool | None = None) -> None:
         self._constructor = {"jev_backend": jev_backend, "strategy_path": strategy_path,
                               "log_dir": log_dir, "acceptance": acceptance,
                               "brain_backend": brain_backend, "brain_client": brain_client,
+                              "brain_model": brain_model, "brain_endpoint": brain_endpoint,
+                              "jev_endpoint": jev_endpoint,
                               "async_planning": async_planning}
         strategy_file = Path(strategy_path) if strategy_path else ROOT / "config" / "strategy.json"
         self.strategy = json.loads(strategy_file.read_text(encoding="utf-8"))
         self.runtime_config = resolve_runtime_config(
-            ROOT, cli={"backend": jev_backend, "brain_backend": brain_backend},
+            ROOT, cli={"backend": jev_backend, "brain_backend": brain_backend,
+                       "brain_model": brain_model, "brain_endpoint": brain_endpoint,
+                       "jev_endpoint": jev_endpoint},
             strategy=self.strategy)
         jev_backend = self.runtime_config.jev_backend
         brain_backend = self.runtime_config.brain_backend
@@ -170,7 +176,8 @@ class SpireBrainAgent:
         jev_kwargs = {}
         if jev_backend == "openrouter":
             jev_kwargs.update(total_budget_ms=self.runtime_config.jev_budget_ms,
-                              max_retries=self.runtime_config.jev_max_retries)
+                              max_retries=self.runtime_config.jev_max_retries,
+                              endpoint=self.runtime_config.jev_endpoint)
         elif jev_backend == "official":
             jev_kwargs.update(total_budget_ms=self.runtime_config.jev_budget_ms,
                               max_retries=self.runtime_config.jev_max_retries)
@@ -389,8 +396,12 @@ class SpireBrainAgent:
             max_hp=max_hp,
             gold=_as_int(_get(game, "gold", default=0)),
             deck=deck,
-            relics=[str(r if isinstance(r, str) else _get(r, "name", "relic_id", default=""))
-                    for r in (_get(game, "relics", default=[]) or [])],
+            relics=[(
+                str(r) if isinstance(r, str) else
+                (str(_get(r, "name", default=""))
+                 if "\ufffd" not in str(_get(r, "name", default=""))
+                 else str(_get(r, "id", "relic_id", default="未知遗物")))
+            ) for r in (_get(game, "relics", default=[]) or [])],
             potions=[str(p if isinstance(p, str) else _get(p, "name", "potion_id", default=""))
                      for p in (_get(game, "potions", default=[]) or [])],
             goal=self.goal,

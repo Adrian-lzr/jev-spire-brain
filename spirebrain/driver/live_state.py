@@ -10,6 +10,38 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+def _repair_text(value):
+    """Repair the common UTF-8 bytes decoded once as a Windows code page."""
+    if not isinstance(value, str):
+        return value
+    if "\ufffd" in value:
+        # Replacement characters mean the original bytes were already lost;
+        # never send that mojibake to the overlay as if it were a name.
+        return "文本不可用"
+    if not any(ord(ch) > 0x7f for ch in value):
+        return value
+    for encoding in ("gb18030", "cp1252", "latin1"):
+        try:
+            repaired = value.encode(encoding).decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            continue
+        # Prefer a result containing CJK text over the mojibake source.
+        if sum(0x3400 <= ord(ch) <= 0x9fff for ch in repaired) > sum(
+                0x3400 <= ord(ch) <= 0x9fff for ch in value):
+            return repaired
+    return value
+
+
+def _repair_tree(value):
+    if isinstance(value, str):
+        return _repair_text(value)
+    if isinstance(value, list):
+        return [_repair_tree(item) for item in value]
+    if isinstance(value, dict):
+        return {_repair_text(str(key)): _repair_tree(item) for key, item in value.items()}
+    return value
+
+
 @dataclass(frozen=True)
 class GameSnapshot:
     """Normalized CommunicationMod state plus stable identity for a decision."""
@@ -38,7 +70,7 @@ class GameSnapshot:
 
 
 def normalize_game_state(game: dict) -> dict:
-    state = dict(game)
+    state = _repair_tree(dict(game))
     if not state.get("character"):
         state["character"] = state.get("class", "")
     if (str(state.get("screen_type", "")).upper() == "NONE"

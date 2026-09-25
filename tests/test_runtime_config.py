@@ -154,6 +154,17 @@ def test_strategy_endpoint_and_budget_are_effective(tmp_path: Path):
     assert config.jev_max_retries == 1
 
 
+def test_compatible_base_endpoint_gets_chat_route_and_jev_endpoint_is_effective(tmp_path: Path):
+    config = resolve_runtime_config(
+        tmp_path,
+        environ={"OPENAI_BRAIN_ENDPOINT": "https://gateway.test/v1",
+                 "OPENROUTER_ENDPOINT": "https://openrouter.test"},
+        strategy={"brain": {}, "jev": {"backend": "openrouter"}},
+    )
+    assert config.openai_endpoint == "https://gateway.test/v1/chat/completions"
+    assert config.jev_endpoint == "https://openrouter.test"
+
+
 def test_dashboard_public_config_distinguishes_saved_and_effective(tmp_path: Path):
     from spirebrain.overlay.config import get_public_config
     (tmp_path / ".env").write_text("BRAIN_BACKEND=mock\nJEV_BACKEND=mock\n", encoding="utf-8")

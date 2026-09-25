@@ -160,7 +160,10 @@ def run_state_event(agent) -> dict:
             "character": run.character,
             "gold": run.gold,
             "deck_size": len(run.deck or []),
-            "relics": list(run.relics or []),
+            # Values have already passed through GameSnapshot normalization;
+            # keep them as Unicode strings so the browser never has to guess
+            # which legacy code page produced a relic name.
+            "relics": [_display_name(name) for name in (run.relics or [])],
         })
     strategic = getattr(agent, "strategic", None)
     if strategic is not None:
@@ -194,6 +197,18 @@ def run_state_event(agent) -> dict:
                                      else "fallback"),
     })
     return state
+
+
+def _display_name(value) -> str:
+    """Return a stable, readable label even when CM supplied mojibake."""
+    if isinstance(value, dict):
+        name = str(value.get("name") or "")
+        identity = str(value.get("id") or value.get("relic_id") or "")
+        if "\ufffd" in name or name == "文本不可用" or not name.strip():
+            return identity or "未知遗物"
+        return name
+    text = str(value)
+    return "未知遗物" if "\ufffd" in text else text
 
 
 def decision_event(decision, command: dict) -> dict:

@@ -596,7 +596,9 @@ class StdioTransport:
 # CLI
 # --------------------------------------------------------------------------- #
 def _build_agent(strategy_path: str | None, backend: str | None, acceptance: str | None,
-                 dashboard_url: str | None = None, brain_backend: str | None = None):
+                 dashboard_url: str | None = None, brain_backend: str | None = None,
+                 brain_model: str | None = None, brain_endpoint: str | None = None,
+                 jev_endpoint: str | None = None):
     """Construct the router lazily so imports stay cheap for --replay.
 
     With `dashboard_url`, the agent gets a BridgeFeed: every decision is
@@ -613,7 +615,9 @@ def _build_agent(strategy_path: str | None, backend: str | None, acceptance: str
         feed = BridgeFeed(url=dashboard_url)
     return SpireBrainAgent(jev_backend=backend,
                            strategy_path=strategy_path, acceptance=acceptance,
-                           feed=feed, brain_backend=brain_backend)
+                           feed=feed, brain_backend=brain_backend,
+                           brain_model=brain_model, brain_endpoint=brain_endpoint,
+                           jev_endpoint=jev_endpoint)
 
 
 def replay(paths: list[Path], agent, *, log_path: str | Path | None = None,
@@ -658,6 +662,9 @@ def main(argv: list[str]) -> int:
     replay_dir = value("replay")
     dashboard_url = value("dashboard-url") or value("dashboard")
     brain_backend = value("brain-backend")
+    brain_model = value("brain-model")
+    brain_endpoint = value("brain-endpoint")
+    jev_endpoint = value("jev-endpoint")
     mode = ("play" if "--play" in argv else
             "advise" if "--advise" in argv else (value("mode") or DEFAULT_MODE))
     if mode not in MODES:
@@ -667,7 +674,8 @@ def main(argv: list[str]) -> int:
     poll_frames = int(value("poll-frames") or DEFAULT_POLL_FRAMES)
 
     if replay_dir:
-        agent = _build_agent(strategy_path, backend, acceptance, dashboard_url, brain_backend)
+        agent = _build_agent(strategy_path, backend, acceptance, dashboard_url, brain_backend,
+                             brain_model, brain_endpoint, jev_endpoint)
         files = sorted(Path(replay_dir).glob("*.json"))
         if not files:
             print(f"[stdio] no .json messages in {replay_dir}", file=sys.stderr)
@@ -680,7 +688,8 @@ def main(argv: list[str]) -> int:
         return 0
 
     # Live mode: this is what CommunicationMod launches.
-    agent = _build_agent(strategy_path, backend, acceptance, dashboard_url, brain_backend)
+    agent = _build_agent(strategy_path, backend, acceptance, dashboard_url, brain_backend,
+                         brain_model, brain_endpoint, jev_endpoint)
     if dashboard_url:
         print(f"[stdio] decisions stream to {dashboard_url} "
               f"(start run_dashboard.py to watch; silent when it is not up)",

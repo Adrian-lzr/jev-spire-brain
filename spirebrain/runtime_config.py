@@ -59,6 +59,7 @@ class RuntimeConfig:
     brain_backend: str
     openai_model: str
     openai_endpoint: str
+    jev_endpoint: str
     timeout_ms: int
     max_output_tokens: int
     max_plan_steps: int
@@ -78,6 +79,7 @@ class RuntimeConfig:
             "brain_backend": self.brain_backend,
             "openai_model": self.openai_model,
             "openai_endpoint": self.openai_endpoint,
+            "jev_endpoint": self.jev_endpoint,
             "timeout_ms": self.timeout_ms,
             "max_output_tokens": self.max_output_tokens,
             "max_plan_steps": self.max_plan_steps,
@@ -151,6 +153,14 @@ def resolve_runtime_config(root: str | Path, *, cli: Mapping[str, str | None] | 
     jev_default = str(jev.get("backend") or ("openrouter" if has_openrouter_key else "mock"))
     jev_backend = pick("jev_backend", "JEV_BACKEND", jev.get("backend"), jev_default,
                        cli_name="backend").lower()
+    jev_endpoint = pick_alias("jev_endpoint", ("JEV_ENDPOINT", "OPENROUTER_ENDPOINT"),
+                              jev.get("endpoint"), "https://openrouter.ai/api/v1/systemone")
+    if jev_backend == "openrouter":
+        base = jev_endpoint.rstrip("/")
+        if base in {"https://openrouter.ai", "https://openrouter.ai/api/v1"}:
+            jev_endpoint = "https://openrouter.ai/api/v1/systemone"
+        elif base.endswith("/api/v1"):
+            jev_endpoint = base + "/systemone"
     brain_backend = pick("brain_backend", "BRAIN_BACKEND", brain.get("backend"), "openai",
                          cli_name="brain_backend").lower()
     preset_model, preset_endpoint = BRAIN_PROVIDER_PRESETS.get(
@@ -163,6 +173,23 @@ def resolve_runtime_config(root: str | Path, *, cli: Mapping[str, str | None] | 
         brain.get("endpoint"),
         preset_endpoint,
     )
+    # Explicit CLI aliases are applied after the environment aliases so a
+    # launcher can defeat stale inherited process variables without exposing a
+    # secret in the command line.
+    for key, value in (("openai_model", cli.get("brain_model")),
+                       ("openai_endpoint", cli.get("brain_endpoint")),
+                       ("jev_endpoint", cli.get("jev_endpoint"))):
+        if value is not None and str(value).strip():
+            if key == "openai_model": openai_model = str(value).strip()
+            elif key == "openai_endpoint": openai_endpoint = str(value).strip()
+            else: jev_endpoint = str(value).strip()
+            sources[key] = "command_line"
+    # Most OpenAI-compatible gateways publish a base /v1 URL in their setup
+    # instructions. The client needs the concrete chat route; keep the
+    # official Responses endpoint unchanged.
+    if (openai_endpoint.rstrip("/").endswith("/v1")
+            and "api.openai.com" not in openai_endpoint):
+        openai_endpoint = openai_endpoint.rstrip("/") + "/chat/completions"
 
     def number(name: str, env_name: str, file_value, default: int,
                minimum: int, maximum: int) -> int:
@@ -202,6 +229,7 @@ def resolve_runtime_config(root: str | Path, *, cli: Mapping[str, str | None] | 
         "brain_backend": brain_backend,
         "openai_model": openai_model,
         "openai_endpoint": openai_endpoint,
+        "jev_endpoint": jev_endpoint,
         "timeout_ms": timeout_ms,
         "max_output_tokens": max_output_tokens,
         "max_plan_steps": max_plan_steps,

@@ -353,34 +353,30 @@ class OpenAIStrategicClient:
         )
 
     def _request_body(self, payload: dict) -> dict:
+        """Build the only supported wire shape: OpenAI-compatible chat.
+
+        The configured strategic gateway is not guaranteed to implement the
+        OpenAI Responses API. Sending a Responses payload to a compatible
+        ``/v1`` gateway produced opaque 401/404 fallbacks in live runs, so the
+        provider adapter deliberately has one protocol and one parser.
+        """
         user_text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        if "chat/completions" in self.endpoint:
-            body = {
-                "model": self.model,
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_text},
-                ],
-                "max_tokens": self.max_output_tokens,
-            }
-            if self.structured_output:
-                body["response_format"] = {
-                    "type": "json_schema",
-                    "json_schema": {"name": "strategic_plan", "strict": True,
-                                     "schema": PLAN_SCHEMA},
-                }
-            return body
-        return {
+        body = {
             "model": self.model,
-            "input": [
-                {"role": "system", "content": [{"type": "input_text", "text": SYSTEM_PROMPT}]},
-                {"role": "user", "content": [{"type": "input_text", "text": user_text}]},
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_text},
             ],
             "temperature": 0.1,
-            "max_output_tokens": self.max_output_tokens,
-            "text": {"format": {"type": "json_schema", "name": "strategic_plan",
-                                  "strict": True, "schema": PLAN_SCHEMA}},
+            "max_tokens": self.max_output_tokens,
         }
+        if self.structured_output:
+            body["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": "strategic_plan", "strict": True,
+                                 "schema": PLAN_SCHEMA},
+            }
+        return body
 
 
 class LoggingStrategicClient:
