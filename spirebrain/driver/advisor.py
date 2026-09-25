@@ -297,6 +297,15 @@ class AdviseSession:
                                        "run_epoch", 0) or 0)
             if (generation != self._generation or fp != self._latest_fp
                     or run_epoch != current_epoch):
+                self._trace("expired_result", {
+                    "decision_id": (entry or {}).get("decision_id") if entry else self._current_decision_id,
+                    "state_id": semantic_state_id(payload), "run_id": (entry or {}).get("run_id", ""),
+                    "run_epoch": run_epoch, "request_id": (entry or {}).get("request_id", ""),
+                    "expired_result": True,
+                    "fallback_reason": ("generation_mismatch" if generation != self._generation
+                                         else "state_changed" if fp != self._latest_fp
+                                         else "run_changed"),
+                })
                 continue  # the player already changed the game state
             if error is not None or command is None:
                 # An immediate hard-rule recommendation remains visible on API
@@ -485,6 +494,17 @@ class AdviseSession:
         # This is the main-loop commit point for advice history. The worker may
         # have produced the proposal, but only the owning session records that
         # it was shown to the player.
+        previous = self.tracker.pending
+        if previous is not None and previous.decision_id == advice.decision_id:
+            self._trace("advice_replaced", {
+                "run_id": advice.run_id, "run_epoch": advice.run_epoch,
+                "decision_id": advice.decision_id, "state_id": advice.state_id,
+                "request_id": advice.request_id or advice.brain_request_id,
+                "plan_id": advice.plan_id,
+                "previous_advice_revision": previous.advice_revision,
+                "advice_revision": advice.advice_revision,
+                "replacement_reason": "newer_advice",
+            })
         recorder = getattr(self.agent, "record_advice_history", None)
         if recorder is not None:
             recorder(advice, displayed=True)

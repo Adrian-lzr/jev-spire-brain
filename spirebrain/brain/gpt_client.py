@@ -11,9 +11,9 @@ from __future__ import annotations
 import json
 import os
 import time
+import uuid
 import urllib.error
 import urllib.request
-import uuid
 from pathlib import Path
 import threading
 from typing import Any
@@ -388,21 +388,36 @@ class LoggingStrategicClient:
 
     _lock = threading.Lock()
 
-    def __init__(self, inner, path: str | os.PathLike) -> None:
+    def __init__(self, inner, path: str | os.PathLike, event_sink=None) -> None:
         self.inner = inner
         self.backend_name = getattr(inner, "backend_name", "unknown")
         self.async_required = bool(
             getattr(inner, "async_required", str(self.backend_name).lower() in {"openai", "gpt"})
         )
         self.path = Path(path)
+        self.event_sink = event_sink
 
     def plan(self, payload: dict) -> BrainResponse:
         started = time.monotonic()
+        request_id = str(payload.get("request_id") or uuid.uuid4())
+        identity = {key: payload.get(key) for key in
+                    ("run_id", "run_epoch", "decision_id", "state_id", "plan_id", "config_id")}
+        identity["request_id"] = request_id
+        if self.event_sink is not None:
+            try:
+                self.event_sink("provider_request", {**identity, "provider": self.backend_name,
+                                                       "model": getattr(self.inner, "model", "")})
+            except Exception:
+                pass
         try:
             result = self.inner.plan(payload)
         except Exception as exc:  # keep the wrapper transparent to the caller
             result = BrainResponse(backend=self.backend_name,
                                    error=redact_text(f"{type(exc).__name__}: {exc}"), fallback=True)
+        provider_request_id = result.request_id
+        # The wrapper owns the cross-provider correlation ID. Preserve the
+        # provider's opaque ID only in the legacy log.
+        result.request_id = request_id
         plan = result.plan.model_dict() if result.plan is not None else None
         record = redact_value({
             "ts": time.time(),
@@ -425,6 +440,16 @@ class LoggingStrategicClient:
                 stream.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
         except OSError:
             pass
+        if self.event_sink is not None:
+            try:
+                self.event_sink("provider_response", {**identity,
+                    "request_id": result.request_id, "provider_request_id": provider_request_id,
+                    "provider": result.backend or self.backend_name,
+                    "model": result.model, "latency_ms": record["latency_ms"],
+                    "usage": result.usage, "error": result.error, "error_kind": result.error_kind,
+                    "fallback": bool(result.fallback)})
+            except Exception:
+                pass
         return result
 
 

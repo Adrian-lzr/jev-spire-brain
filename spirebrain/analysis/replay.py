@@ -10,6 +10,73 @@ from pathlib import Path
 
 from spirebrain.driver.agent import SpireBrainAgent
 from spirebrain.driver.stdio import StdioTransport
+from spirebrain.brain.protocol import BrainResponse, StrategicPlan
+
+
+class ReplayStrategicClient:
+    """Offline strategic provider backed by fixed structured responses.
+
+    Fixtures contain plans only; commands are never accepted from a replay
+    response.  This makes planning and reconciliation reproducible without a
+    network request or an API credential.
+    """
+    backend_name = "replay"
+    async_required = False
+
+    def __init__(self, responses: list[dict] | tuple[dict, ...]):
+        self.responses = list(responses)
+        self.calls = 0
+
+    def plan(self, payload: dict) -> BrainResponse:
+        self.calls += 1
+        if not self.responses:
+            return BrainResponse(backend=self.backend_name, error="回放响应耗尽",
+                                 error_kind="replay_exhausted", fallback=True)
+        response = self.responses[min(self.calls - 1, len(self.responses) - 1)]
+        if not isinstance(response, dict):
+            return BrainResponse(backend=self.backend_name, error="回放响应不是对象",
+                                 error_kind="parse_or_validation", fallback=True)
+        raw_plan = dict(response.get("plan", response)) if isinstance(response.get("plan", response), dict) else response.get("plan", response)
+        if isinstance(raw_plan, dict):
+            raw_plan.setdefault("state_id", str(payload.get("state_id", "")))
+            raw_plan.setdefault("run_id", str(payload.get("run_id", "local")))
+        try:
+            plan = StrategicPlan.from_dict(raw_plan,
+                state_id=str(payload.get("state_id", "")),
+                run_id=str(payload.get("run_id", "local")))
+        except (TypeError, ValueError, KeyError) as exc:
+            return BrainResponse(backend=self.backend_name,
+                                 error=f"回放计划无效：{type(exc).__name__}",
+                                 error_kind="parse_or_validation", fallback=True)
+        return BrainResponse(plan=plan, backend=self.backend_name,
+                             model="replay", latency_ms=0,
+                             request_id=f"replay-{self.calls}")
+
+
+def load_fixed_responses(path: str | Path) -> list[dict]:
+    """Load only structured plans from a synthetic response fixture."""
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or payload.get("fixture_type") != "synthetic":
+        raise ValueError("fixed response fixture must be marked synthetic")
+    responses = payload.get("responses", [])
+    if not isinstance(responses, list) or not all(isinstance(item, dict) for item in responses):
+        raise ValueError("responses must be an array of objects")
+    return responses[:32]
+
+
+def run_timing_fixture(path: str | Path) -> dict:
+    """Validate a synthetic event-order fixture without running providers."""
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or payload.get("fixture_type") != "synthetic":
+        raise ValueError("timing fixture must be marked synthetic")
+    events = payload.get("events", [])
+    if not isinstance(events, list):
+        raise ValueError("events must be an array")
+    expired = [event for event in events if isinstance(event, dict)
+               and event.get("event_type") == "expired_result"]
+    return {"fixture": str(path), "fixture_type": "synthetic",
+            "event_count": len(events), "expired_result_count": len(expired),
+            "passed": all(isinstance(event, dict) for event in events)}
 
 
 def run_fixture(path: Path) -> dict:

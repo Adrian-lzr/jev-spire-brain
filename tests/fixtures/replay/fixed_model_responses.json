@@ -1,0 +1,19 @@
+{
+  "fixture_type": "synthetic",
+  "responses": [
+    {
+      "plan_id": "fixture-plan-1",
+      "current_objective": "先保证生存",
+      "long_term_goal": "完成当前楼层",
+      "priority": ["survive", "advance"],
+      "preferred_candidates": [],
+      "avoid_candidates": [],
+      "resource_constraints": {},
+      "next_steps": ["选择当前合法候选"],
+      "replan_triggers": ["screen_change"],
+      "reason": "固定响应回放",
+      "uncertainty": "",
+      "expires_after": 1
+    }
+  ]
+}

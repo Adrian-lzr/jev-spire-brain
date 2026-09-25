@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,7 @@ from spirebrain.jev_brain.client import (
 class LoggingJevClient(JevClient):
     """Decorator around any JevClient that records every ask()."""
 
-    def __init__(self, inner: JevClient, log_dir: str | Path = "logs") -> None:
+    def __init__(self, inner: JevClient, log_dir: str | Path = "logs", event_sink=None) -> None:
         self.inner = inner
         self.backend_name = inner.backend_name
         self.async_required = bool(getattr(inner, "async_required", False))
@@ -34,13 +35,32 @@ class LoggingJevClient(JevClient):
             pass
         self.calls: int = 0
         self.total_cost_usd: float = 0.0
+        self.event_sink = event_sink
 
     def ask(self, state, questions: dict[str, QuestionSpec]) -> JevResponse:
         t0 = time.perf_counter()
+        request_id = str(uuid.uuid4())
+        context = state if isinstance(state, dict) else {}
+        identity = {key: context.get(key) for key in
+                    ("run_id", "run_epoch", "decision_id", "state_id", "plan_id", "config_id")}
+        identity["request_id"] = request_id
+        if self.event_sink is not None:
+            try:
+                self.event_sink("provider_request", {**identity, "provider": self.backend_name,
+                                                       "model": getattr(self.inner, "model", "jev")})
+            except Exception:
+                pass
         resp = self.inner.ask(state, questions)
         wall_ms = int((time.perf_counter() - t0) * 1000)
         self.calls += 1
         self.total_cost_usd += resp.cost_usd
+        if self.event_sink is not None:
+            try:
+                self.event_sink("provider_response", {**identity, "provider": resp.backend,
+                    "model": resp.model, "latency_ms": wall_ms, "cost_usd": resp.cost_usd,
+                    "usage": resp.usage})
+            except Exception:
+                pass
 
         # Prompt version + payload size travel with every record: a threshold is
         # only meaningful next to the question set that produced it, and a state

@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from spirebrain.redaction import redact_text
+from spirebrain.analysis.event_contract import make_event, decision_chain
 
 
 _LOCK = threading.Lock()
@@ -24,7 +25,7 @@ _FIELDS = {
     "decision_latency_ms", "first_advice_latency_ms", "publish_latency_ms", "fallback",
     "fallback_reason", "legal", "legality_reason", "uncertain", "player_action", "verdict",
     "result", "evidence", "record_kind", "act", "floor", "cost_usd", "timeout", "http_status", "expired_result",
-    "expired_result_count", "fixture_type", "code_version",
+    "expired_result_count", "fixture_type", "code_version", "previous_advice_revision", "replacement_reason", "usage", "provider_request_id",
 }
 
 
@@ -54,7 +55,8 @@ class DecisionTrace:
     def record(self, event_type: str, fields: dict) -> bool:
         self._sequence += 1
         record = {
-            "schema_version": 1,
+            "schema_version": 2,
+            "timestamp": time.time(),
             "ts": time.time(),
             "trace_sequence": self._sequence,
             "event_type": str(event_type),
@@ -62,6 +64,8 @@ class DecisionTrace:
         }
         record.update({key: _safe(value) for key, value in fields.items()
                        if key in _FIELDS and key != "config_id"})
+        record = make_event(event_type, fields=record, timestamp=record["timestamp"])
+        record["trace_sequence"] = self._sequence
         try:
             line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -70,3 +74,18 @@ class DecisionTrace:
             return True
         except (OSError, UnicodeError, TypeError, ValueError):
             return False
+
+    def find_decision(self, decision_id: str) -> dict:
+        records = []
+        try:
+            with self.path.open("r", encoding="utf-8") as stream:
+                for line in stream:
+                    try:
+                        value = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(value, dict):
+                        records.append(value)
+        except OSError:
+            pass
+        return decision_chain(records, decision_id)

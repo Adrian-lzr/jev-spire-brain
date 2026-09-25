@@ -196,6 +196,12 @@ class SpireBrainAgent:
         )
         self.trace = DecisionTrace(resolved_log_dir / "decision_trace.jsonl",
                                    config_id=self.runtime_config.config_id)
+        # Provider events share the same decision trace as advice and outcomes.
+        logged_client.event_sink = self.trace.record
+        try:
+            self.strategic.provider.event_sink = self.trace.record
+        except AttributeError:
+            pass
         self._active_game: dict | None = None
         self._observed_state_id = ""
         self._active_candidates = []
@@ -801,6 +807,14 @@ class SpireBrainAgent:
                                                 "uncertain": final.uncertain})
             except Exception:  # noqa: BLE001
                 pass
+        self.trace.record("state_observed", {
+            "run_id": final.run_id, "run_epoch": final.context.run_epoch,
+            "state_id": final.state_id, "decision_id": final.decision_id,
+            "request_id": request_id or None, "plan_id": final.plan_id,
+            "screen": str(_get(self._active_game, "screen_type", default="")).upper(),
+            "act": _as_int(_get(self._active_game, "act", default=0)),
+            "floor": _as_int(_get(self._active_game, "floor", "floor_num", default=0)),
+        })
         self.trace.record("decision", {
             "run_id": final.run_id, "state_id": final.state_id,
             "decision_id": final.decision_id, "request_id": request_id or None,
@@ -832,6 +846,20 @@ class SpireBrainAgent:
             "act": _as_int(_get(self._active_game, "act", default=0)),
             "floor": _as_int(_get(self._active_game, "floor", "floor_num", default=0)),
         })
+        if request_id:
+            response = self._active_brain_response
+            self.trace.record("provider_response", {
+                "run_id": final.run_id, "run_epoch": final.context.run_epoch,
+                "state_id": final.state_id, "decision_id": final.decision_id,
+                "request_id": request_id, "plan_id": final.plan_id,
+                "provider": getattr(response, "backend", self.strategic.backend_name),
+                "model": getattr(response, "model", ""),
+                "latency_ms": getattr(response, "latency_ms", None),
+                "usage": getattr(response, "usage", {}) or {},
+                "error": getattr(response, "error", "") or None,
+                "error_kind": getattr(response, "error_kind", "") or None,
+                "fallback": bool(getattr(response, "fallback", False)),
+            })
         self._last_final_decision = final
         return command
 

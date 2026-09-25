@@ -8,6 +8,7 @@ from collections import Counter
 from pathlib import Path
 
 from spirebrain.redaction import redact_text
+from spirebrain.analysis.event_contract import decision_chain
 
 
 def _percentile(values: list[float], p: float) -> float | None:
@@ -85,7 +86,18 @@ def summarize(records: list[dict], *, source: str = "") -> dict:
     if not result_events:
         real_results = [r for r in outcomes if r.get("result") in {"win", "loss", "death"}]
     provider_events = {"provider", "brain_call", "provider_request"}
-    fallback_events = advice_events or decision_events
+    # Count one final recommendation per decision ID.  A provisional advice
+    # and a final decision may both exist for the same point and must not
+    # inflate fallback or sample counts.
+    recommendation_by_decision = {}
+    for event in advice_events + decision_events:
+        key = str(event.get("decision_id") or f"event:{id(event)}")
+        recommendation_by_decision[key] = event
+    fallback_events = list(recommendation_by_decision.values())
+    expired_events = [r for r in records if r.get("event_type") == "expired_result"]
+    chains = {str(r.get("decision_id")): decision_chain(records, str(r.get("decision_id")))
+              for r in records if r.get("decision_id")}
+    expired_decisions = sum(1 for chain in chains.values() if chain["expired"])
     return {
         "sample_size": len(records),
         "advice_count": len(advice_events),
@@ -123,8 +135,26 @@ def summarize(records: list[dict], *, source: str = "") -> dict:
         "fallback_rate": (sum(1 for r in fallback_events if r.get("fallback")) /
                            len(fallback_events) if fallback_events else None),
         "fallback_reasons": dict(fallback),
-        "expired_result_count": sum(int(r.get("expired_result_count", 0) or 0)
+        "expired_result_count": len(expired_events) + sum(int(r.get("expired_result_count", 0) or 0)
                                      for r in records),
+        "correctness": {
+            "expired_decision_count": expired_decisions,
+            "cross_run_contamination": "unknown",
+            "unexecuted_action_memory": "unknown",
+        },
+        "experience": {
+            "first_advice_samples": len(first_latency),
+            "complete_advice_samples": len(decision_latency),
+        },
+        "efficiency": {
+            "provider_calls": sum(1 for r in records if r.get("event_type") in provider_events),
+            "fallback_rate": (sum(1 for r in fallback_events if r.get("fallback")) /
+                               len(fallback_events) if fallback_events else None),
+        },
+        "decision_quality": {
+            "adoption_rate": None,
+            "real_game_result": "unknown",
+        },
         "unobserved_ratio": (sum(1 for r in outcomes if r.get("verdict") == "unobserved") /
                              len(outcomes) if outcomes else None),
         "real_outcomes": ("unknown" if not real_results else dict(Counter(

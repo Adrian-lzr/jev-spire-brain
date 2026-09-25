@@ -1,0 +1,9 @@
+{
+  "fixture_type": "synthetic",
+  "events": [
+    {"event_type": "provider_request", "request_id": "req-a", "state_id": "state-a"},
+    {"event_type": "state_observed", "state_id": "state-b"},
+    {"event_type": "expired_result", "request_id": "req-a", "state_id": "state-a", "fallback_reason": "state_changed"},
+    {"event_type": "provider_response", "request_id": "req-a", "error_kind": "timeout"}
+  ]
+}

@@ -103,6 +103,21 @@ CommunicationMod 消息送入真实 stdio/advisor 管道，强制使用本地 mo
 `request_id`，两者不可混计。
 # Runtime decision boundaries
 
+## Unified trace and replay
+
+Decision evidence uses schema version 2. Every event has nullable `run_id`,
+`run_epoch`, `decision_id`, `state_id`, `request_id`, `plan_id`,
+`advice_revision`, `config_id`, `event_type`, and `timestamp` fields; the old
+`ts` field remains for compatibility. `DecisionTrace.find_decision()` rebuilds
+the input, provider request/response, decision, advice revisions, expiry and
+outcome groups for one decision ID. GPT and JEV logging adapters emit
+`provider_request` and `provider_response` events into this same trace while
+retaining their legacy JSONL files.
+
+Offline replay uses fixed structured responses and synthetic fault fixtures. The
+four-mode evaluator (`rules`, `jev`, `strategic`, `full`) never calls a provider;
+adoption and real game outcomes remain unknown unless explicitly observed.
+
 The CommunicationMod payload is normalized into a semantic state projection in
 `spirebrain/driver/decision_state.py`. `state_id` identifies the game state;
 `recommendation_key` additionally includes the legal candidate view and is used

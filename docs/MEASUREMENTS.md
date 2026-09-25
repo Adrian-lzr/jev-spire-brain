@@ -368,3 +368,5 @@ The runtime memory and trace use separate event kinds: `advice_history`,
 `unobserved_record`. A recommendation's `reason` is explanatory evidence and is
 not counted as an execution `result`; only a `result_record` can contribute a
 real game outcome.
+
+Phase-5 comparison: `python -m spirebrain.analysis.evaluate --input tests/fixtures/replay/advisor_states.json` reports rules, JEV, strategic and full modes with separate correctness, experience, efficiency and decision-quality fields. Synthetic fixtures leave adoption and real outcomes unknown; they are not win-rate evidence.
