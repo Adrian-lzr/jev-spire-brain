@@ -18,12 +18,16 @@
     "max_output_tokens": 900,
     "max_plan_steps": 5,
     "memory_events": 20,
+    "decision_budget_ms": 6000,
+    "max_model_calls": 4,
     "fallback": "jev_rules"
   },
   "jev": {
     "confidence_floor": 0.60,
     "score_acceptance": "argmax",
     "score_acceptance_note": "Which gate decides a Score answer (card rewards, boss relics). 'argmax' = take the best option when its value clears the action floor; adopted 2026-09-21 on the pre-registered comparison in docs/MEASUREMENTS.md (it took 3 cards per ascent in 10/10 runs, fallback rate 0.537 -> 0.411, no HP cost, 0% decision flip rate). 'margin' additionally demands a peaked level distribution (top >= 0.50, lead >= 0.15) and took 1 card in 10 ascents. Switch here, not in code.",
-    "log_dir": "logs"
+    "log_dir": "logs",
+    "total_budget_ms": 2500,
+    "max_retries": 1
   }
 }

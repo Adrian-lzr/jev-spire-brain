@@ -424,6 +424,9 @@ class AdviseSession:
         self.tracker.note(advice)
         if state_id not in self._issued_state_ids:
             self._issued_state_ids.add(state_id)
+            if len(self._issued_state_ids) > 4096:
+                # State IDs are a de-duplication window, not run history.
+                self._issued_state_ids = set(list(self._issued_state_ids)[-2048:])
             self.issued += 1
         self._publish_advice(advice)
         # One ASCII line on stderr: the live console and the mod's error log have

@@ -46,15 +46,26 @@ DASHBOARD = Path(__file__).resolve().parent / "dashboard.html"
 
 
 class _Client:
-    """One SSE subscriber: an unbounded queue plus a liveness flag."""
+    """One SSE subscriber with a bounded latest-events queue."""
 
-    def __init__(self) -> None:
-        self.q: queue.Queue = queue.Queue()
+    def __init__(self, max_queue: int = 256) -> None:
+        self.q: queue.Queue = queue.Queue(maxsize=max(8, int(max_queue)))
         self.alive = True
+        self.dropped = 0
 
     def put(self, event: dict, block: bool = False) -> None:
         if self.alive:
-            self.q.put(event, block=block)
+            try:
+                self.q.put(event, block=block)
+            except queue.Full:
+                # A slow browser must not back-pressure the game. Preserve the
+                # newest state because it supersedes the oldest advice event.
+                try:
+                    self.q.get_nowait()
+                except queue.Empty:
+                    pass
+                self.dropped += 1
+                self.q.put_nowait(event)
 
     def sse_lines(self):
         """Yield the backlog, then live events, as SSE frames."""
@@ -447,15 +458,58 @@ class BridgeFeed:
     def __init__(self, url: str = "http://127.0.0.1:8787/publish",
                  timeout: float = 0.5) -> None:
         self.url = url
-        self.timeout = timeout
+        self._legacy_sync = float(timeout) <= 0.2
+        # Network publication is a side channel. Cap the actual socket wait so
+        # an absent dashboard cannot consume the decision budget.
+        self.timeout = min(max(0.01, float(timeout)), 0.05)
         self.published = 0   # diagnostics: what the agent tried to send
         self.dropped = 0     # diagnostics: what no dashboard received
+        self.queued = 0
+        self._outbox: queue.Queue = queue.Queue(maxsize=64)
+        self._lock = threading.Lock()
+        self._worker = threading.Thread(target=self._send_loop, daemon=True,
+                                         name="SpireBrainDashboardFeed")
+        self._worker.start()
+
+    def _send_loop(self) -> None:
+        while True:
+            item = self._outbox.get()
+            if item is None:
+                return
+            kind, payload, done = item
+            ok = publish_to_url(kind, payload, url=self.url, timeout=self.timeout)
+            with self._lock:
+                if ok:
+                    self.published += 1
+                else:
+                    self.dropped += 1
+            done.set()
 
     def publish(self, kind: str, payload: dict) -> dict:
-        if publish_to_url(kind, payload, url=self.url, timeout=self.timeout):
-            self.published += 1
-        else:
+        if self._legacy_sync:
+            if publish_to_url(kind, payload, url=self.url, timeout=self.timeout):
+                self.published += 1
+            else:
+                self.dropped += 1
+            return {"kind": kind, "seq": -1, **payload}
+        done = threading.Event()
+        item = (kind, payload, done)
+        try:
+            self._outbox.put_nowait(item)
+            self.queued += 1
+        except queue.Full:
+            try:
+                self._outbox.get_nowait()
+            except queue.Empty:
+                pass
             self.dropped += 1
+            self._outbox.put_nowait(item)
+        # A healthy local dashboard normally confirms within this tiny window;
+        # slow or unavailable dashboards never hold the game loop longer.
+        # Refused local connections complete immediately; a healthy but slow
+        # dashboard gets only the same bounded wait and its result is allowed to
+        # arrive after publish() returns.
+        done.wait(min(max(self.timeout, 0.05), 0.2))
         # Return value mirrors a stored event closely enough for the agent,
         # which ignores it anyway — the run never reads the feed's answer.
         return {"kind": kind, "seq": -1, **payload}

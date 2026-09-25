@@ -243,7 +243,7 @@ class ScriptedJevClient(JevClient):
 # --------------------------------------------------------------------------- #
 # Factory
 # --------------------------------------------------------------------------- #
-def get_client(backend: str | None = None) -> JevClient:
+def get_client(backend: str | None = None, **kwargs) -> JevClient:
     """`backend`: "mock" (default) | "scripted" | "openrouter" | "llm" | "official" | "cloudflare".
 
     Also honours the JEV_BACKEND environment variable when `backend` is None.
@@ -260,13 +260,13 @@ def get_client(backend: str | None = None) -> JevClient:
 
     backend = (backend or os.environ.get("JEV_BACKEND") or "mock").lower()
     if backend == "mock":
-        return MockJevClient()
+        return MockJevClient(**{k: v for k, v in kwargs.items() if k in {"confidence"}})
     if backend == "scripted":
         return ScriptedJevClient({})
     if backend == "llm":
         from spirebrain.jev_brain.openrouter_client import LlmStructuredClient
 
-        return LlmStructuredClient()
+        return LlmStructuredClient(**kwargs)
     if backend in ("openrouter", "official", "cloudflare"):
         from spirebrain.jev_brain.client_real import (
             CloudflareJevClient,
@@ -278,7 +278,7 @@ def get_client(backend: str | None = None) -> JevClient:
             "openrouter": OpenRouterJevClient,
             "official": OfficialJevClient,
             "cloudflare": CloudflareJevClient,
-        }[backend]()
+        }[backend](**kwargs)
     raise ValueError(f"unknown backend: {backend}")
 
 

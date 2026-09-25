@@ -10,6 +10,7 @@ from .memory import RunMemory, RunMemorySnapshot
 from .protocol import BrainResponse, ActionCandidate, StrategicPlan
 from spirebrain.strategy import strategy_context
 from spirebrain.driver.decision_state import state_id as semantic_state_id
+from spirebrain.runtime_budget import DecisionBudget, use_budget
 
 
 def stable_state_id(game: dict) -> str:
@@ -59,7 +60,8 @@ class StrategicPlanner:
               guide_rules: list[dict] | None = None, trigger: str = "state",
               memory: RunMemory | RunMemorySnapshot | None = None,
               previous: StrategicPlan | None = None,
-              generation: int = 0) -> BrainResponse:
+              generation: int = 0,
+              budget: DecisionBudget | None = None) -> BrainResponse:
         state_id = stable_state_id(game)
         run_id = memory.run_id if memory else "local"
         # Memory is observed and committed by the owning game loop.  A planner
@@ -86,7 +88,8 @@ class StrategicPlanner:
             "generated_at": time.time(),
         }
         try:
-            result = self.provider.plan(payload)
+            with use_budget(budget):
+                result = self.provider.plan(payload)
         except Exception as exc:  # provider failures are a side-channel fallback
             return BrainResponse(backend=getattr(self.provider, "backend_name", "unknown"),
                                  error=f"战略大脑异常：{type(exc).__name__}: {exc}", fallback=True)

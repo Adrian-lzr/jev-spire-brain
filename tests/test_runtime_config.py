@@ -137,3 +137,27 @@ def test_runtime_config_supports_mainland_openai_compatible_presets(tmp_path: Pa
     assert config.brain_backend == "deepseek"
     assert config.openai_model == "deepseek-chat"
     assert config.openai_endpoint.endswith("/v1/chat/completions")
+
+
+def test_strategy_endpoint_and_budget_are_effective(tmp_path: Path):
+    config = resolve_runtime_config(
+        tmp_path,
+        environ={},
+        strategy={"brain": {"backend": "openai", "endpoint": "http://gateway.test/v1/chat/completions",
+                             "decision_budget_ms": 1200, "max_model_calls": 2},
+                  "jev": {"backend": "mock"}},
+    )
+    assert config.openai_endpoint == "http://gateway.test/v1/chat/completions"
+    assert config.decision_budget_ms == 1200
+    assert config.max_model_calls == 2
+    assert config.jev_budget_ms == 2500
+    assert config.jev_max_retries == 1
+
+
+def test_dashboard_public_config_distinguishes_saved_and_effective(tmp_path: Path):
+    from spirebrain.overlay.config import get_public_config
+    (tmp_path / ".env").write_text("BRAIN_BACKEND=mock\nJEV_BACKEND=mock\n", encoding="utf-8")
+    public = get_public_config(tmp_path / ".env")
+    assert public["saved"]["brain_backend"] == "mock"
+    assert public["effective"]["brain_backend"] == "mock"
+    assert all(isinstance(value, bool) for value in public["secrets"].values())

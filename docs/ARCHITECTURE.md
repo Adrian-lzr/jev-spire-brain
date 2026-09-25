@@ -115,11 +115,20 @@ bind preferences to signatures at generation time; a changed hand, target or
 shop shelf therefore falls back to current legal candidates instead of reusing
 an index with a new meaning.
 
-The real OpenRouter JEV client has a 2500 ms total budget and at most one retry.
-Authentication failures stop immediately. Timeout, HTTP and fallback counters
-are kept in memory and never include credentials. Java overlay compilation is a
-local-only check when game JARs are installed; CI runs the static JSON contract
-checker instead.
+Each decision has a shared `DecisionBudget` (default `decision_budget_ms=6000`,
+`max_model_calls=4`). GPT and JEV adapters reserve remaining time before
+network I/O, so a later tactical call cannot inherit an exhausted deadline.
+The real OpenRouter JEV client retains a 2500 ms provider-local ceiling and at
+most one retry. Authentication failures stop immediately. Timeout, HTTP,
+rate-limit, parse/validation, network and budget-exhaustion categories are
+recorded without credentials. Java overlay compilation is a local-only check
+when game JARs are installed; CI runs the static JSON contract checker instead.
+
+Dashboard publication is a side channel: SSE subscribers have bounded queues
+and the cross-process `BridgeFeed` uses one bounded worker queue. Slow or
+unavailable browsers therefore cannot block the CommunicationMod loop. Provider
+logs, traces, feed journals and in-process history catch write failures and
+apply bounded retention where applicable.
 
 # Decision finalization and evidence
 

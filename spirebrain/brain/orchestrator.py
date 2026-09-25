@@ -12,6 +12,7 @@ from .gpt_client import LoggingStrategicClient, get_strategic_brain
 from .memory import RunMemory
 from .planner import StrategicPlanner, stable_state_id
 from .protocol import BrainResponse, ExecutionDecision, StrategicPlan
+from spirebrain.runtime_budget import DecisionBudget
 
 
 def _screen(game: dict) -> str:
@@ -177,7 +178,7 @@ class StrategicOrchestrator:
 
     def _queue_plan(self, game: dict, candidates, guide_rules, trigger: str,
                     previous: StrategicPlan | None, state_id: str,
-                    trigger_key: str) -> None:
+                    trigger_key: str, budget: DecisionBudget | None = None) -> None:
         """Queue one latest-wins strategic request and return immediately."""
         run_id = self.memory.run_id
         with self._plan_lock:
@@ -200,6 +201,7 @@ class StrategicOrchestrator:
             job = (game_copy, candidate_copy,
                    list(guide_rules or []), trigger, previous, self.generation,
                    state_id, run_id, run_epoch, trigger_key, memory)
+            job = job + (budget,)
             self._pending_key = key
             self._pending_state_id = state_id
             self._pending_run_id = run_id
@@ -220,11 +222,12 @@ class StrategicOrchestrator:
                     self._plan_running = False
                     return
             (game, candidates, guide_rules, trigger, previous, generation,
-             state_id, run_id, run_epoch, trigger_key, memory) = job
+             state_id, run_id, run_epoch, trigger_key, memory, budget) = job
             try:
                 response = self.planner.plan(
                     game, candidates, guide_rules=guide_rules, trigger=trigger,
                     memory=memory, previous=previous, generation=generation,
+                    budget=budget,
                 )
             except Exception as exc:  # provider failures are non-fatal
                 response = BrainResponse(
@@ -304,7 +307,8 @@ class StrategicOrchestrator:
         return False
 
     def plan_for(self, game: dict, *, candidates=None, guide_rules=None,
-                 trigger: str | None = None) -> tuple[StrategicPlan | None, BrainResponse]:
+                 trigger: str | None = None,
+                 budget: DecisionBudget | None = None) -> tuple[StrategicPlan | None, BrainResponse]:
         candidates = list(candidates if candidates is not None else build_action_candidates(game))
         state_id = stable_state_id(game)
         self.memory.observe(game, state_id=state_id)
@@ -326,7 +330,7 @@ class StrategicOrchestrator:
             self.generation += 1
             self._queue_plan(
                 game, candidates, guide_rules, actual_trigger, previous_plan,
-                state_id, trigger_key,
+                state_id, trigger_key, budget,
             )
             # The current game loop continues with JEV/rules.  A completed plan
             # is picked up by the next state poll, and stale results are dropped
@@ -336,6 +340,7 @@ class StrategicOrchestrator:
         response = self.planner.plan(
             game, candidates, guide_rules=guide_rules, trigger=actual_trigger,
             memory=self.memory, previous=previous_plan, generation=self.generation,
+            budget=budget,
         )
         self.last_response = response
         self.last_state_id = state_id

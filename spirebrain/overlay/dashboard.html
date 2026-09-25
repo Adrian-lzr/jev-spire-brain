@@ -326,7 +326,10 @@ async function readConfig() {
   const effective = publicConfig.effective || {};
   const sources = effective.sources || {};
   const sourceName = value => ({command_line: "命令行", process_environment: "进程环境", dotenv: ".env", "strategy.json": "策略文件", default: "默认值"})[value] || value || "未知来源";
-  document.getElementById("effectiveConfig").textContent = `实际生效：JEV ${effective.jev_backend || publicConfig.jev_backend}（${sourceName(sources.jev_backend)}）；战略大脑 ${effective.brain_backend || publicConfig.brain_backend}（${sourceName(sources.brain_backend)}）。配置指纹 ${effective.config_id || "未知"}。${effective.restart_required ? "保存后重启 agent 生效。" : ""}`;
+  const saved = publicConfig.saved || {};
+  const savedBrain = saved.brain_backend || "未写入 .env";
+  const savedJev = saved.jev_backend || "未写入 .env";
+  document.getElementById("effectiveConfig").textContent = `已保存：JEV ${savedJev}，战略大脑 ${savedBrain}；实际生效：JEV ${effective.jev_backend || publicConfig.jev_backend}（${sourceName(sources.jev_backend)}）；战略大脑 ${effective.brain_backend || publicConfig.brain_backend}（${sourceName(sources.brain_backend)}）。配置指纹 ${effective.config_id || "未知"}。${effective.restart_required ? "保存后需重启 agent 才生效。" : ""}`;
 }
 
 function configValues() {

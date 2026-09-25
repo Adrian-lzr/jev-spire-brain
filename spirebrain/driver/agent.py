@@ -63,6 +63,7 @@ from spirebrain.tactical.combat_greedy import Card, CombatState, play_order, rec
 from spirebrain.tactical.hp_budget import HPBudget
 from spirebrain.driver.legality import check_action
 from spirebrain.runtime_config import resolve_runtime_config
+from spirebrain.runtime_budget import DecisionBudget, use_budget
 from spirebrain.driver.live_state import GameSnapshot
 from spirebrain.driver.scenes import SceneRouter
 from spirebrain.driver.trace import DecisionTrace
@@ -163,7 +164,14 @@ class SpireBrainAgent:
         # selected; the strategy file carries it so it stays a human choice.
         self.acceptance = acceptance or self.runtime_config.score_acceptance
 
-        client = get_client(jev_backend)
+        jev_kwargs = {}
+        if jev_backend == "openrouter":
+            jev_kwargs.update(total_budget_ms=self.runtime_config.jev_budget_ms,
+                              max_retries=self.runtime_config.jev_max_retries)
+        elif jev_backend == "official":
+            jev_kwargs.update(total_budget_ms=self.runtime_config.jev_budget_ms,
+                              max_retries=self.runtime_config.jev_max_retries)
+        client = get_client(jev_backend, **jev_kwargs)
         self.guide = GuideBook()
         logged_client = LoggingJevClient(
             client, log_dir=log_dir or ROOT / self.strategy.get("jev", {}).get("log_dir", "logs"))
@@ -222,8 +230,10 @@ class SpireBrainAgent:
         self._shop_decided_on_floor: int | None = None
         self._shop_state_signature: tuple | None = None
         self.history: list[dict] = []
+        self.max_history = 2000
         self._decision_sequence = 0
         self._decision_started_at = 0.0
+        self._active_budget: DecisionBudget | None = None
         self._traced_requests: set[str] = set()
         self.run_session = RunSession(mode="advise")
         self._last_observed_terminal = False
@@ -233,6 +243,12 @@ class SpireBrainAgent:
         # the brain is thinking. None (the default) changes nothing — the feed
         # is an observability side-channel, never a dependency.
         self.feed = feed
+
+    def _append_history(self, entry: dict) -> None:
+        """Keep in-process replay memory bounded during long game sessions."""
+        self.history.append(entry)
+        if len(self.history) > self.max_history:
+            del self.history[:len(self.history) - self.max_history]
 
     def clone_for_advice(self) -> "SpireBrainAgent":
         """A private router for the background model worker, with no live feed.
@@ -524,6 +540,13 @@ class SpireBrainAgent:
         """Return ONE CommunicationMod command for the current screen."""
         self._decision_sequence += 1
         self._decision_started_at = time.monotonic()
+        # One budget covers the strategic request and all tactical provider
+        # calls made while resolving this decision.  The object is shared with
+        # an async strategic worker; late results are still rejected by the
+        # existing state/generation checks.
+        self._active_budget = DecisionBudget(
+            total_ms=max(250, int(self.runtime_config.decision_budget_ms)),
+            max_calls=int(self.runtime_config.max_model_calls))
         self.snapshot = GameSnapshot.from_communication(game)
         game = self.snapshot.payload
         self.observe(game)
@@ -574,18 +597,21 @@ class SpireBrainAgent:
                     "reason": f"non-decision screen {screen!r}: navigation only, no JEV call"}
         try:
             trigger = "combat_start" if screen == COMBAT_SCREEN and self.strategic.last_screen != COMBAT_SCREEN else None
-            self._active_plan, self._active_brain_response = self.strategic.plan_for(
-                game,
-                candidates=self._active_candidates,
-                guide_rules=self.guide_result.evidence(),
-                trigger=trigger,
-            )
+            with use_budget(self._active_budget):
+                self._active_plan, self._active_brain_response = self.strategic.plan_for(
+                    game,
+                    candidates=self._active_candidates,
+                    guide_rules=self.guide_result.evidence(),
+                    trigger=trigger,
+                    budget=self._active_budget,
+                )
         except Exception as exc:  # strategic planning is a non-fatal side channel
             self._active_brain_response = None
-            self.history.append({"point": screen.lower(), "fallback": True,
+            self._append_history({"point": screen.lower(), "fallback": True,
                                  "detail": {"source_type": "unavailable",
                                             "reason": f"战略大脑异常：{type(exc).__name__}"}})
-        return handler(game)
+        with use_budget(self._active_budget):
+            return handler(game)
 
     # -- shared helpers ---------------------------------------------------- #
     def _finalize_and_record(self, decision, command: dict) -> dict:
@@ -735,6 +761,10 @@ class SpireBrainAgent:
         request_id = final.request_id
         if request_id and request_id not in self._traced_requests:
             self._traced_requests.add(request_id)
+            if len(self._traced_requests) > 4096:
+                # Request IDs are only a per-process deduplication aid. Keep a
+                # bounded window so a long run cannot turn this set into a leak.
+                self._traced_requests = set(list(self._traced_requests)[-2048:])
             response = self._active_brain_response
             usage = getattr(response, "usage", {}) or {}
             self.trace.record("provider_request", {
@@ -746,10 +776,12 @@ class SpireBrainAgent:
                 "cost_usd": usage.get("cost_usd", usage.get("cost")),
                 "fallback": bool(detail.get("brain_error")),
                 "fallback_reason": detail.get("brain_error", "") or None,
+                "error_kind": getattr(response, "error_kind", "") or None,
+                "budget": self._active_budget.snapshot() if self._active_budget else None,
                 "timeout": "timeout" in str(detail.get("brain_error", "")).lower(),
             })
         if decision is not None:
-            self.history.append({
+            self._append_history({
                 "point": decision.point, "value": decision.value,
                 "confidence": round(float(decision.confidence), 4),
                 "fallback": bool(decision.used_fallback), "detail": detail, "command": command,

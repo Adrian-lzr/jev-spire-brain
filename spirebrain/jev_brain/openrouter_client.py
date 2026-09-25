@@ -54,6 +54,7 @@ from spirebrain.jev_brain.client import (
     dump_state,
 )
 from spirebrain.redaction import redact_text
+from spirebrain.runtime_budget import current_budget
 
 ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 
@@ -254,9 +255,9 @@ class LlmStructuredClient(JevClient):
         api_key: str | None = None,
         model: str = DEFAULT_MODEL,
         endpoint: str = ENDPOINT,
-        timeout: float = 90.0,
-        max_retries: int = 3,
-        backoff: float = 1.0,
+        timeout: float = 2.0,
+        max_retries: int = 1,
+        backoff: float = 0.1,
     ) -> None:
         self.api_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
         if not self.api_key:
@@ -272,6 +273,8 @@ class LlmStructuredClient(JevClient):
         self.calls = 0
         self.total_cost_usd = 0.0
         self.price_known = model in PRICES
+        self.metrics = {"attempts": 0, "timeouts": 0, "auth_errors": 0,
+                        "rate_limits": 0, "http_errors": 0, "budget_exhausted": 0}
 
     # -- transport (overridable in tests) ---------------------------------- #
     def _post(self, payload: dict) -> dict:
@@ -308,10 +311,25 @@ class LlmStructuredClient(JevClient):
         payload = self.build_payload(state, questions)
         last_err: Exception | None = None
         for attempt in range(self.max_retries + 1):
+            budget = current_budget()
+            reserved_ms = (budget.reserve(max(1, int(self.timeout * 1000)), minimum_ms=50)
+                           if budget else max(1, int(self.timeout * 1000)))
+            if not reserved_ms:
+                self.metrics["budget_exhausted"] += 1
+                raise OpenRouterError("JEV call skipped: decision budget exhausted")
+            self.metrics["attempts"] += 1
+            old_timeout = self.timeout
+            self.timeout = min(old_timeout, reserved_ms / 1000.0)
             t0 = time.perf_counter()
             try:
                 body = self._post(payload)
             except urllib.error.HTTPError as err:
+                self.timeout = old_timeout
+                if err.code in {401, 403, 402}:
+                    self.metrics["auth_errors"] += 1
+                elif err.code == 429:
+                    self.metrics["rate_limits"] += 1
+                self.metrics["http_errors"] += 1
                 # Do not persist provider response bodies: they may echo the
                 # request or an Authorization header.
                 detail = ""
@@ -321,6 +339,9 @@ class LlmStructuredClient(JevClient):
                     continue
                 raise OpenRouterError(redact_text(f"HTTP {err.code}: {detail}")) from err
             except (urllib.error.URLError, TimeoutError, OSError) as err:
+                self.timeout = old_timeout
+                if isinstance(err, TimeoutError):
+                    self.metrics["timeouts"] += 1
                 if attempt < self.max_retries:
                     last_err = err
                     time.sleep(self.backoff * (2**attempt))

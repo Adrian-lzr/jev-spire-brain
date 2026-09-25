@@ -20,6 +20,10 @@ CONFIG_KEYS = {
     "brain_backend": "BRAIN_BACKEND",
     "brain_model": "BRAIN_MODEL",
     "brain_endpoint": "BRAIN_ENDPOINT",
+    "decision_budget_ms": "DECISION_BUDGET_MS",
+    "max_model_calls": "MAX_MODEL_CALLS",
+    "jev_budget_ms": "JEV_BUDGET_MS",
+    "jev_max_retries": "JEV_MAX_RETRIES",
     "openai_model": "OPENAI_MODEL",
     "openai_endpoint": "OPENAI_BRAIN_ENDPOINT",
     "jev_backend": "JEV_BACKEND",
@@ -50,6 +54,12 @@ def _values(path: Path) -> dict[str, str]:
 def get_public_config(path: Path) -> dict:
     values = _values(path)
     effective = resolve_runtime_config(path.parent, dotenv=values).public_dict()
+    # Return managed non-secret values separately from the resolved runtime
+    # snapshot. Environment variables and CLI flags may override these values;
+    # the dashboard must make that distinction visible instead of implying a
+    # saved form is already active in the game process.
+    saved = {field: values.get(env_name, "")
+             for field, env_name in CONFIG_KEYS.items()}
     return {
         "brain_backend": effective["brain_backend"],
         "brain_model": effective["openai_model"],
@@ -58,6 +68,8 @@ def get_public_config(path: Path) -> dict:
         "openai_endpoint": effective["openai_endpoint"],
         "jev_backend": effective["jev_backend"],
         "effective": effective,
+        "saved": saved,
+        "restart_required": bool(effective.get("restart_required", True)),
         "secrets": {
             field: bool(os.environ.get(env_name) or values.get(env_name))
             for field, env_name in SECRET_KEYS.items()

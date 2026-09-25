@@ -20,6 +20,7 @@ _FIELDS = {
     "jev_confidence", "selection_basis", "combat_facts", "strategic_goal", "long_term_goal",
     "candidate_id", "alternative_candidate_id", "brain_error", "error", "model", "provider",
     "latency_ms", "request_latency_ms", "brain_latency_ms", "brain_request_id",
+    "error_kind", "budget", "attempts", "network_errors", "auth_errors", "rate_limits",
     "decision_latency_ms", "first_advice_latency_ms", "publish_latency_ms", "fallback",
     "fallback_reason", "legal", "legality_reason", "uncertain", "player_action", "verdict",
     "result", "evidence", "record_kind", "act", "floor", "cost_usd", "timeout", "http_status", "expired_result",

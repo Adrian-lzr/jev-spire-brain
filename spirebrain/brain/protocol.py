@@ -440,6 +440,9 @@ class BrainResponse:
     request_id: str = ""
     usage: dict = field(default_factory=dict)
     error: str = ""
+    # Stable machine-readable failure category for fallback metrics.  ``error``
+    # remains the short human-facing explanation for compatibility.
+    error_kind: str = ""
     fallback: bool = False
 
 

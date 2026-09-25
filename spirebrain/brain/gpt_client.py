@@ -20,6 +20,7 @@ from typing import Any
 
 from .protocol import BrainResponse, PlanValidationError, StrategicPlan
 from spirebrain.redaction import redact_text, redact_value
+from spirebrain.runtime_budget import DecisionBudget, current_budget
 
 
 PLAN_SCHEMA = {
@@ -234,7 +235,7 @@ class OpenAIStrategicClient:
                  endpoint: str | None = None, timeout_ms: int = 6000,
                  max_output_tokens: int = 900, opener=None,
                  structured_output: bool | None = None,
-        provider_name: str = "openai") -> None:
+        provider_name: str = "openai", max_calls: int = 1) -> None:
         self.provider_name = provider_name or "openai"
         self.backend_name = self.provider_name
         self.api_key = api_key or os.environ.get("BRAIN_API_KEY", "").strip() \
@@ -251,6 +252,7 @@ class OpenAIStrategicClient:
             "OPENAI_BRAIN_ENDPOINT", "https://api.openai.com/v1/responses"
         )
         self.timeout_ms = max(500, int(timeout_ms))
+        self.max_calls = max(1, int(max_calls))
         self.max_output_tokens = max(128, int(max_output_tokens))
         self.opener = opener or urllib.request.urlopen
         # Compatible gateways often reject vendor-specific json_schema output;
@@ -267,8 +269,16 @@ class OpenAIStrategicClient:
             return BrainResponse(backend=self.backend_name, model=self.model,
                                  request_id=request_id,
                                  error="未配置战略大脑 API Key（BRAIN_API_KEY/OPENAI_API_KEY）",
+                                 error_kind="missing_key",
                                  fallback=True)
         started = time.monotonic()
+        budget = current_budget()
+        reserved_ms = budget.reserve(self.timeout_ms, minimum_ms=50) if budget else self.timeout_ms
+        if not reserved_ms:
+            return BrainResponse(backend=self.backend_name, model=self.model,
+                                 request_id=request_id, error="战略决策预算已耗尽",
+                                 error_kind="budget_exhausted",
+                                 fallback=True)
         try:
             body = self._request_body(payload)
             request = urllib.request.Request(
@@ -282,7 +292,7 @@ class OpenAIStrategicClient:
                 method="POST",
             )
             try:
-                with self.opener(request, timeout=self.timeout_ms / 1000) as response:
+                with self.opener(request, timeout=reserved_ms / 1000) as response:
                     raw = response.read()
             except urllib.error.HTTPError as exc:
                 # Do not copy the response body into an error. Gateways can
@@ -291,6 +301,8 @@ class OpenAIStrategicClient:
                 return self._failure(
                     request_id, started,
                     f"HTTP {exc.code} from strategic provider",
+                    error_kind=("auth" if exc.code in {401, 403} else
+                                "rate_limit" if exc.code == 429 else "http"),
                 )
             decoded = json.loads(raw.decode("utf-8"))
             text = _extract_text(decoded)
@@ -321,17 +333,22 @@ class OpenAIStrategicClient:
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             # Exception text may include an endpoint with a query-string key.
             return self._failure(request_id, started,
-                                 f"网络错误：{type(exc).__name__}")
+                                 f"请求超时：{type(exc).__name__}" if isinstance(exc, TimeoutError)
+                                 else f"网络错误：{type(exc).__name__}",
+                                 error_kind="timeout" if isinstance(exc, TimeoutError) else "network")
         except (ValueError, KeyError, TypeError, json.JSONDecodeError, PlanValidationError) as exc:
-            return self._failure(request_id, started, redact_text(f"计划解析失败：{exc}"))
+            return self._failure(request_id, started, redact_text(f"计划解析失败：{exc}"),
+                                 error_kind="parse_or_validation")
 
-    def _failure(self, request_id: str, started: float, error: str) -> BrainResponse:
+    def _failure(self, request_id: str, started: float, error: str,
+                 *, error_kind: str = "provider") -> BrainResponse:
         return BrainResponse(
             backend=self.backend_name,
             model=self.model,
             latency_ms=int((time.monotonic() - started) * 1000),
             request_id=request_id,
             error=error,
+            error_kind=error_kind,
             fallback=True,
         )
 
@@ -395,6 +412,7 @@ class LoggingStrategicClient:
             "latency_ms": result.latency_ms or int((time.monotonic() - started) * 1000),
             "usage": result.usage,
             "error": result.error,
+            "error_kind": result.error_kind,
             "fallback": bool(result.fallback),
             "state_id": payload.get("state_id", ""),
             "run_id": payload.get("run_id", ""),

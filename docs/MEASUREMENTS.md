@@ -4,6 +4,19 @@ Every number this project has produced, what it did and did not establish, and t
 protocol that governs the next one. Keep this file honest: if a claim is not
 traceable to a row here, it is not a claim, it is a guess.
 
+### Runtime budget and failure isolation
+
+The runtime records provider request latency separately from total decision and
+first-advice latency. `decision_budget_ms` and `max_model_calls` use the normal
+CLI > process environment > `.env` > `strategy.json` precedence and are part of
+the public config fingerprint. A request that cannot reserve its minimum
+remaining time is recorded as `budget_exhausted` and falls back locally; it is
+not counted as a successful model response. HTTP 401/403, 429, timeout,
+network, parse/validation, and dashboard publication failures remain separate
+operational categories. These measurements describe generation/publication
+behavior only, not player-visible latency unless a display timestamp was
+captured.
+
 Everything below was produced by `python -m spirebrain.sim.run_offline --backend=openrouter`
 on real JEV (`typesafe/jev-1.13-20260917` via OpenRouter's System One route) unless
 stated otherwise. Raw call logs land in `logs/` (gitignored) and are readable with

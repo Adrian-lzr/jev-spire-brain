@@ -56,6 +56,7 @@ from spirebrain.jev_brain.client import (
     build_questions_json,
 )
 from spirebrain.redaction import redact_text
+from spirebrain.runtime_budget import current_budget
 
 # USD per 1M input tokens (JEV early access, 2026-09-21). Output priced at 0.
 INPUT_USD_PER_MTOK = 0.042
@@ -188,7 +189,8 @@ class OfficialJevClient(JevClient):
         self.backoff = backoff
         self.total_budget_ms = int(total_budget_ms) if total_budget_ms else None
         self.metrics = {"attempts": 0, "timeouts": 0, "auth_errors": 0,
-                        "rate_limits": 0, "http_errors": 0, "invalid_json": 0}
+                        "rate_limits": 0, "http_errors": 0, "invalid_json": 0,
+                        "budget_exhausted": 0, "network_errors": 0}
         self.total_cost_usd = 0.0
         self.calls = 0
 
@@ -231,6 +233,12 @@ class OfficialJevClient(JevClient):
         deadline = (time.monotonic() + self.total_budget_ms / 1000.0
                     if self.total_budget_ms else None)
         for attempt in range(self.max_retries + 1):
+            budget = current_budget()
+            reserved_ms = (budget.reserve(max(1, int(self.timeout * 1000)), minimum_ms=50)
+                           if budget else max(1, int(self.timeout * 1000)))
+            if not reserved_ms:
+                self.metrics["budget_exhausted"] += 1
+                raise JevApiError("JEV call skipped: decision budget exhausted")
             self.metrics["attempts"] += 1
             if deadline is not None and time.monotonic() >= deadline:
                 self.metrics["timeouts"] += 1
@@ -240,6 +248,7 @@ class OfficialJevClient(JevClient):
                 old_timeout = self.timeout
                 if deadline is not None:
                     self.timeout = max(0.05, min(old_timeout, deadline - time.monotonic()))
+                self.timeout = min(self.timeout, reserved_ms / 1000.0)
                 body = self._post(payload)
                 self.timeout = old_timeout
             except urllib.error.HTTPError as err:  # noqa: PERF203
@@ -264,6 +273,7 @@ class OfficialJevClient(JevClient):
                 raise JevApiError(redact_text(f"HTTP {err.code}: {detail}")) from err
             except (urllib.error.URLError, TimeoutError, OSError) as err:
                 self.timeout = old_timeout
+                self.metrics["network_errors"] += 1
                 if isinstance(err, TimeoutError):
                     self.metrics["timeouts"] += 1
                 if attempt < self.max_retries:
@@ -278,15 +288,16 @@ class OfficialJevClient(JevClient):
             latency_ms = int((time.perf_counter() - t0) * 1000)
             try:
                 answers_obj, usage, model = self._extract(body)
-            except (TypeError, ValueError, KeyError, json.JSONDecodeError) as err:
+                answers = parse_answers(answers_obj, questions)
+            except (TypeError, ValueError, KeyError, json.JSONDecodeError, JevApiError) as err:
                 self.metrics["invalid_json"] += 1
-                raise JevApiError(redact_text(f"invalid JEV response: {err}")) from err
+                raise JevApiError(redact_text(f"invalid JEV response: {type(err).__name__}")) from err
             usage = normalize_usage(usage)
             self.calls += 1
             cost, cost_source = resolve_cost(usage, model)
             self.total_cost_usd += cost
             return JevResponse(
-                answers=parse_answers(answers_obj, questions),
+                answers=answers,
                 latency_ms=latency_ms,
                 backend=self.backend_name,
                 cost_usd=cost,

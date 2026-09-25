@@ -65,6 +65,10 @@ class RuntimeConfig:
     memory_events: int
     fallback: str
     score_acceptance: str
+    decision_budget_ms: int
+    max_model_calls: int
+    jev_budget_ms: int
+    jev_max_retries: int
     sources: dict[str, str]
     config_id: str
 
@@ -80,6 +84,10 @@ class RuntimeConfig:
             "memory_events": self.memory_events,
             "fallback": self.fallback,
             "score_acceptance": self.score_acceptance,
+            "decision_budget_ms": self.decision_budget_ms,
+            "max_model_calls": self.max_model_calls,
+            "jev_budget_ms": self.jev_budget_ms,
+            "jev_max_retries": self.jev_max_retries,
             "sources": dict(self.sources),
             "config_id": self.config_id,
             "restart_required": True,
@@ -151,7 +159,8 @@ def resolve_runtime_config(root: str | Path, *, cli: Mapping[str, str | None] | 
     openai_model = pick_alias("openai_model", ("BRAIN_MODEL", "OPENAI_MODEL"),
                               brain.get("model"), preset_model)
     openai_endpoint = pick_alias(
-        "openai_endpoint", ("BRAIN_ENDPOINT", "OPENAI_BRAIN_ENDPOINT"), None,
+        "openai_endpoint", ("BRAIN_ENDPOINT", "OPENAI_BRAIN_ENDPOINT"),
+        brain.get("endpoint"),
         preset_endpoint,
     )
 
@@ -175,6 +184,15 @@ def resolve_runtime_config(root: str | Path, *, cli: Mapping[str, str | None] | 
     fallback = pick("fallback", "BRAIN_FALLBACK", brain.get("fallback"), "jev_rules")
     score_acceptance = pick("score_acceptance", "JEV_SCORE_ACCEPTANCE",
                             jev.get("score_acceptance"), "argmax")
+    decision_budget_ms = number("decision_budget_ms", "DECISION_BUDGET_MS",
+                                brain.get("decision_budget_ms", brain.get("timeout_ms")),
+                                6000, 250, 120000)
+    max_model_calls = number("max_model_calls", "MAX_MODEL_CALLS",
+                             brain.get("max_model_calls"), 4, 1, 16)
+    jev_budget_ms = number("jev_budget_ms", "JEV_BUDGET_MS",
+                           jev.get("total_budget_ms"), 2500, 250, 120000)
+    jev_max_retries = number("jev_max_retries", "JEV_MAX_RETRIES",
+                             jev.get("max_retries"), 1, 0, 3)
     if score_acceptance not in {"argmax", "margin"}:
         score_acceptance = "argmax"
         sources["score_acceptance"] = "default"
@@ -190,6 +208,10 @@ def resolve_runtime_config(root: str | Path, *, cli: Mapping[str, str | None] | 
         "memory_events": memory_events,
         "fallback": fallback,
         "score_acceptance": score_acceptance,
+        "decision_budget_ms": decision_budget_ms,
+        "max_model_calls": max_model_calls,
+        "jev_budget_ms": jev_budget_ms,
+        "jev_max_retries": jev_max_retries,
     }
     config_id = hashlib.sha256(json.dumps(
         {"values": public_values, "sources": sources}, sort_keys=True,

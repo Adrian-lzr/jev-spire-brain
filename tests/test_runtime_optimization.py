@@ -19,6 +19,51 @@ from spirebrain.jev_brain.client import NoulSpec
 from spirebrain.jev_brain.client_real import OfficialJevClient, JevApiError
 
 
+def test_decision_budget_is_injectable_and_stops_new_calls():
+    from spirebrain.runtime_budget import DecisionBudget, use_budget
+
+    now = [0.0]
+    budget = DecisionBudget(total_ms=100, max_calls=2, clock=lambda: now[0])
+    assert budget.reserve(80) == 80
+    now[0] = 0.08
+    assert budget.reserve(80) == 20
+    assert budget.reserve(80) == 0
+    assert budget.exhausted == "max_model_calls"
+    now[0] = 0.2
+    assert budget.remaining_ms == 0
+    with use_budget(budget):
+        assert budget is not None
+
+
+def test_budget_shortens_jev_timeout_without_network():
+    from spirebrain.runtime_budget import DecisionBudget, use_budget
+
+    class Fake(OfficialJevClient):
+        def __init__(self):
+            super().__init__(api_key="test", timeout=10, max_retries=0)
+            self.seen = None
+
+        def _post(self, payload):
+            self.seen = self.timeout
+            return {"answers": {"q": {"type": "noul", "noul": 0.8}}}
+
+    client = Fake()
+    with use_budget(DecisionBudget(total_ms=120, max_calls=1)):
+        client.ask("state", {"q": NoulSpec("x")})
+    assert client.seen is not None and client.seen <= 0.2
+
+
+def test_bounded_sse_client_drops_oldest_event():
+    from spirebrain.overlay.server import _Client
+
+    client = _Client(max_queue=8)
+    for i in range(20):
+        client.put({"seq": i})
+    assert client.q.qsize() == 8
+    assert client.dropped == 12
+    assert client.q.get_nowait()["seq"] == 12
+
+
 def test_semantic_state_ignores_poll_noise_but_tracks_hand_and_energy():
     base = {"screen_type": "COMBAT", "current_hp": 40, "energy": 2,
             "animation_counter": 1, "timestamp": 10, "hand": ["Strike"]}

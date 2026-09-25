@@ -24,8 +24,14 @@ class LoggingJevClient(JevClient):
     def __init__(self, inner: JevClient, log_dir: str | Path = "logs") -> None:
         self.inner = inner
         self.backend_name = inner.backend_name
+        self.async_required = bool(getattr(inner, "async_required", False))
         self.log_path = Path(log_dir)
-        self.log_path.mkdir(parents=True, exist_ok=True)
+        try:
+            self.log_path.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            # Logging is an observability side channel. A read-only disk must
+            # never disable a valid JEV provider.
+            pass
         self.calls: int = 0
         self.total_cost_usd: float = 0.0
 
@@ -63,6 +69,9 @@ class LoggingJevClient(JevClient):
             "cost_usd": resp.cost_usd,
             "usage": resp.usage,
         }
-        with open(self.log_path / "jev_calls.jsonl", "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        try:
+            with open(self.log_path / "jev_calls.jsonl", "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except (OSError, UnicodeError, TypeError, ValueError):
+            pass
         return resp
