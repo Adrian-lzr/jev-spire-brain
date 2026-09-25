@@ -188,7 +188,7 @@ def resolve_runtime_config(root: str | Path, *, cli: Mapping[str, str | None] | 
                                 brain.get("decision_budget_ms", brain.get("timeout_ms")),
                                 6000, 250, 120000)
     max_model_calls = number("max_model_calls", "MAX_MODEL_CALLS",
-                             brain.get("max_model_calls"), 4, 1, 16)
+                             brain.get("max_model_calls"), 4, 0, 16)
     jev_budget_ms = number("jev_budget_ms", "JEV_BUDGET_MS",
                            jev.get("total_budget_ms"), 2500, 250, 120000)
     jev_max_retries = number("jev_max_retries", "JEV_MAX_RETRIES",

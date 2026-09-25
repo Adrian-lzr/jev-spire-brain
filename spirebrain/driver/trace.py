@@ -9,6 +9,7 @@ from pathlib import Path
 
 from spirebrain.redaction import redact_text
 from spirebrain.analysis.event_contract import make_event, decision_chain
+from spirebrain.analysis.replay_blob import ReplayBlobStore
 
 
 _LOCK = threading.Lock()
@@ -26,6 +27,7 @@ _FIELDS = {
     "fallback_reason", "legal", "legality_reason", "uncertain", "player_action", "verdict",
     "result", "evidence", "record_kind", "act", "floor", "cost_usd", "timeout", "http_status", "expired_result",
     "expired_result_count", "fixture_type", "code_version", "previous_advice_revision", "replacement_reason", "usage", "provider_request_id",
+    "state_blob", "candidate_blob", "response_blob",
 }
 
 
@@ -51,6 +53,7 @@ class DecisionTrace:
         self.path = Path(path)
         self.config_id = str(config_id)
         self._sequence = 0
+        self.blobs = ReplayBlobStore(self.path.parent / "decision_blobs")
 
     def record(self, event_type: str, fields: dict) -> bool:
         self._sequence += 1
@@ -62,8 +65,18 @@ class DecisionTrace:
             "event_type": str(event_type),
             "config_id": self.config_id,
         }
-        record.update({key: _safe(value) for key, value in fields.items()
-                       if key in _FIELDS and key != "config_id"})
+        safe_fields = {key: _safe(value) for key, value in fields.items()
+                       if key in _FIELDS and key != "config_id"}
+        # Preserve bounded, sanitized state and candidate snapshots by content
+        # hash. The JSONL event remains small and references the immutable blob.
+        for field_name in ("state_blob", "candidate_blob", "response_blob"):
+            value = fields.get(field_name)
+            if value is not None:
+                try:
+                    safe_fields[field_name] = self.blobs.put(value)
+                except (OSError, TypeError, ValueError):
+                    safe_fields[field_name] = None
+        record.update(safe_fields)
         record = make_event(event_type, fields=record, timestamp=record["timestamp"])
         record["trace_sequence"] = self._sequence
         try:

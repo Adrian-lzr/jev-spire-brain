@@ -43,7 +43,11 @@ class DecisionBudget:
     def reserve(self, requested_ms: int, *, minimum_ms: int = 1) -> int:
         """Reserve one provider call and return its bounded timeout in ms."""
         with self._lock:
-            if self.max_calls and self.calls >= self.max_calls:
+            # ``max_calls=0`` is an explicit hard disable, not an unlimited
+            # budget.  A positive limit is the only form that permits a
+            # provider attempt; this makes configuration and replay semantics
+            # unambiguous.
+            if self.calls >= self.max_calls:
                 self.exhausted = "max_model_calls"
                 return 0
             remaining = self.remaining_ms
@@ -74,4 +78,3 @@ def use_budget(budget: DecisionBudget | None) -> Iterator[DecisionBudget | None]
         yield budget
     finally:
         _CURRENT.reset(token)
-

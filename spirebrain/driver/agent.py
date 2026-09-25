@@ -658,6 +658,8 @@ class SpireBrainAgent:
                     reason=str(detail.get("reason", "") or ""),
                     jev_confidence=float(decision.confidence or 0.0),
                     guide_rules=self.guide_result.evidence(),
+                    plan=self._active_plan,
+                    budget=self._active_budget,
                 )
                 execution_detail = execution.detail()
                 detail.update(execution_detail)
@@ -814,6 +816,7 @@ class SpireBrainAgent:
             "screen": str(_get(self._active_game, "screen_type", default="")).upper(),
             "act": _as_int(_get(self._active_game, "act", default=0)),
             "floor": _as_int(_get(self._active_game, "floor", "floor_num", default=0)),
+            "state_blob": dict(self._active_game or {}),
         })
         self.trace.record("decision", {
             "run_id": final.run_id, "state_id": final.state_id,
@@ -846,20 +849,6 @@ class SpireBrainAgent:
             "act": _as_int(_get(self._active_game, "act", default=0)),
             "floor": _as_int(_get(self._active_game, "floor", "floor_num", default=0)),
         })
-        if request_id:
-            response = self._active_brain_response
-            self.trace.record("provider_response", {
-                "run_id": final.run_id, "run_epoch": final.context.run_epoch,
-                "state_id": final.state_id, "decision_id": final.decision_id,
-                "request_id": request_id, "plan_id": final.plan_id,
-                "provider": getattr(response, "backend", self.strategic.backend_name),
-                "model": getattr(response, "model", ""),
-                "latency_ms": getattr(response, "latency_ms", None),
-                "usage": getattr(response, "usage", {}) or {},
-                "error": getattr(response, "error", "") or None,
-                "error_kind": getattr(response, "error_kind", "") or None,
-                "fallback": bool(getattr(response, "fallback", False)),
-            })
         self._last_final_decision = final
         return command
 

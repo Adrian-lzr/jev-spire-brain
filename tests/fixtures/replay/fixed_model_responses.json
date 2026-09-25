@@ -1,5 +1,6 @@
 {
   "fixture_type": "synthetic",
+  "kind": "fixed_provider_responses",
   "responses": [
     {
       "plan_id": "fixture-plan-1",
