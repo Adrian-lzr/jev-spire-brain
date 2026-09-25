@@ -59,7 +59,10 @@ from spirebrain.brain.protocol import (
 from spirebrain.brain.planner import stable_state_id
 from spirebrain.guide.rules import GuideAwareClient, GuideBook, GuideResult
 from spirebrain.overlay.feed import DecisionFeed, decision_event, run_state_event
-from spirebrain.tactical.combat_greedy import Card, CombatState, play_order, recommend_action
+from spirebrain.tactical.combat_greedy import (
+    ActionSuggestion, Card, CombatState, play_order, recommend_action,
+)
+from spirebrain.tactical.combat_engine import CombatTacticalEngine
 from spirebrain.tactical.hp_budget import HPBudget
 from spirebrain.driver.legality import check_action
 from spirebrain.runtime_config import resolve_runtime_config
@@ -245,6 +248,11 @@ class SpireBrainAgent:
         self._last_observed_terminal = False
         self._advice_revisions: dict[str, int] = {}
         self._last_final_decision: FinalDecision | None = None
+        self.combat_engine = CombatTacticalEngine(
+            depth=int(brain_cfg.get("combat_search_depth", 3) or 3),
+            node_limit=int(brain_cfg.get("combat_search_nodes", 64) or 64),
+            time_limit_ms=float(brain_cfg.get("combat_search_time_ms", 8.0) or 8.0),
+        )
         # Phase 1.5, the interaction layer: an optional live feed of everything
         # the brain is thinking. None (the default) changes nothing — the feed
         # is an observability side-channel, never a dependency.
@@ -322,14 +330,16 @@ class SpireBrainAgent:
                     "source": rule.source, "guide_rules": guide.evidence(),
                     **strategic_detail}
         if str(_get(game, "screen_type", default="")).upper() == COMBAT_SCREEN:
-            suggestion = recommend_action(game)
-            if suggestion is not None:
-                return {"status": "ready", "command": suggestion.command,
-                        "reason": suggestion.reason, "source_type": "rule_fallback",
+            diagnostics: list[dict] = []
+            candidates = build_action_candidates(game, diagnostics=diagnostics)
+            proposal = self.combat_engine.propose(game, candidates)
+            if proposal.candidate is not None:
+                return {"status": "ready", "command": dict(proposal.candidate.command),
+                        "reason": proposal.reason, "source_type": "rule_fallback",
                         "source": "游戏实时战斗状态；本地战术规则",
-                        "combat_facts": dict(suggestion.facts),
-                        "selection_basis": suggestion.facts.get("decision_basis", "local_tactical_rule"),
-                        "uncertain": bool(suggestion.uncertain),
+                        "combat_facts": dict(proposal.facts),
+                        "selection_basis": proposal.reason_code,
+                        "uncertain": bool(proposal.uncertainty),
                         **strategic_detail,
                         "guide_rules": guide.evidence()}
         return {"status": "thinking", "label": "正在分析当前局面…",
@@ -1325,10 +1335,16 @@ class SpireBrainAgent:
                      for m in monsters],
         )
 
-        # JEV decides posture; the code decides the cards. The gate is only
+        # The bounded local engine decides the current card from legal
+        # candidates. JEV may still refine the already-legal set below. The
+        # risk gate is only
         # consulted when the incoming damage threatens the act's HP budget, so a
         # routine turn costs zero JEV calls.
-        suggestion = recommend_action(game)
+        proposal = self.combat_engine.propose(game, self._active_candidates)
+        suggestion = (ActionSuggestion(
+            command=dict(proposal.candidate.command), reason=proposal.reason,
+            uncertain=bool(proposal.uncertainty), facts=dict(proposal.facts))
+            if proposal.candidate is not None else recommend_action(game))
         incoming = sum(max(0, e["damage"]) for e in state.enemies if "attack" in e["intent"])
         defensive_posture = False
         if incoming > self._budget().remaining_budget:
