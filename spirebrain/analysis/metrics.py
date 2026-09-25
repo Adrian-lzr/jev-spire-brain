@@ -76,12 +76,20 @@ def summarize(records: list[dict], *, source: str = "") -> dict:
     fallback = Counter(redact_text(r.get("fallback_reason") or r.get("reason") or "unknown")
                        for r in records if r.get("fallback") is True)
     outcomes = [r for r in records if r.get("event_type") == "outcome"]
-    real_results = [r for r in outcomes if r.get("result") in {"win", "loss", "death"}]
+    # Result records are separate from advice verdicts. Keep accepting the
+    # legacy outcome shape for replay compatibility, but never treat a reason
+    # or a match/mismatch verdict as a game result.
+    result_events = [r for r in records if r.get("event_type") == "result"]
+    real_results = [r for r in result_events
+                    if r.get("result") in {"win", "loss", "death", "victory"}]
+    if not result_events:
+        real_results = [r for r in outcomes if r.get("result") in {"win", "loss", "death"}]
     provider_events = {"provider", "brain_call", "provider_request"}
     fallback_events = advice_events or decision_events
     return {
         "sample_size": len(records),
         "advice_count": len(advice_events),
+        "result_count": len(result_events),
         "decision_count": len({r.get("decision_id") for r in records
                                 if r.get("event_type") in {"advice", "decision"}
                                 and r.get("decision_id")}),

@@ -165,6 +165,10 @@ class FinalDecision:
         return self.context.run_id
 
     @property
+    def run_epoch(self) -> int:
+        return self.context.run_epoch
+
+    @property
     def advice_revision(self) -> int:
         return self.context.advice_revision
 
@@ -182,6 +186,9 @@ class ObservedAction:
     evidence: dict = field(default_factory=dict)
     confidence: float | None = None
     verdict: str = "unobserved"
+    decision_id: str = ""
+    advice_revision: int = 0
+    observed_state: dict = field(default_factory=dict)
 
 
 @dataclass

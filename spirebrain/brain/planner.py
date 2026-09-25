@@ -6,7 +6,7 @@ import json
 import time
 from typing import Any
 
-from .memory import RunMemory
+from .memory import RunMemory, RunMemorySnapshot
 from .protocol import BrainResponse, ActionCandidate, StrategicPlan
 from spirebrain.strategy import strategy_context
 from spirebrain.driver.decision_state import state_id as semantic_state_id
@@ -57,16 +57,19 @@ class StrategicPlanner:
 
     def plan(self, game: dict, candidates: list[ActionCandidate], *,
               guide_rules: list[dict] | None = None, trigger: str = "state",
-              memory: RunMemory | None = None,
+              memory: RunMemory | RunMemorySnapshot | None = None,
               previous: StrategicPlan | None = None,
               generation: int = 0) -> BrainResponse:
         state_id = stable_state_id(game)
         run_id = memory.run_id if memory else "local"
-        if memory is not None:
-            memory.observe(game, state_id=state_id)
+        # Memory is observed and committed by the owning game loop.  A planner
+        # may receive either the live object on a synchronous call or the
+        # immutable snapshot used by a worker, but it must never mutate either
+        # while building a provider request.
         payload = {
             "state_id": state_id,
             "run_id": run_id,
+            "run_epoch": int(getattr(memory, "run_epoch", 0) or 0),
             # The request ID is included even before a new plan exists.  This
             # lets logs and providers correlate a timeout with the exact state
             # that requested it without treating it as an executable command.
@@ -110,6 +113,4 @@ class StrategicPlanner:
                     fallback=True,
                 )
             result.plan.bind_candidates(candidates)
-            if memory is not None:
-                memory.set_plan(result.plan)
         return result

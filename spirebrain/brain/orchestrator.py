@@ -62,7 +62,7 @@ class StrategicOrchestrator:
         self._plan_running = False
         self._queued_plan = None
         self._plan_results: queue.Queue = queue.Queue()
-        self._pending_key: tuple[str, int, str] | None = None
+        self._pending_key: tuple[str, int, str, int] | None = None
         self._pending_state_id = ""
         self._pending_run_id = ""
         self._plan_screen = ""
@@ -73,8 +73,10 @@ class StrategicOrchestrator:
     def backend_name(self) -> str:
         return str(getattr(self.provider, "backend_name", "unknown"))
 
-    def reset(self) -> None:
-        self.memory.reset()
+    def reset(self, run_id: str | None = None) -> None:
+        # Keep the new run identity when the owning loop is resetting a plan;
+        # dropping it would make terminal/result events look orphaned.
+        self.memory.reset("" if run_id is None else str(run_id))
         self.current_plan = None
         self.last_response = BrainResponse(backend=self.backend_name)
         self.last_state_id = ""
@@ -118,12 +120,13 @@ class StrategicOrchestrator:
                 result = self._plan_results.get_nowait()
             except queue.Empty:
                 return
-            (state_id, run_id, generation, trigger_key, game, previous,
+            (state_id, run_id, run_epoch, generation, trigger_key, game, previous,
              response) = result
             with self._plan_lock:
-                current = self._pending_key == (state_id, generation, run_id)
+                current = self._pending_key == (state_id, generation, run_id, run_epoch)
             if (not current or generation != self.generation
-                    or run_id != self.memory.run_id):
+                    or run_id != self.memory.run_id
+                    or run_epoch != self.memory.run_epoch):
                 # The player already changed screens/runs.  A late strategic
                 # answer must never overwrite the current recommendation.
                 continue
@@ -178,13 +181,14 @@ class StrategicOrchestrator:
         """Queue one latest-wins strategic request and return immediately."""
         run_id = self.memory.run_id
         with self._plan_lock:
-            key = (state_id, self.generation, run_id)
+            run_epoch = self.memory.run_epoch
+            key = (state_id, self.generation, run_id, run_epoch)
             if self._pending_key == key:
                 return
-            try:
-                memory = copy.deepcopy(self.memory)
-            except Exception:
-                memory = self.memory
+            # Providers receive a deeply immutable snapshot. They can
+            # summarize it, but cannot append facts or replace the live plan
+            # while the game loop is processing a newer state.
+            memory = self.memory.snapshot()
             try:
                 game_copy = copy.deepcopy(dict(game))
             except Exception:
@@ -195,7 +199,7 @@ class StrategicOrchestrator:
                 candidate_copy = list(candidates)
             job = (game_copy, candidate_copy,
                    list(guide_rules or []), trigger, previous, self.generation,
-                   state_id, run_id, trigger_key, memory)
+                   state_id, run_id, run_epoch, trigger_key, memory)
             self._pending_key = key
             self._pending_state_id = state_id
             self._pending_run_id = run_id
@@ -216,7 +220,7 @@ class StrategicOrchestrator:
                     self._plan_running = False
                     return
             (game, candidates, guide_rules, trigger, previous, generation,
-             state_id, run_id, trigger_key, memory) = job
+             state_id, run_id, run_epoch, trigger_key, memory) = job
             try:
                 response = self.planner.plan(
                     game, candidates, guide_rules=guide_rules, trigger=trigger,
@@ -228,7 +232,7 @@ class StrategicOrchestrator:
                     error=f"战略大脑异常：{type(exc).__name__}: {exc}",
                     fallback=True,
                 )
-            self._plan_results.put((state_id, run_id, generation, trigger_key,
+            self._plan_results.put((state_id, run_id, run_epoch, generation, trigger_key,
                                    game, previous, response))
 
     def _trigger_key(self, game: dict) -> str:
@@ -349,6 +353,9 @@ class StrategicOrchestrator:
             self._plan_screen = _screen(game)
             self._plan_act = int(game.get("act", 0) or 0)
             self._plan_floor = int(game.get("floor", game.get("floor_num", 0)) or 0)
+            # Plan state is committed here, after the synchronous provider has
+            # returned and the current state has already been observed.
+            self.memory.set_plan(response.plan)
         elif previous_plan is not None and self._can_reuse_plan(previous_plan, game):
             self.current_plan = previous_plan
             self.plan_valid = True
@@ -375,6 +382,8 @@ class StrategicOrchestrator:
     def current_detail(self) -> dict:
         plan = self.current_plan if self.plan_valid else None
         return {
+            "run_id": self.memory.run_id,
+            "run_epoch": self.memory.run_epoch,
             "strategic_goal": plan.current_objective if plan else "",
             "long_term_goal": plan.long_term_goal if plan else "",
             "plan_id": plan.plan_id if plan else "",
@@ -390,6 +399,8 @@ class StrategicOrchestrator:
         plan = self._usable_plan(game)
         if plan is not None:
             return {
+                "run_id": self.memory.run_id,
+                "run_epoch": self.memory.run_epoch,
                 "strategic_goal": plan.current_objective,
                 "long_term_goal": plan.long_term_goal,
                 "plan_id": plan.plan_id,
@@ -401,6 +412,8 @@ class StrategicOrchestrator:
             }
         pending = bool(self._pending_key)
         return {
+            "run_id": self.memory.run_id,
+            "run_epoch": self.memory.run_epoch,
             "strategic_goal": "",
             "long_term_goal": "",
             "plan_id": "",

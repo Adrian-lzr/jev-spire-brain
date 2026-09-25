@@ -226,6 +226,7 @@ class SpireBrainAgent:
         self._decision_started_at = 0.0
         self._traced_requests: set[str] = set()
         self.run_session = RunSession(mode="advise")
+        self._last_observed_terminal = False
         self._advice_revisions: dict[str, int] = {}
         self._last_final_decision: FinalDecision | None = None
         # Phase 1.5, the interaction layer: an optional live feed of everything
@@ -247,6 +248,34 @@ class SpireBrainAgent:
         # early local fallback with no later consumer.
         constructor["async_planning"] = False
         return SpireBrainAgent(**constructor, feed=None)
+
+    def begin_new_run(self, run_id: str = "", *, seed: str = "") -> None:
+        """Reset all live-run state before the first state of a new run.
+
+        CommunicationMod can move from its menu straight into a new run without
+        sending a terminal game payload. The transport calls this boundary so a
+        reused seed/run id cannot inherit a plan, pending grid choice or worker
+        generation from the previous run.
+        """
+        self.run_session.reset(run_id, seed=seed)
+        self._last_observed_terminal = False
+        self._advice_revisions.clear()
+        self._shop_decided_on_floor = None
+        self._shop_state_signature = None
+        self._pending_upgrade = None
+        self._grid_picked = None
+        self._active_game = None
+        self._active_candidates = []
+        self._active_plan = None
+        self._active_brain_response = None
+        self.hp = None
+        try:
+            self.strategic.reset(run_id=run_id)
+        except Exception:
+            pass
+
+    # Explicit alias for integrations that name the boundary after its effect.
+    reset_run_state = begin_new_run
 
     def quick_advice(self, game: dict) -> dict:
         """Immediate, model-free advice or a truthful waiting/coverage state."""
@@ -296,9 +325,15 @@ class SpireBrainAgent:
         run_id = str(_get(game, "run_id", "runId", default="") or "")
         seed = str(_get(game, "seed", default="") or "")
         screen_name = str(_get(game, "screen_type", "screen", default="")).upper()
-        if screen_name in {"MENU", "DEATH", "VICTORY", "GAME_OVER"}:
-            self.run_session.reset(run_id, seed=seed)
+        terminal_screen = screen_name in {"MENU", "DEATH", "VICTORY", "GAME_OVER"}
+        if terminal_screen:
+            if not self._last_observed_terminal:
+                self.run_session.reset(run_id, seed=seed)
             self._advice_revisions.clear()
+        elif self._last_observed_terminal:
+            # A new playable screen after MENU/DEATH is a new run even when
+            # CommunicationMod reuses the same seed/run_id.
+            self.run_session.reset(run_id, seed=seed)
         elif run_id:
             self.run_session.observe(run_id, seed=seed)
         act = max(1, _as_int(_get(game, "act", default=1), 1))
@@ -333,6 +368,8 @@ class SpireBrainAgent:
         # This is bounded and process-local; it never writes a credential or a
         # full transcript to disk.
         try:
+            if self._last_observed_terminal and not terminal_screen:
+                self.strategic.reset(run_id=run_id or self.run_session.run_id)
             previous_run = self.strategic.memory.run_id
             self.strategic.memory.observe(game, state_id=self._observed_state_id)
             run_changed = bool(previous_run and self.strategic.memory.run_id != previous_run)
@@ -340,18 +377,30 @@ class SpireBrainAgent:
                 self.run_session.observe(self.strategic.memory.run_id, seed=seed)
             elif run_changed and self.run_session.run_id != self.strategic.memory.run_id:
                 self.run_session.observe(self.strategic.memory.run_id, seed=seed)
-            if run_changed or str(_get(game, "screen_type", default="")).upper() in {
-                    "MENU", "DEATH", "VICTORY", "GAME_OVER"}:
+            if run_changed or terminal_screen:
                 self._shop_decided_on_floor = None
                 self._shop_state_signature = None
                 self._pending_upgrade = None
                 self._grid_picked = None
-            if run_changed or not self.strategic.memory.events:
-                self.strategic.reset()
-                self.strategic.memory.observe(game, state_id=self._observed_state_id)
+            reset_strategy = (run_changed
+                              or (not terminal_screen and not self.strategic.memory.events)
+                              or (terminal_screen and not self._last_observed_terminal))
+            if reset_strategy:
+                self.strategic.reset(run_id=self.run_session.run_id
+                                     if terminal_screen else self.strategic.memory.run_id)
+                if not terminal_screen:
+                    self.strategic.memory.observe(game, state_id=self._observed_state_id)
+                else:
+                    self.strategic.memory.mark_terminal(self.run_session.run_id)
+            if screen_name in {"DEATH", "VICTORY", "GAME_OVER"} and not self._last_observed_terminal:
+                self.record_observed_result(
+                    screen_name.lower(), state_id=self._observed_state_id,
+                    evidence={"run_id": self.run_session.run_id, "seed": seed},
+                )
         except Exception:  # noqa: BLE001 - memory is optional observability
             pass
 
+        self._last_observed_terminal = terminal_screen
         self._publish_state()
 
     def _publish_state(self) -> None:
@@ -361,6 +410,114 @@ class SpireBrainAgent:
         try:
             self.feed.publish("run_state", run_state_event(self))
         except Exception:  # noqa: BLE001 - the dashboard must not break the run
+            pass
+
+    # -- unified main-loop event boundary --------------------------------- #
+    def record_advice_history(self, advice, *, displayed: bool = True) -> None:
+        """Commit a recommendation after it has been generated/published."""
+        try:
+            self.strategic.memory.record_advice(advice, displayed=displayed)
+        except Exception:  # observability must not break the game loop
+            pass
+
+    def record_execution_attempt(self, command: dict, *, state_id: str = "",
+                                 decision_id: str = "", request_id: str = "",
+                                 plan_id: str = "", status: str = "sent",
+                                 reason: str = "") -> None:
+        """Commit a command that actually reached the CommunicationMod wire."""
+        try:
+            event = self.strategic.memory.record_execution_attempt(
+                command, state_id=state_id or self._observed_state_id,
+                decision_id=decision_id, request_id=request_id, plan_id=plan_id,
+                status=status, reason=reason,
+            )
+            self.trace.record("execution_attempt", {
+                "record_kind": "execution_attempt",
+                "run_id": self.run_session.run_id,
+                "run_epoch": self.run_session.run_epoch,
+                "state_id": event.get("state_id", ""),
+                "decision_id": event.get("decision_id", "") or None,
+                "request_id": event.get("request_id", "") or None,
+                "plan_id": event.get("plan_id", "") or None,
+                "command": command, "status": status, "reason": reason,
+            })
+        except Exception:
+            pass
+
+    def record_player_feedback(self, outcome, *, observed_state: dict | None = None) -> None:
+        """Commit tracker feedback on the owning thread, then replan if needed."""
+        try:
+            advice = outcome.advice
+            actual = outcome.acted_key or outcome.acted_label or "unknown"
+            # Feedback belongs to the run that produced the advice. The
+            # tracker normally clears this on a run edge, but the identity
+            # check is the final guard for delayed callbacks.
+            if (advice.run_id and self.run_session.run_id
+                    and advice.run_id != self.run_session.run_id):
+                return
+            if int(advice.run_epoch or 0) != int(self.run_session.run_epoch):
+                return
+            action = {
+                "kind": outcome.verdict,
+                "key": list(outcome.acted_key or ()) if outcome.acted_key else None,
+                "label": outcome.acted_label,
+                "verdict": outcome.verdict,
+            }
+            memory = self.strategic.memory
+            if outcome.verdict == "unobserved":
+                event = memory.record_unobserved(
+                    state_id=advice.state_id, decision_id=advice.decision_id,
+                    evidence=outcome.evidence,
+                    reason="无法从连续状态确定玩家行动",
+                    observed_state=observed_state,
+                )
+                trace_kind = "unobserved"
+            else:
+                event = memory.record_observed_action(
+                    action, state_id=advice.state_id,
+                    decision_id=advice.decision_id, evidence=outcome.evidence,
+                    observed_state=observed_state,
+                )
+                trace_kind = "fact"
+                if outcome.verdict == "mismatch":
+                    event = memory.record_deviation(
+                        advice.candidate_id or advice.label, str(actual),
+                        state_id=advice.state_id, decision_id=advice.decision_id,
+                        evidence=outcome.evidence, observed_state=observed_state,
+                    )
+                    trace_kind = "deviation"
+                    # This invalidates only pending strategic work. The player
+                    # action itself remains a fact in memory.
+                    self.strategic.request_replan("player_deviation")
+            self.trace.record(trace_kind, {
+                "record_kind": event.get("kind", ""),
+                "run_id": event.get("run_id", self.run_session.run_id),
+                "run_epoch": event.get("run_epoch", self.run_session.run_epoch),
+                "state_id": event.get("state_id", advice.state_id),
+                "decision_id": event.get("decision_id", advice.decision_id),
+                "player_action": action,
+                "evidence": outcome.evidence,
+                "verdict": outcome.verdict,
+            })
+        except Exception:
+            pass
+
+    def record_observed_result(self, result, *, state_id: str = "",
+                               decision_id: str = "", evidence: dict | None = None) -> None:
+        try:
+            event = self.strategic.memory.record_observed_result(
+                result, state_id=state_id or self._observed_state_id,
+                decision_id=decision_id, evidence=evidence,
+            )
+            self.trace.record("result", {
+                "record_kind": "result_record",
+                "run_id": event.get("run_id", self.run_session.run_id),
+                "run_epoch": event.get("run_epoch", self.run_session.run_epoch),
+                "state_id": event.get("state_id", ""),
+                "decision_id": event.get("decision_id", "") or None,
+                "result": result, "evidence": evidence or {},
+            })
+        except Exception:
             pass
 
     def choose_action(self, game) -> dict:
@@ -600,11 +757,6 @@ class SpireBrainAgent:
                 "run_id": final.run_id, "run_epoch": final.context.run_epoch,
                 "advice_revision": final.advice_revision, "source_type": final.source_type,
             })
-        try:
-            self.strategic.memory.record_action(command, state_id=final.state_id,
-                                                result=final.reason)
-        except Exception:  # noqa: BLE001
-            pass
         if self.feed is not None and decision is not None:
             try:
                 self.feed.publish("decision", {**decision_event(decision, command),

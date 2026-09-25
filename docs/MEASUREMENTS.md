@@ -329,7 +329,8 @@ non-zero status only after all results have been printed.
 
 Run `python -m spirebrain.analysis.metrics --input logs/decision_trace.jsonl`
 to summarize samples, runs, semantic states, scene coverage, legality,
-latency p50/p95, provider calls, fallback reasons and `unobserved` outcomes.
+latency p50/p95, provider calls, fallback reasons, result records and
+`unobserved` outcomes.
 Use `--json path` to save the report. Empty or incomplete traces report
 `unknown` for real outcomes. Replay/adoption counts, synthetic damage and HP
 simulation are not win-rate evidence.
@@ -348,3 +349,9 @@ first-advice latency, and local feed-publish latency in separate distributions.
 Legacy `latency_ms` values that cannot be classified are reported separately;
 the Java overlay does not currently acknowledge render/display time, so player-
 visible latency is explicitly reported as `not_collected`.
+
+The runtime memory and trace use separate event kinds: `advice_history`,
+`execution_attempt`, `fact_memory`, `result_record`, `deviation_record`, and
+`unobserved_record`. A recommendation's `reason` is explanatory evidence and is
+not counted as an execution `result`; only a `result_record` can contribute a
+real game outcome.

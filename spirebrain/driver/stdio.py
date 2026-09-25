@@ -173,6 +173,7 @@ class StdioTransport:
         self.stuck_events = 0         # how many times the stall guard fired
         self.action_limit_hit = False
         self.substitutions: list[dict] = []
+        self._pending_execution: dict | None = None
         # Guard warnings go here (default stderr). Injectable because stderr is
         # how the tests check that a guard *said something* when it fired.
         self.warn_stream = warn_stream if warn_stream is not None else sys.stderr
@@ -225,6 +226,12 @@ class StdioTransport:
         never resets"."""
         self.commands = 0
         self.action_limit_hit = False
+        resetter = getattr(self.agent, "begin_new_run", None)
+        if resetter is not None:
+            try:
+                resetter()
+            except Exception:
+                pass
         self.advisor.reset_run()
 
     @staticmethod
@@ -269,6 +276,11 @@ class StdioTransport:
             return "state"
 
     def _handle_message_inner(self, message: dict) -> str | None:
+
+        # Record an execution attempt only after ``run`` successfully writes
+        # the command to the pipe. Clear candidates from the previous message
+        # so early returns cannot attribute them to a later state.
+        self._pending_execution = None
 
         if message.get("error"):
             # The game is waiting for input after an error; silence would stall
@@ -398,10 +410,16 @@ class StdioTransport:
         # reads it defensively and other screens ignore it.
         game = dict(game)
         game["available_commands"] = available
-        line = to_command_line(self.agent.choose_action(game))
+        chosen = self.agent.choose_action(game)
+        line = to_command_line(chosen)
         line = self._ensure_offered(line, available)
         self.commands += 1
         if line and _verb_of(line) not in NON_ADVANCING_VERBS:
+            attempt = dict(chosen or {})
+            attempt["_wire"] = line
+            self._pending_execution = {
+                "command": attempt, "state_id": semantic_state_id(game),
+            }
             # Only an advancing command counts as "acted on this state".
             # state/wait cannot change anything, so arming the guard with them
             # would fire on the first legitimate re-transmission. Note what is
@@ -509,6 +527,16 @@ class StdioTransport:
                 try:
                     outstream.write(command + "\n")
                     outstream.flush()
+                    if self.mode == "play" and self._pending_execution is not None:
+                        recorder = getattr(self.agent, "record_execution_attempt", None)
+                        if recorder is not None:
+                            try:
+                                pending = self._pending_execution
+                                recorder(pending["command"],
+                                         state_id=pending["state_id"], status="sent")
+                            except Exception:
+                                pass
+                    self._pending_execution = None
                 except (OSError, ValueError):
                     # A dead pipe cannot be written to; keep reading anyway so a
                     # log record still exists for every state the game sent.

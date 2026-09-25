@@ -25,6 +25,9 @@ CommunicationMod
 ### 状态边界
 
 `spirebrain/driver/live_state.py` 的 `GameSnapshot.from_communication()` 是 CommunicationMod 原始字典进入决策层的唯一归一化入口。它补齐角色、战斗屏幕和稳定 `state_id`，并保留原始字段供兼容代码使用。`run_id` 变化或新局/死亡/通关时，`RunMemory` 清空。
+菜单到新局的边界由 `SpireBrainAgent.begin_new_run()` 统一清理；它同时推进
+`run_epoch`、清空计划/场景临时状态并使旧异步任务失效，即使新局复用了相同
+seed 或 `run_id` 也不会继承旧记忆。
 
 ### 配置边界
 
@@ -137,3 +140,28 @@ separately. A rule fallback does not get a fabricated combined probability.
 Combat evidence is structured in `combat_facts` (for example
 `lethal_confirmed`, target identity and incoming damage); risk handling never
 parses the Chinese display reason to decide whether a kill is safe.
+
+# Run memory event boundary
+
+`RunMemory` is owned by the main game loop. Its mutable state is updated through
+the normalized state observation and typed event methods; strategic workers get
+an immutable `RunMemorySnapshot` and return only a proposal/response. The main
+loop checks `run_id`, `run_epoch`, `state_id`, generation and candidate validity
+before committing a plan or publishing it.
+
+The event kinds are intentionally separate:
+
+| kind | meaning |
+| --- | --- |
+| `advice_history` | a recommendation was generated/displayed |
+| `execution_attempt` | a command reached the CommunicationMod wire |
+| `fact_memory` | a player action was inferred from a later state |
+| `result_record` | a game result such as victory/death was observed |
+| `deviation_record` | observed action differs from the advice, with evidence |
+| `unobserved_record` | the state transition cannot identify an action |
+
+`reason` remains a human-readable decision explanation and is never stored as a
+`result`. A player deviation preserves the observed state and evidence before
+invalidating the strategic plan. There is at most one running worker and one
+latest pending task; uncancellable requests may finish, but their epoch/key
+checks prevent them from changing the current panel, memory or plan.

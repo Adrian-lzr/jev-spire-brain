@@ -217,6 +217,7 @@ def advice_event(advice, tally: dict | None = None,
     the dashboard renders 0 as "规则" and not as a 0% certainty.
     """
     return {
+        "record_kind": "advice_history",
         "point": advice.point,
         "screen": advice.screen,
         "label": advice.label,
@@ -277,6 +278,9 @@ def outcome_event(outcome, tally: dict | None = None,
     action could be identified — the honest case, rendered as "没看出来".
     """
     return {
+        "record_kind": ("unobserved_record" if outcome.verdict == "unobserved"
+                         else "deviation_record" if outcome.verdict == "mismatch"
+                         else "fact_memory"),
         "point": outcome.advice.point,
         "verdict": outcome.verdict,
         "plan_deviation": outcome.verdict == "mismatch",

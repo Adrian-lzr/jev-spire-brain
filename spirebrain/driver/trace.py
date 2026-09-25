@@ -22,7 +22,7 @@ _FIELDS = {
     "latency_ms", "request_latency_ms", "brain_latency_ms", "brain_request_id",
     "decision_latency_ms", "first_advice_latency_ms", "publish_latency_ms", "fallback",
     "fallback_reason", "legal", "legality_reason", "uncertain", "player_action", "verdict",
-    "result", "act", "floor", "cost_usd", "timeout", "http_status", "expired_result",
+    "result", "evidence", "record_kind", "act", "floor", "cost_usd", "timeout", "http_status", "expired_result",
     "expired_result_count", "fixture_type", "code_version",
 }
 

@@ -26,6 +26,7 @@ import json
 import queue
 import threading
 import time
+import copy
 from pathlib import Path
 from typing import Any, Callable
 
@@ -144,10 +145,20 @@ class AdviseSession:
         # metadata and animation noise are removed by the shared projection.
         fp = self._fingerprint(dict(game, available_commands=available))
         state_version = semantic_state_id(game)
+        # Normalize/commit the current state before adjudicating the previous
+        # recommendation. This keeps player feedback and the observed snapshot
+        # on the same main-loop event path; the router's later observe call is
+        # idempotent for this state.
+        observer = getattr(self.agent, "observe", None)
+        if observer is not None:
+            try:
+                observer(game)
+            except Exception:
+                pass
         outcome = self.tracker.resolve(game)
         if outcome is not None:
-            self._handle_outcome_for_strategy(outcome)
-            self._publish_outcome(outcome)
+            self._handle_outcome_for_strategy(outcome, observed_state=game)
+            self._publish_outcome(outcome, observed_state=game)
 
         if not modeled:
             # A screen we cannot read: no advice is possible, and pressing its
@@ -156,7 +167,7 @@ class AdviseSession:
                 self.advised_fp = fp
                 self._latest_fp = fp
                 self._latest_state_id = state_version
-                self._begin_decision(fp, state_version)
+                self._begin_decision(fp, state_version, game)
                 self._publish_status(state_version, "unavailable", "当前界面暂无可判断的操作",
                                      "请继续手动操作，进入可识别界面后建议会自动恢复。",
                                      point=SCREEN_POINT.get(screen_of(game), "navigation"))
@@ -171,7 +182,7 @@ class AdviseSession:
             # the same shop after a cancel).  The generation distinguishes that
             # new request from a late result produced for the earlier visit.
             self._generation += 1
-            self._begin_decision(fp, state_version)
+            self._begin_decision(fp, state_version, game)
             if self._worker_agent is None:
                 self._advise_once(game, available)
             else:
@@ -179,23 +190,18 @@ class AdviseSession:
         self._drain_completed()
         return self._poll(available)
 
-    def _handle_outcome_for_strategy(self, outcome) -> None:
-        """Feed a clear player deviation back into the single-run planner."""
-        if outcome.verdict != "mismatch":
-            return
-        decision_agent = self._worker_agent or self.agent
-        strategic = getattr(decision_agent, "strategic", None)
-        if strategic is None:
-            return
-        advice = outcome.advice
-        advised = advice.candidate_id or advice.label or advice.command
-        actual = outcome.acted_key or outcome.acted_label or "unknown"
-        try:
-            strategic.memory.record_deviation(
-                str(advised), str(actual), state_id=advice.state_id)
-            strategic.request_replan("player_deviation")
-        except Exception:  # strategy feedback is optional observability
-            pass
+    def _handle_outcome_for_strategy(self, outcome, *, observed_state: dict | None = None) -> None:
+        """Submit player feedback through the owning main-loop boundary."""
+        recorder = getattr(self.agent, "record_player_feedback", None)
+        if recorder is not None:
+            recorder(outcome, observed_state=observed_state)
+        # A feedback event is itself a decision-version boundary. A running
+        # network request may finish naturally, but its proposal cannot be
+        # published after this feedback has invalidated the current state.
+        with self._work_lock:
+            self._generation += 1
+            self._queued_work = None
+        self.advised_fp = None
 
     def _publish_status(self, state_id: str, status: str, label: str,
                         reason: str, source_type: str = "pending",
@@ -213,7 +219,9 @@ class AdviseSession:
                 pass
 
     def _advise_async(self, game: dict, available: Any, fp: str) -> None:
-        payload = dict(game, available_commands=available)
+        # The worker receives a private snapshot. It never shares nested live
+        # CommunicationMod objects with the main loop.
+        payload = copy.deepcopy(dict(game, available_commands=available))
         try:
             quick = self.agent.quick_advice(payload)
         except Exception as exc:  # noqa: BLE001
@@ -239,7 +247,9 @@ class AdviseSession:
                                  quick.get("guide_rules", []),
                                  point=SCREEN_POINT.get(screen_of(game), "navigation"))
         with self._work_lock:
-            self._queued_work = (fp, payload, self._generation)
+            run_epoch = int(getattr(getattr(self.agent, "run_session", None),
+                                   "run_epoch", 0) or 0)
+            self._queued_work = (fp, payload, self._generation, run_epoch)
             if not self._work_running:
                 self._work_running = True
                 threading.Thread(target=self._work_loop, daemon=True,
@@ -253,15 +263,15 @@ class AdviseSession:
                 if job is None:
                     self._work_running = False
                     return
-            fp, payload, generation = job
+                fp, payload, generation, run_epoch = job
             try:
                 command = self._worker_agent.choose_action(payload)
                 entry = dict(self._worker_agent.history[-1]) if self._worker_agent.history else None
-                self._completed.put((fp, generation, payload, command, entry, None))
+                self._completed.put((fp, generation, run_epoch, payload, command, entry, None))
             except Exception as exc:  # noqa: BLE001 - failure becomes a panel status
-                self._completed.put((fp, generation, payload, None, None, exc))
+                self._completed.put((fp, generation, run_epoch, payload, None, None, exc))
 
-    def _begin_decision(self, fp: str, state_id: str) -> None:
+    def _begin_decision(self, fp: str, state_id: str, game: dict | None = None) -> None:
         self._decision_sequence += 1
         self._state_started_at[fp] = self._clock()
         self._first_advice_latency.pop(fp, None)
@@ -269,17 +279,24 @@ class AdviseSession:
             oldest = next(iter(self._state_started_at))
             self._state_started_at.pop(oldest, None)
             self._first_advice_latency.pop(oldest, None)
-        self._current_decision_id = (
-            f"{self._run_id()}:{state_id[:16]}:{self._decision_sequence}"
-        )
+        run_id = self._run_id()
+        if not run_id and isinstance(game, dict):
+            run_id = str(game.get("run_id") or game.get("runId")
+                          or game.get("seed") or "")
+            if not run_id:
+                run_id = f"local:{game.get('character') or game.get('class') or ''}"
+        self._current_decision_id = f"{run_id}:{state_id[:16]}:{self._decision_sequence}"
 
     def _drain_completed(self) -> None:
         while True:
             try:
-                fp, generation, payload, command, entry, error = self._completed.get_nowait()
+                fp, generation, run_epoch, payload, command, entry, error = self._completed.get_nowait()
             except queue.Empty:
                 return
-            if generation != self._generation or fp != self._latest_fp:
+            current_epoch = int(getattr(getattr(self.agent, "run_session", None),
+                                       "run_epoch", 0) or 0)
+            if (generation != self._generation or fp != self._latest_fp
+                    or run_epoch != current_epoch):
                 continue  # the player already changed the game state
             if error is not None or command is None:
                 # An immediate hard-rule recommendation remains visible on API
@@ -462,7 +479,13 @@ class AdviseSession:
         return 0.0, False, ""
 
     def _publish_advice(self, advice: Advice) -> None:
-        event = {"kind": "advice", "point": advice.point,
+        # This is the main-loop commit point for advice history. The worker may
+        # have produced the proposal, but only the owning session records that
+        # it was shown to the player.
+        recorder = getattr(self.agent, "record_advice_history", None)
+        if recorder is not None:
+            recorder(advice, displayed=True)
+        event = {"kind": "advice", "record_kind": "advice_history", "point": advice.point,
                           "screen": advice.screen, "label": advice.label,
                           "verb": str(advice.command.get("command", "")),
                           "command": advice.command, "key": list(advice.key or ()),
@@ -507,6 +530,7 @@ class AdviseSession:
                 advice.publish_latency_ms = None
         self._advice_log({**event, "publish_latency_ms": advice.publish_latency_ms})
         self._trace("advice", {
+            "record_kind": "advice_history",
             "run_id": advice.run_id or self._run_id(), "state_id": advice.state_id,
             "run_epoch": advice.run_epoch, "advice_revision": advice.advice_revision,
             "decision_id": advice.decision_id,
@@ -535,9 +559,12 @@ class AdviseSession:
             "act": advice.act, "floor": advice.floor,
         })
 
-    def _publish_outcome(self, outcome) -> None:
+    def _publish_outcome(self, outcome, *, observed_state: dict | None = None) -> None:
         advice = outcome.advice
-        event = {"kind": "outcome", "point": advice.point,
+        record_kind = ("unobserved_record" if outcome.verdict == "unobserved"
+                       else "deviation_record" if outcome.verdict == "mismatch"
+                       else "fact_memory")
+        event = {"kind": "outcome", "record_kind": record_kind, "point": advice.point,
                           "run_id": advice.run_id, "run_epoch": advice.run_epoch,
                           "decision_id": advice.decision_id,
                           "verdict": outcome.verdict,
@@ -549,6 +576,9 @@ class AdviseSession:
                           "agreement": self.tracker.agreement}
         self._advice_log(event)
         self._trace("outcome", {
+            "record_kind": ("unobserved_record" if outcome.verdict == "unobserved"
+                             else "deviation_record" if outcome.verdict == "mismatch"
+                             else "fact_memory"),
             "run_id": advice.run_id or self._run_id(), "state_id": advice.state_id,
             "run_epoch": advice.run_epoch, "decision_id": advice.decision_id,
             "plan_id": advice.plan_id, "screen": advice.screen,
@@ -557,6 +587,7 @@ class AdviseSession:
             "player_action": {"key": list(outcome.acted_key or ()),
                               "label": outcome.acted_label},
             "verdict": outcome.verdict,
+            "evidence": outcome.evidence,
         })
         print(f"[advise] verdict {outcome.verdict}: advised "
               f"{advice_line(outcome.advice.command)} / player did "
