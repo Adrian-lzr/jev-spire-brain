@@ -77,6 +77,20 @@ def _json_text(value: Any) -> str:
     return text
 
 
+def _unicode_safe_json(value: Any) -> Any:
+    """Normalize gateway JSON without passing legacy-encoded text downstream."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    if isinstance(value, str):
+        return value.encode("utf-8", "replace").decode("utf-8", "replace")
+    if isinstance(value, list):
+        return [_unicode_safe_json(item) for item in value]
+    if isinstance(value, dict):
+        return {_unicode_safe_json(key): _unicode_safe_json(item)
+                for key, item in value.items()}
+    return value
+
+
 def _extract_text(body: dict) -> str:
     output_text = body.get("output_text")
     if isinstance(output_text, str) and output_text.strip():
@@ -304,11 +318,18 @@ class OpenAIStrategicClient:
                     error_kind=("auth" if exc.code in {401, 403} else
                                 "rate_limit" if exc.code == 429 else "http"),
                 )
-            decoded = json.loads(raw.decode("utf-8"))
-            text = _extract_text(decoded)
+            decoded = _unicode_safe_json(json.loads(raw.decode("utf-8", "replace")))
+            text = _unicode_safe_json(_extract_text(decoded))
             if len(text.encode("utf-8", "replace")) > 64 * 1024:
                 raise PlanValidationError("模型响应超过 64KB 限制")
-            data = _unwrap_plan(json.loads(_json_text(text)))
+            try:
+                data = _unwrap_plan(json.loads(_json_text(text)))
+            except UnicodeError:
+                # Some compatible gateways build an intermediate latin-1
+                # string around otherwise valid Chinese JSON. Escaping first
+                # preserves the content while avoiding that codec path.
+                escaped = json.dumps(text, ensure_ascii=True)
+                data = _unwrap_plan(json.loads(json.loads(escaped)))
             data = _coerce_steps_plan(
                 data,
                 state_id=str(payload.get("state_id", "")),
@@ -336,6 +357,9 @@ class OpenAIStrategicClient:
                                  f"请求超时：{type(exc).__name__}" if isinstance(exc, TimeoutError)
                                  else f"网络错误：{type(exc).__name__}",
                                  error_kind="timeout" if isinstance(exc, TimeoutError) else "network")
+        except UnicodeError as exc:
+            return self._failure(request_id, started, f"计划解析编码失败：{type(exc).__name__}",
+                                 error_kind="unicode_parse")
         except (ValueError, KeyError, TypeError, json.JSONDecodeError, PlanValidationError) as exc:
             return self._failure(request_id, started, redact_text(f"计划解析失败：{exc}"),
                                  error_kind="parse_or_validation")

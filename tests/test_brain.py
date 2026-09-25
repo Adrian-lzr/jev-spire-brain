@@ -189,6 +189,28 @@ def test_strategic_gateway_never_builds_responses_payload():
     assert "text" not in body
 
 
+def test_kimi_style_unicode_json_response_is_accepted():
+    import json
+    base = {"plan_id": "p", "state_id": "s", "run_id": "r",
+            "current_objective": "防御：中文", "long_term_goal": "生存",
+            "priority": [], "preferred_candidates": [], "avoid_candidates": [],
+            "resource_constraints": {}, "next_steps": [], "replan_triggers": [],
+            "reason": "中文：理由", "uncertainty": "", "expires_after": 1}
+    payload = {"choices": [{"message": {"content": json.dumps(base, ensure_ascii=False)}}]}
+
+    class Response:
+        def read(self): return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+
+    result = OpenAIStrategicClient(
+        api_key="test", model="kimi-k3", endpoint="https://kimi.test/v1/chat/completions",
+        opener=lambda request, timeout: Response(),
+    ).plan({"state_id": "s", "run_id": "r"})
+    assert result.fallback is False
+    assert result.plan.current_objective == "防御：中文"
+
+
 def test_openai_compatible_endpoint_can_opt_into_structured_output():
     client = OpenAIStrategicClient(
         api_key="test", model="gpt-test",
