@@ -179,6 +179,9 @@ class Advice:
     floor: int = 0
     message: int = 0                # transport message index that produced it
     state_id: str = ""               # exact state this recommendation belongs to
+    run_id: str = ""
+    run_epoch: int = 0
+    advice_revision: int = 0
     source_type: str = ""            # gpt_strategy | jev_tactical | guide_rule | rule_fallback
     source: str = ""                 # human-auditable guide source, when known
     guide_rules: list[dict] = field(default_factory=list)
@@ -198,6 +201,13 @@ class Advice:
     brain_latency_ms: int = 0
     brain_request_id: str = ""
     brain_error: str = ""
+    # Confidence layers are intentionally optional.  A rule or mixed source
+    # has no honest single probability, so the panel should show the source and
+    # uncertainty instead of manufacturing one.
+    raw_model_confidence: float | None = None
+    local_confidence: float | None = None
+    selection_basis: str = ""
+    combat_facts: dict = field(default_factory=dict)
     status: str = "ready"             # fast_advice | model_ready | unavailable
     decision_id: str = ""
     request_id: str = ""

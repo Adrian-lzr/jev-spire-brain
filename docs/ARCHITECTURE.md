@@ -117,3 +117,23 @@ Authentication failures stop immediately. Timeout, HTTP and fallback counters
 are kept in memory and never include credentials. Java overlay compilation is a
 local-only check when game JARs are installed; CI runs the static JSON contract
 checker instead.
+
+# Decision finalization and evidence
+
+The router has one finalization boundary, `SpireBrainAgent._finalize_and_record()`.
+It performs strategic arbitration and the final `check_action()` call, then
+creates a `FinalDecision`. `_record()` only serializes that object to history,
+trace and overlay; it does not plan, replace commands or infer facts.
+
+`RunSession` is mutable live state, while `DecisionContext` captures an
+immutable `RunSessionSnapshot` (`run_id`, `run_epoch`, seed and mode). This
+prevents a later run from rewriting an earlier decision's identity. The same
+decision carries `state_id`, `decision_id`, `request_id`, `plan_id` and
+`advice_revision` for replay joins.
+
+Confidence is layered and nullable: provider/model confidence (when a provider
+actually supplies one), local/JEV confidence, and `selection_basis` are emitted
+separately. A rule fallback does not get a fabricated combined probability.
+Combat evidence is structured in `combat_facts` (for example
+`lethal_confirmed`, target identity and incoming damage); risk handling never
+parses the Chinese display reason to decide whether a kill is safe.

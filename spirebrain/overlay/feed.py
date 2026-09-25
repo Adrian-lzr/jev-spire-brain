@@ -192,12 +192,17 @@ def decision_event(decision, command: dict) -> dict:
     tables, gate breakdowns, fallback reasons — and is passed through verbatim:
     the dashboard decides how to render each shape, the feed does not guess.
     """
+    detail = _jsonable(decision.detail)
     return {
         "point": decision.point,
         "value": decision.value,
         "confidence": round(float(decision.confidence), 4),
         "fallback": bool(decision.used_fallback),
-        "detail": _jsonable(decision.detail),
+        "detail": detail,
+        "raw_model_confidence": detail.get("raw_model_confidence"),
+        "local_confidence": detail.get("local_confidence"),
+        "selection_basis": detail.get("selection_basis", ""),
+        "combat_facts": detail.get("combat_facts", {}),
         "command": command,
     }
 
@@ -220,12 +225,20 @@ def advice_event(advice, tally: dict | None = None,
         "key": list(advice.key) if advice.key else None,
         "reason": advice.reason,
         "confidence": round(float(advice.confidence or 0.0), 4),
+        "raw_model_confidence": (round(float(advice.raw_model_confidence), 4)
+                                  if advice.raw_model_confidence is not None else None),
+        "local_confidence": (round(float(advice.local_confidence), 4)
+                              if advice.local_confidence is not None else None),
+        "selection_basis": advice.selection_basis,
         "fallback": bool(advice.fallback),
         "act": advice.act,
         "floor": advice.floor,
         "tally": dict(tally or {}),
         "agreement": agreement,
         "state_id": advice.state_id,
+        "run_id": advice.run_id,
+        "run_epoch": advice.run_epoch,
+        "advice_revision": advice.advice_revision,
         "decision_id": advice.decision_id,
         "request_id": advice.request_id or advice.brain_request_id,
         "request_latency_ms": advice.brain_latency_ms or None,
@@ -251,6 +264,7 @@ def advice_event(advice, tally: dict | None = None,
         "brain_latency_ms": advice.brain_latency_ms,
         "brain_request_id": advice.brain_request_id,
         "brain_error": advice.brain_error,
+        "combat_facts": _jsonable(advice.combat_facts),
     }
 
 

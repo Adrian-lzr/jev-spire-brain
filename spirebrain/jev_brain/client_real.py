@@ -55,6 +55,7 @@ from spirebrain.jev_brain.client import (
     ScoreSpec,
     build_questions_json,
 )
+from spirebrain.redaction import redact_text
 
 # USD per 1M input tokens (JEV early access, 2026-09-21). Output priced at 0.
 INPUT_USD_PER_MTOK = 0.042
@@ -243,10 +244,13 @@ class OfficialJevClient(JevClient):
                 self.timeout = old_timeout
             except urllib.error.HTTPError as err:  # noqa: PERF203
                 self.timeout = old_timeout
-                detail = err.read().decode("utf-8", "replace")[:300] if err.fp else ""
+                # Provider bodies are untrusted and may echo an Authorization
+                # header or request payload.  Status is sufficient for retry
+                # classification and keeps credentials out of UI/logs.
+                detail = ""
                 if err.code in {401, 403, 402}:
                     self.metrics["auth_errors"] += 1
-                    raise JevApiError(f"HTTP {err.code}: {detail}") from err
+                    raise JevApiError(redact_text(f"HTTP {err.code}: {detail}")) from err
                 if err.code == 429:
                     self.metrics["rate_limits"] += 1
                 self.metrics["http_errors"] += 1
@@ -257,7 +261,7 @@ class OfficialJevClient(JevClient):
                         delay = min(delay, max(0.0, deadline - time.monotonic()))
                     time.sleep(delay)
                     continue
-                raise JevApiError(f"HTTP {err.code}: {detail}") from err
+                raise JevApiError(redact_text(f"HTTP {err.code}: {detail}")) from err
             except (urllib.error.URLError, TimeoutError, OSError) as err:
                 self.timeout = old_timeout
                 if isinstance(err, TimeoutError):
@@ -269,14 +273,14 @@ class OfficialJevClient(JevClient):
                         delay = min(delay, max(0.0, deadline - time.monotonic()))
                     time.sleep(delay)
                     continue
-                raise JevApiError(f"network failure: {err}") from err
+                raise JevApiError(f"network failure: {type(err).__name__}") from err
 
             latency_ms = int((time.perf_counter() - t0) * 1000)
             try:
                 answers_obj, usage, model = self._extract(body)
             except (TypeError, ValueError, KeyError, json.JSONDecodeError) as err:
                 self.metrics["invalid_json"] += 1
-                raise JevApiError(f"invalid JEV response: {err}") from err
+                raise JevApiError(redact_text(f"invalid JEV response: {err}")) from err
             usage = normalize_usage(usage)
             self.calls += 1
             cost, cost_source = resolve_cost(usage, model)
@@ -289,7 +293,7 @@ class OfficialJevClient(JevClient):
                 model=model,
                 usage={**usage, "cost_source": cost_source},
             )
-        raise JevApiError(f"exhausted retries: {last_err}")
+        raise JevApiError(redact_text(f"exhausted retries: {last_err}"))
 
 
 class CloudflareJevClient(OfficialJevClient):
@@ -321,7 +325,7 @@ class CloudflareJevClient(OfficialJevClient):
         if "result" in inner and isinstance(inner["result"], dict):
             inner = inner["result"]
         if not inner.get("success", True) and "answers" not in inner:
-            raise JevApiError(f"cloudflare error: {json.dumps(body)[:300]}")
+            raise JevApiError(redact_text(f"cloudflare error: {json.dumps(body)[:300]}"))
         return inner.get("answers", {}), inner.get("usage", {}), inner.get("model", self.model)
 
 

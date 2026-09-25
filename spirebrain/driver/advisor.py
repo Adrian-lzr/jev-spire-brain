@@ -349,6 +349,15 @@ class AdviseSession:
         if first_latency is None and decision_latency is not None:
             first_latency = decision_latency
             self._first_advice_latency[fp] = first_latency
+        observed_run_id = str((entry or {}).get("run_id") or self._run_id())
+        try:
+            observed_run_epoch = int((entry or {}).get("run_epoch", 0) or 0)
+        except (TypeError, ValueError):
+            observed_run_epoch = 0
+        try:
+            advice_revision = int((entry or {}).get("advice_revision", 0) or 0)
+        except (TypeError, ValueError):
+            advice_revision = 0
         advice = Advice(
             point=point, screen=screen, command=command,
             key=advice_key(payload, command, point),
@@ -358,6 +367,9 @@ class AdviseSession:
             act=int(game.get("act", 0) or 0), floor=int(game.get("floor", 0) or 0),
             message=self.message_count(),
             state_id=state_id,
+            run_id=observed_run_id,
+            run_epoch=observed_run_epoch,
+            advice_revision=advice_revision,
             source_type=source_type or detail.get("source_type", "guide_rule"),
             source=source or detail.get("source", ""),
             guide_rules=guide_rules if guide_rules is not None else detail.get("guide_rules", []),
@@ -378,6 +390,12 @@ class AdviseSession:
             brain_latency_ms=int(detail.get("brain_latency_ms", 0) or 0),
             brain_request_id=str(detail.get("brain_request_id", "") or ""),
             brain_error=str(detail.get("brain_error", "") or ""),
+            raw_model_confidence=(float(detail["raw_model_confidence"])
+                                  if detail.get("raw_model_confidence") is not None else None),
+            local_confidence=(float(detail["local_confidence"])
+                              if detail.get("local_confidence") is not None else None),
+            selection_basis=str(detail.get("selection_basis", "") or ""),
+            combat_facts=dict(detail.get("combat_facts", {}) or {}),
             status=("fast_advice" if provisional or source_type in {"guide_rule", "rule_fallback"}
                     else "model_ready"),
             decision_id=getattr(self, "_current_decision_id", ""),
@@ -449,7 +467,13 @@ class AdviseSession:
                           "verb": str(advice.command.get("command", "")),
                           "command": advice.command, "key": list(advice.key or ()),
                           "reason": advice.reason, "confidence": advice.confidence,
+                          "raw_model_confidence": advice.raw_model_confidence,
+                          "local_confidence": advice.local_confidence,
+                          "selection_basis": advice.selection_basis,
+                          "combat_facts": advice.combat_facts,
                           "fallback": advice.fallback, "state_id": advice.state_id,
+                          "run_id": advice.run_id, "run_epoch": advice.run_epoch,
+                          "advice_revision": advice.advice_revision,
                           "source_type": advice.source_type, "source": advice.source,
                           "guide_rules": advice.guide_rules,
                           "strategic_goal": advice.strategic_goal,
@@ -483,7 +507,8 @@ class AdviseSession:
                 advice.publish_latency_ms = None
         self._advice_log({**event, "publish_latency_ms": advice.publish_latency_ms})
         self._trace("advice", {
-            "run_id": self._run_id(), "state_id": advice.state_id,
+            "run_id": advice.run_id or self._run_id(), "state_id": advice.state_id,
+            "run_epoch": advice.run_epoch, "advice_revision": advice.advice_revision,
             "decision_id": advice.decision_id,
             "request_id": advice.request_id or advice.brain_request_id or None,
             "plan_id": advice.plan_id, "screen": advice.screen,
@@ -497,6 +522,10 @@ class AdviseSession:
             "alternative": {"command": advice.alternative_command,
                             "label": advice.alternative_label},
             "reason": advice.reason, "confidence": advice.confidence,
+            "raw_model_confidence": advice.raw_model_confidence,
+            "local_confidence": advice.local_confidence,
+            "selection_basis": advice.selection_basis,
+            "combat_facts": advice.combat_facts,
             "jev_confidence": advice.jev_confidence,
             "request_latency_ms": advice.brain_latency_ms or None,
             "first_advice_latency_ms": advice.first_advice_latency_ms,
@@ -509,6 +538,8 @@ class AdviseSession:
     def _publish_outcome(self, outcome) -> None:
         advice = outcome.advice
         event = {"kind": "outcome", "point": advice.point,
+                          "run_id": advice.run_id, "run_epoch": advice.run_epoch,
+                          "decision_id": advice.decision_id,
                           "verdict": outcome.verdict,
                           "advice_label": advice.label,
                           "acted_label": outcome.acted_label,
@@ -518,7 +549,8 @@ class AdviseSession:
                           "agreement": self.tracker.agreement}
         self._advice_log(event)
         self._trace("outcome", {
-            "run_id": self._run_id(), "state_id": advice.state_id,
+            "run_id": advice.run_id or self._run_id(), "state_id": advice.state_id,
+            "run_epoch": advice.run_epoch, "decision_id": advice.decision_id,
             "plan_id": advice.plan_id, "screen": advice.screen,
             "point": advice.point, "selected_candidate_id": advice.candidate_id,
             "command": advice.command,

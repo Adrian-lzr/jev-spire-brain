@@ -690,6 +690,11 @@ function renderAdvice(ev) {
   box.innerHTML = "";
   box.append(el("span", "badge", sourceName));
   if (ev.status === "ready" && conf > 0) box.append(el("span", "badge", "置信度 " + conf.toFixed(2)));
+  if (ev.raw_model_confidence !== null && ev.raw_model_confidence !== undefined)
+    box.append(el("span", "badge", "模型 " + Number(ev.raw_model_confidence).toFixed(2)));
+  if (ev.local_confidence !== null && ev.local_confidence !== undefined)
+    box.append(el("span", "badge", "局部判断 " + Number(ev.local_confidence).toFixed(2)));
+  if (ev.selection_basis) box.append(el("span", "badge", "依据 " + ev.selection_basis));
   if (ev.source) box.append(el("span", "badge", "依据：" + ev.source));
   if (ev.state_id) box.append(el("span", "badge", "状态 " + String(ev.state_id).slice(0, 10)));
   if (ev.plan_id) box.append(el("span", "badge", "计划 " + ev.plan_id));

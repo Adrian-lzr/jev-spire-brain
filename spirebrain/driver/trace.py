@@ -3,21 +3,23 @@
 from __future__ import annotations
 
 import json
-import re
 import threading
 import time
 from pathlib import Path
 
+from spirebrain.redaction import redact_text
+
 
 _LOCK = threading.Lock()
-_SECRET = re.compile(
-    r"(?i)(authorization\s*[:=]\s*bearer\s+|bearer\s+|api[_ -]?key\s*[:=]\s*)\S+"
-)
 _FIELDS = {
-    "run_id", "state_id", "decision_id", "request_id", "plan_id", "screen", "point", "config_id",
-    "brain_backend", "jev_backend", "source_type", "rule_ids", "candidates",
+    "run_id", "run_epoch", "state_id", "decision_id", "request_id", "plan_id",
+    "advice_revision", "screen", "point", "config_id", "brain_backend", "brain_source",
+    "jev_backend", "source_type", "source", "status", "rule_ids", "candidates",
     "filtered_candidates", "selected_candidate_id", "candidate_signature", "command", "alternative",
-    "reason", "confidence", "jev_confidence", "latency_ms", "request_latency_ms",
+    "reason", "confidence", "raw_model_confidence", "model_confidence", "local_confidence",
+    "jev_confidence", "selection_basis", "combat_facts", "strategic_goal", "long_term_goal",
+    "candidate_id", "alternative_candidate_id", "brain_error", "error", "model", "provider",
+    "latency_ms", "request_latency_ms", "brain_latency_ms", "brain_request_id",
     "decision_latency_ms", "first_advice_latency_ms", "publish_latency_ms", "fallback",
     "fallback_reason", "legal", "legality_reason", "uncertain", "player_action", "verdict",
     "result", "act", "floor", "cost_usd", "timeout", "http_status", "expired_result",
@@ -29,7 +31,7 @@ def _safe(value, depth: int = 0):
     if depth > 5:
         return "[truncated]"
     if isinstance(value, str):
-        return _SECRET.sub(lambda match: f"{match.group(1)}[redacted]", value[:1000])
+        return redact_text(value)
     if isinstance(value, dict):
         return {str(key)[:80]: _safe(item, depth + 1)
                 for key, item in list(value.items())[:100]}
@@ -37,7 +39,7 @@ def _safe(value, depth: int = 0):
         return [_safe(item, depth + 1) for item in list(value)[:100]]
     if value is None or isinstance(value, (bool, int, float)):
         return value
-    return str(value)[:1000]
+    return redact_text(value)
 
 
 class DecisionTrace:

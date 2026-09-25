@@ -16,7 +16,7 @@ Policy (typical starter-deck heuristics, intentionally simple):
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from spirebrain.strategy import select_strategy
 
@@ -84,6 +84,10 @@ class ActionSuggestion:
     command: dict
     reason: str
     uncertain: bool = False
+    # Machine-readable evidence used by the risk layer.  UI prose is not a
+    # contract: translations and wording changes must never change whether a
+    # verified kill is allowed to beat a defensive preference.
+    facts: dict = field(default_factory=dict)
 
 
 def recommend_action(game: dict) -> ActionSuggestion | None:
@@ -144,7 +148,9 @@ def recommend_action(game: dict) -> ActionSuggestion | None:
                     return ActionSuggestion(
                         {"command": "potion", "action": "use", "slot": slot},
                         "当前生命危险，先使用可用的回复药水；具体回复量以游戏说明为准。",
-                        True)
+                        True,
+                        {"potion_prevents_lethal": True, "incoming_damage": incoming,
+                         "current_block": block, "effect_confidence": "known_potion"})
 
     cards = []
     for index, card in enumerate(combat.get("hand") or []):
@@ -204,14 +210,32 @@ def recommend_action(game: dict) -> ActionSuggestion | None:
         if lethal:
             i, card, damage = min(lethal, key=lambda x: int(x[1].get("cost", 0) or 0))
             return ActionSuggestion(command_for(i, card, damage),
-                                    "这张攻击牌已知可以击败当前敌人，先结束威胁。")
+                                    "这张攻击牌已知可以击败当前敌人，先结束威胁。",
+                                    False,
+                                    {"lethal_confirmed": True,
+                                     "lethal_target_index": monsters[0][0],
+                                     "lethal_target_entity_id": str(
+                                         monsters[0][1].get("id") or
+                                         monsters[0][1].get("uuid") or
+                                         monsters[0][1].get("name") or
+                                         f"enemy:{monsters[0][0]}"),
+                                     "damage": damage,
+                                     "target_effective_hp": monsters[0][2],
+                                     "incoming_damage": incoming,
+                                     "decision_basis": "verified_lethal"})
 
     uncovered = max(0, incoming - block)
     blockers = [(i, c, b) for i, c, _, _, b in cards if b is not None and b > 0]
     if uncovered > 0 and blockers:
         i, card, value = max(blockers, key=lambda x: (min(uncovered, x[2]), -int(x[1].get("cost", 0) or 0)))
         return ActionSuggestion(command_for(i, card, None),
-                                f"已知将受到约 {incoming} 点攻击，当前格挡 {block}；先补格挡。")
+                                f"已知将受到约 {incoming} 点攻击，当前格挡 {block}；先补格挡。",
+                                False,
+                                {"lethal_confirmed": False,
+                                 "incoming_damage": incoming,
+                                 "current_block": block,
+                                 "uncovered_damage": uncovered,
+                                 "decision_basis": "cover_incoming_damage"})
 
     # Once the defensive requirement is covered, use the selected build's
     # setup cards before defaulting to the largest printed damage.  This is a
@@ -237,6 +261,10 @@ def recommend_action(game: dict) -> ActionSuggestion | None:
             command_for(i, card, damage),
             f"当前打法为「{strategy.label}」，先执行其核心/配合牌，避免只按面板伤害出牌。",
             card.get("damage") is None or card.get("block") is None,
+            {"lethal_confirmed": False, "incoming_damage": incoming,
+             "decision_basis": "strategy_setup",
+             "effect_confidence": "partial" if card.get("damage") is None or
+             card.get("block") is None else "known"},
         )
 
     attacks = [(i, c, d) for i, c, typ, d, _ in cards if typ == "ATTACK"]
@@ -246,12 +274,21 @@ def recommend_action(game: dict) -> ActionSuggestion | None:
                                 "当前先用可打出的攻击牌推进战斗。" +
                                 ("伤害及特殊效果请以当前牌面和敌人状态为准。"
                                  if card.get("damage") is None or player.get("powers") else ""),
-                                card.get("damage") is None or bool(player.get("powers")))
+                                card.get("damage") is None or bool(player.get("powers")),
+                                {"lethal_confirmed": False,
+                                 "incoming_damage": incoming,
+                                 "decision_basis": "damage_priority",
+                                 "effect_confidence": "partial" if card.get("damage") is None or
+                                 player.get("powers") else "known"})
     utilities = [(i, c) for i, c, typ, _, _ in cards if typ in {"POWER", "SKILL"}]
     if utilities:
         i, card = utilities[0]
         return ActionSuggestion(command_for(i, card, None),
-                                "当前没有可确认收益的攻击或格挡；这张牌可打出，效果请以牌面为准。", True)
+                                "当前没有可确认收益的攻击或格挡；这张牌可打出，效果请以牌面为准。", True,
+                                {"lethal_confirmed": False, "incoming_damage": incoming,
+                                 "decision_basis": "unknown_utility", "effect_confidence": "unknown"})
     if not offered or "end" in offered:
-        return ActionSuggestion({"command": "end"}, "没有可打出的牌，结束回合。")
+        return ActionSuggestion({"command": "end"}, "没有可打出的牌，结束回合。", False,
+                                 {"lethal_confirmed": False, "incoming_damage": incoming,
+                                  "decision_basis": "no_playable_card"})
     return None
