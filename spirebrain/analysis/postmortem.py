@@ -78,7 +78,10 @@ def main(argv=None) -> int:
     parser.add_argument("--config-id", default="unknown")
     parser.add_argument("--json", dest="output")
     args = parser.parse_args(argv)
-    records = load_records(args.input)
+    try:
+        records = load_records(args.input)
+    except FileNotFoundError:
+        parser.error(f"trace input missing: {args.input}")
     if not records:
         parser.error(f"no trace records found: {args.input}")
     result = (review_decision(records, args.decision_id) if args.decision_id

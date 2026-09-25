@@ -369,11 +369,15 @@ class StrategicOrchestrator:
     def choose(self, game: dict, fallback: dict, *, candidates=None,
                trigger: str | None = None, reason: str = "",
                jev_confidence: float = 0.0,
-               guide_rules: list[dict] | None = None) -> tuple[dict, ExecutionDecision]:
+               guide_rules: list[dict] | None = None,
+               plan: StrategicPlan | None = None,
+               budget: DecisionBudget | None = None) -> tuple[dict, ExecutionDecision]:
         candidates = list(candidates if candidates is not None else build_action_candidates(game))
-        plan, response = self.plan_for(
-            game, candidates=candidates, guide_rules=guide_rules, trigger=trigger,
-        )
+        # Planning is explicit in plan_for(). Arbitration cannot initiate I/O,
+        # including when the earlier request failed or is still pending.
+        response = self.last_response
+        if plan is None:
+            plan = self._usable_plan(game)
         state_id = stable_state_id(game)
         command, decision = reconcile(
             game=game, candidates=candidates, fallback=fallback, plan=plan,

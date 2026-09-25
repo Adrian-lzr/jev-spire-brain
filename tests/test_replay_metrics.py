@@ -33,6 +33,18 @@ def test_metrics_contract_counts_provider_request_and_unknown_outcome():
     assert "Authorization" not in json.dumps(report)
 
 
+def test_metrics_cli_rejects_missing_and_empty_inputs(tmp_path, capsys):
+    from spirebrain.analysis.metrics import main
+
+    missing = tmp_path / "missing.jsonl"
+    assert main(["--input", str(missing)]) == 2
+    assert '"error": "input_missing"' in capsys.readouterr().out
+    empty = tmp_path / "empty.jsonl"
+    empty.write_text("", encoding="utf-8")
+    assert main(["--input", str(empty)]) == 2
+    assert '"error": "no_records"' in capsys.readouterr().out
+
+
 def test_advice_trace_measures_first_decision_and_feed_publish_without_sleep(tmp_path):
     from spirebrain.driver.advisor import AdviseSession
     from spirebrain.driver.agent import SpireBrainAgent

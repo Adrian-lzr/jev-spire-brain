@@ -1,5 +1,6 @@
 {
   "fixture_type": "synthetic",
+  "kind": "scheduler_scenario",
   "events": [
     {"event_type": "provider_request", "request_id": "req-a", "state_id": "state-a"},
     {"event_type": "state_observed", "state_id": "state-b"},

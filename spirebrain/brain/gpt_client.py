@@ -406,7 +406,9 @@ class LoggingStrategicClient:
         if self.event_sink is not None:
             try:
                 self.event_sink("provider_request", {**identity, "provider": self.backend_name,
-                                                       "model": getattr(self.inner, "model", "")})
+                    "model": getattr(self.inner, "model", ""),
+                    "state_blob": payload.get("state"),
+                    "candidate_blob": payload.get("candidates")})
             except Exception:
                 pass
         try:
@@ -447,7 +449,8 @@ class LoggingStrategicClient:
                     "provider": result.backend or self.backend_name,
                     "model": result.model, "latency_ms": record["latency_ms"],
                     "usage": result.usage, "error": result.error, "error_kind": result.error_kind,
-                    "fallback": bool(result.fallback)})
+                    "fallback": bool(result.fallback),
+                    "response_blob": plan})
             except Exception:
                 pass
         return result

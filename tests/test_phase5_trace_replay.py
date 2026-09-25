@@ -34,6 +34,22 @@ def test_trace_schema_and_secret_redaction(tmp_path):
     assert trace.find_decision("d")["requests"]
 
 
+def test_trace_state_candidate_and_response_blob_references_are_verifiable(tmp_path):
+    from spirebrain.analysis.replay_blob import ReplayBlobStore
+
+    path = tmp_path / "trace.jsonl"
+    trace = DecisionTrace(path, config_id="cfg")
+    assert trace.record("decision", {
+        "decision_id": "d", "state_blob": {"screen": "COMBAT"},
+        "candidate_blob": [{"candidate_id": "play:0"}],
+        "response_blob": {"plan_id": "p", "api_key": "secret"},
+    })
+    event = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+    store = ReplayBlobStore(tmp_path / "decision_blobs")
+    assert store.get(event["state_blob"]) == {"screen": "COMBAT"}
+    assert store.get(event["response_blob"])["api_key"] == "[redacted]"
+
+
 def test_replay_provider_is_fixed_and_offline():
     response = {"plan_id": "p", "current_objective": "survive",
                 "long_term_goal": "finish", "priority": ["survive"],

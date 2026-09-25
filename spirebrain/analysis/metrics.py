@@ -26,7 +26,7 @@ def load_records(path: str | Path) -> list[dict]:
     records = []
     target = Path(path)
     if not target.exists():
-        return records
+        raise FileNotFoundError(target)
     for line in target.read_text(encoding="utf-8", errors="replace").splitlines():
         try:
             value = json.loads(line)
@@ -171,8 +171,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.merge:
         records = []
-        for item in args.merge:
-            records.extend(load_records(item))
+        try:
+            for item in args.merge:
+                records.extend(load_records(item))
+        except FileNotFoundError as exc:
+            print(json.dumps({"error": "input_missing", "input": str(exc)},
+                             ensure_ascii=False))
+            return 2
         source = ",".join(args.merge)
     else:
         input_path = Path(args.input)
@@ -182,6 +187,9 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         records = load_records(input_path)
         source = str(input_path)
+    if not records:
+        print(json.dumps({"error": "no_records", "source": source}, ensure_ascii=False))
+        return 2
     result = summarize(records, source=source)
     rendered = json.dumps(result, ensure_ascii=False, indent=2)
     if args.output:
