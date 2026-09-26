@@ -14,11 +14,11 @@
   "brain": {
     "backend": "openai",
     "model": "gpt-4.1-mini",
-    "timeout_ms": 6000,
-    "max_output_tokens": 900,
+    "timeout_ms": 12000,
+    "max_output_tokens": 2400,
     "max_plan_steps": 5,
     "memory_events": 20,
-    "decision_budget_ms": 6000,
+    "decision_budget_ms": 12000,
     "max_model_calls": 4,
     "fallback": "jev_rules"
   },

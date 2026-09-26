@@ -38,8 +38,57 @@ def _repair_tree(value):
     if isinstance(value, list):
         return [_repair_tree(item) for item in value]
     if isinstance(value, dict):
-        return {_repair_text(str(key)): _repair_tree(item) for key, item in value.items()}
+        repaired = {_repair_text(str(key)): _repair_tree(item) for key, item in value.items()}
+        # CommunicationMod can expose a replacement character after its
+        # original localized bytes have already been lost. Keep the stable
+        # game id useful: resolve a local display name when possible, otherwise
+        # show the id instead of propagating "文本不可用" into every panel.
+        damaged_name = _missing_display_text(repaired.get("name"))
+        damaged_label = _missing_display_text(repaired.get("label"))
+        damaged_text = _missing_display_text(repaired.get("text"))
+        if damaged_name or damaged_label or damaged_text:
+            identity = next((str(repaired[key]).strip() for key in
+                             ("id", "card_id", "relic_id", "potion_id", "monster_id",
+                              "event_id")
+                             if repaired.get(key) and repaired[key] != "文本不可用"), "")
+            if damaged_name and identity:
+                repaired["name"] = _localized_name(repaired, identity)
+            fallback = identity or _option_fallback(repaired)
+            if damaged_label:
+                repaired["label"] = fallback
+            if damaged_text:
+                repaired["text"] = fallback
+        return repaired
     return value
+
+
+def _missing_display_text(value) -> bool:
+    return isinstance(value, str) and (not value.strip() or value == "文本不可用")
+
+
+def _localized_name(item: dict, identity: str) -> str:
+    """Resolve damaged display names using the language-independent game id."""
+    try:
+        from spirebrain import gamedata
+
+        data = gamedata.get()
+        character = item.get("character")
+        for table in ("cards", "relics", "potions", "monsters", "powers"):
+            name = data.display_name(table, identity, character=character)
+            if name:
+                return str(name)
+    except Exception:  # noqa: BLE001 - display enrichment cannot break state intake
+        pass
+    return identity
+
+
+def _option_fallback(item: dict) -> str:
+    for key in ("choice_index", "index", "slot"):
+        try:
+            return f"选项 {int(item[key]) + 1}"
+        except (KeyError, TypeError, ValueError):
+            continue
+    return "未命名选项"
 
 
 @dataclass(frozen=True)

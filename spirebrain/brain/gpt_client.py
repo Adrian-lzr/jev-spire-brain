@@ -267,6 +267,9 @@ class OpenAIStrategicClient:
         )
         self.timeout_ms = max(500, int(timeout_ms))
         self.max_calls = max(1, int(max_calls))
+        # Strategic plans are short, but 900 tokens is too small for some
+        # gateways that emit JSON with long candidate/context strings. Keep a
+        # bounded response while leaving enough room for a complete object.
         self.max_output_tokens = max(128, int(max_output_tokens))
         self.opener = opener or urllib.request.urlopen
         # Compatible gateways often reject vendor-specific json_schema output;
@@ -395,18 +398,27 @@ class OpenAIStrategicClient:
         body = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": SYSTEM_PROMPT + "\nJSON Schema:\n" +
+                 json.dumps(PLAN_SCHEMA, ensure_ascii=False, separators=(",", ":"))},
                 {"role": "user", "content": user_text},
             ],
             "temperature": temperature,
             "max_tokens": self.max_output_tokens,
         }
+        # DeepSeek and several OpenAI-compatible mainland gateways support the
+        # portable JSON-object mode even when they reject OpenAI's strict
+        # json_schema extension. It prevents the truncated prose/empty-content
+        # responses observed in live runs while keeping local schema validation
+        # authoritative.
+        json_model = model_name.startswith(("deepseek", "kimi", "qwen", "glm"))
         if self.structured_output:
             body["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {"name": "strategic_plan", "strict": True,
                                  "schema": PLAN_SCHEMA},
             }
+        elif json_model:
+            body["response_format"] = {"type": "json_object"}
         return body
 
 

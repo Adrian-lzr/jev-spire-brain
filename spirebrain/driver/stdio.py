@@ -95,14 +95,14 @@ READY = "Ready"
 #    the action cap ("agent not reachable"). The ladder: two waits, a centre
 #    click, SPACE, then a loud stop — with auto-resume the moment a modeled
 #    screen returns.
-# 1000 -> 5000 (user call, 2026-09-22 evening). Two changes the same night
+# 1000 -> 5000 -> 20000 (user call, 2026-09-26). Two changes the same night
 # reshaped what the cap protects. (1) The budget is now PER RUN, not per
 # process — _reset_run_budget() fires on every menu->in_game edge, because a
 # player restarting a run in-game was spending one shared counter (the third
 # run of the 18:08 session died after ~50 commands; that is why 1000 "felt
 # small"). (2) The ladder removed the only loop that ever reached the cap, so
 # the cap is back to pure backstop duty and can be generous.
-DEFAULT_MAX_ACTIONS = 5000
+DEFAULT_MAX_ACTIONS = 20000
 DEFAULT_STALL_LIMIT = 2
 
 # Sentinel for "use the default log path". Distinct from None, because None must

@@ -203,7 +203,7 @@ def resolve_runtime_config(root: str | Path, *, cli: Mapping[str, str | None] | 
     timeout_ms = number("timeout_ms", "BRAIN_TIMEOUT_MS", brain.get("timeout_ms"),
                         6000, 500, 120000)
     max_output_tokens = number("max_output_tokens", "BRAIN_MAX_OUTPUT_TOKENS",
-                               brain.get("max_output_tokens"), 900, 128, 8192)
+                               brain.get("max_output_tokens"), 1400, 128, 8192)
     max_plan_steps = number("max_plan_steps", "BRAIN_MAX_PLAN_STEPS",
                             brain.get("max_plan_steps"), 5, 2, 5)
     memory_events = number("memory_events", "BRAIN_MEMORY_EVENTS",

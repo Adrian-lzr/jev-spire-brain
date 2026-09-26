@@ -146,6 +146,15 @@ def test_other_models_keep_low_temperature_planning_default():
     assert body["temperature"] == 0.1
 
 
+def test_deepseek_compatible_model_requests_portable_json_object():
+    client = OpenAIStrategicClient(api_key="test", model="deepseek-flash")
+    body = client._request_body({"state_id": "s1", "run_id": "r1"})
+    assert body["response_format"] == {"type": "json_object"}
+    from spirebrain.brain.gpt_client import PLAN_SCHEMA
+    schema = json.loads(body["messages"][0]["content"].split("JSON Schema:\n", 1)[1])
+    assert schema == PLAN_SCHEMA
+
+
 def test_agent_uses_gpt_preference_and_keeps_command_legal(tmp_path):
     client = MockStrategicClient(preferred=["combat:end"], objective="保留能量")
     agent = SpireBrainAgent(jev_backend="mock", brain_backend="mock",
@@ -157,6 +166,38 @@ def test_agent_uses_gpt_preference_and_keeps_command_legal(tmp_path):
     assert detail["source_type"] == "gpt_strategy"
     assert detail["strategic_goal"] == "保留能量"
     assert detail["alternative_command"] == {"command": "play", "card": 0, "target": 0}
+
+
+def test_strategic_context_is_visible_when_local_executor_picks_legal_move(tmp_path):
+    class ContextOnlyClient:
+        backend_name = "mock"
+        async_required = False
+
+        def plan(self, payload):
+            state_id = str(payload["state_id"])
+            run_id = str(payload["run_id"])
+            plan = StrategicPlan.from_dict({
+                "plan_id": "context-only", "state_id": state_id,
+                "run_id": run_id, "current_objective": "优先保留生命和能量",
+                "long_term_goal": "通关", "priority": ["survive"],
+                "preferred_candidates": [], "avoid_candidates": [],
+                "resource_constraints": {}, "next_steps": [],
+                "replan_triggers": [], "reason": "战略上下文", "uncertainty": "",
+                "expires_after": 2,
+            }, state_id=state_id, run_id=run_id)
+            return BrainResponse(plan=plan, backend="mock")
+
+    client = ContextOnlyClient()
+    agent = SpireBrainAgent(jev_backend="mock", brain_backend="mock",
+                            brain_client=client, log_dir=tmp_path)
+    command = agent.choose_action(_combat())
+    assert check_action(_combat(), command)[0]
+    detail = agent.history[-1]["detail"]
+    assert detail["brain_source"] == "gpt_strategy"
+    assert detail["strategic_goal"] == "优先保留生命和能量"
+    assert detail["selection_basis"] == "strategic_context_local_choice"
+    assert detail["source_type"] == "rule_fallback"
+    assert detail["reason"] != "战略上下文"
 
 
 def test_shop_filters_unaffordable_items_and_replans_after_gold_change(tmp_path):
@@ -402,4 +443,7 @@ def test_network_strategic_planning_is_non_blocking_and_state_bound():
         time.sleep(0.01)
     assert accepted is not None
     assert accepted.state_id == orchestrator.last_state_id
-    assert provider.calls[-1] == orchestrator.last_state_id
+    # The response was issued for the original combat snapshot.  It is still
+    # useful strategic context after harmless combat churn, while the plan is
+    # rebound to the current state and concrete candidates are revalidated.
+    assert len(provider.calls) == 1

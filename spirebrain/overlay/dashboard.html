@@ -305,8 +305,13 @@ let lastAdviceEvent = null;
 function el(tag, cls, text) {
   const e = document.createElement(tag);
   if (cls) e.className = cls;
-  if (text !== undefined) e.textContent = text;
+  if (text !== undefined) e.textContent = displayText(text);
   return e;
+}
+
+function displayText(value, fallback = "文本缺失") {
+  const text = String(value ?? "");
+  return text.replaceAll("文本不可用", fallback).replaceAll("\ufffd", fallback);
 }
 
 /* ---- local model settings ---- */
@@ -680,15 +685,15 @@ function renderAdvice(ev) {
   const meta = POINT_META[ev.point] || { name: ev.point, icon: "•" };
   document.getElementById("advicepoint").textContent = meta.icon + " " + meta.name;
   const doEl = document.getElementById("advicedo");
-  doEl.textContent = ev.label || "—";
+  doEl.textContent = displayText(ev.label || "—", "目标信息缺失");
   doEl.classList.toggle("idle", !ev.label);
   const goal = document.getElementById("advicegoal");
-  goal.textContent = ev.strategic_goal ? "战略目标：" + ev.strategic_goal : "";
+  goal.textContent = ev.strategic_goal ? "战略目标：" + displayText(ev.strategic_goal) : "";
   const why = document.getElementById("advicewhy");
   const conf = Number(ev.confidence || 0);
   const alt = document.getElementById("advicealt");
   alt.textContent = ev.alternative_label
-    ? "备用：" + ev.alternative_label + (ev.alternative_condition ? "（" + ev.alternative_condition + "）" : "")
+    ? "备用：" + displayText(ev.alternative_label, "目标信息缺失") + (ev.alternative_condition ? "（" + displayText(ev.alternative_condition) + "）" : "")
     : "";
   const candidates = document.getElementById("advicecandidates");
   candidates.innerHTML = "";
@@ -705,7 +710,7 @@ function renderAdvice(ev) {
   const sourceName = sourceNames[ev.source_type] || (conf > 0 ? "JEV 判断" : "规则判断");
   const displayNames = {local_advice: "本地快速建议", model_analysis: "模型分析中",
                         complete_advice: "完整建议", fallback: "降级建议", expired: "建议已过期"};
-  why.textContent = ev.reason || "";
+  why.textContent = displayText(ev.reason || "");
   const box = document.getElementById("advicemeta");
   box.innerHTML = "";
   box.append(el("span", "badge", sourceName));
@@ -786,7 +791,7 @@ function appendEvent(ev) {
   let node;
   if (ev.kind === "run_state") { renderState(ev); return; }
   else if (ev.kind === "decision") node = renderDecision(ev);
-  else if (ev.kind === "advice") { renderAdvice(ev); fchip.textContent = "建议 → " + ev.label; return; }
+  else if (ev.kind === "advice") { renderAdvice(ev); fchip.textContent = "建议 → " + displayText(ev.label, "目标信息缺失"); return; }
   else if (ev.kind === "outcome") node = renderOutcome(ev);
   else if (ev.kind === "run_end") node = renderRunEnd(ev);
   if (node) {

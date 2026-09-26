@@ -1,4 +1,4 @@
-﻿# Jev Spire Brain
+# Jev Spire Brain
 
 > A GPT + JEV external coach for [Slay the Spire](https://store.steampowered.com/app/646570/Slay_the_Spire/) — GPT owns the run strategy, JEV ranks local choices, and deterministic code handles legality and execution.
 
@@ -130,7 +130,7 @@ never break a run (proven by
 CommunicationMod+JEV project), plus a fourth of our own, all "stop spending, keep
 the game alive": a **stall guard** that latches auto-decisions off when the
 identical game state returns after our command (it did not take effect —
-retrying is how an agent burns money in a loop); an **action limit** (default 5000
+retrying is how an agent burns money in a loop); an **action limit** (default 20000
 commands, **per run** — refilled on every menu→in-game edge,
 `JEVBRAIN_MAX_ACTIONS` to change, <=0 unlimited; unlimited by default in advise
 mode, where every command is a poll and the count is a clock, not a budget) that
@@ -323,6 +323,8 @@ python tests\test_stdio.py               # prove the pipe logic offline
 python -m spirebrain.analysis.replay --input tests/fixtures/replay
 python -m spirebrain.analysis.metrics --input tests/fixtures/metrics/decision_trace.jsonl
 python tools/verify_offline.py           # tests + compile + contracts + metrics + replay
+python tools/auto_smoke.py                # bounded launcher + dashboard smoke (mock, no game/API)
+python tools/real_game_smoke.py --allow-real-game --duration 30  # opt-in game smoke; backs up/restores saves
 ```
 
 指标输入缺失时命令会以非零状态退出；合成 fixture 只用于验证管道和字段契约，

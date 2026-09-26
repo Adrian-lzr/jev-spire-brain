@@ -14,7 +14,7 @@ from spirebrain.brain.memory import (
     UNOBSERVED_RECORD,
 )
 from spirebrain.brain.orchestrator import StrategicOrchestrator
-from spirebrain.brain.protocol import BrainResponse, StrategicPlan
+from spirebrain.brain.protocol import ActionCandidate, BrainResponse, StrategicPlan
 from spirebrain.brain.action_broker import build_action_candidates
 
 
@@ -189,6 +189,178 @@ def test_latest_state_wins_when_a_disappears_and_reappears():
     # The first A response is stale; only the latest A generation can publish.
     assert accepted.plan_id == "p2"
     assert orchestrator.memory.plan_id == "p2"
+
+
+def test_inflight_combat_request_is_not_replaced_by_poll_noise():
+    import threading
+    import time
+
+    started = threading.Event()
+    release = threading.Event()
+
+    class Provider:
+        backend_name = "openai"
+        async_required = True
+        calls = 0
+
+        def plan(self, payload):
+            type(self).calls += 1
+            started.set()
+            release.wait(1)
+            plan = StrategicPlan.from_dict({
+                "plan_id": "combat-plan", "state_id": payload["state_id"],
+                "run_id": payload["run_id"], "current_objective": "先保证生存",
+                "long_term_goal": "通关", "priority": ["survive"],
+                "preferred_candidates": [], "avoid_candidates": [],
+                "resource_constraints": {}, "next_steps": [],
+                "replan_triggers": [], "reason": "combat", "uncertainty": "",
+                "expires_after": 2,
+            }, state_id=payload["state_id"], run_id=payload["run_id"])
+            return BrainResponse(plan=plan, backend="openai")
+
+    provider = Provider()
+    orchestrator = StrategicOrchestrator(client=provider, backend="openai")
+    first = _state("run-a")
+    first["available_commands"] = ["wait", "state"]
+    second = dict(first, current_hp=49, animation_frame=2, poll_uuid="noise")
+    orchestrator.plan_for(first, candidates=build_action_candidates(first))
+    assert started.wait(1)
+    orchestrator.plan_for(second, candidates=build_action_candidates(second))
+    assert provider.calls == 1
+    release.set()
+    deadline = time.monotonic() + 1
+    accepted = None
+    while time.monotonic() < deadline:
+        accepted, _ = orchestrator.plan_for(second, candidates=build_action_candidates(second))
+        if accepted is not None:
+            break
+        time.sleep(0.005)
+    assert accepted is not None
+    assert accepted.current_objective == "先保证生存"
+
+
+def test_late_combat_plan_keeps_strategy_but_rebinds_changed_candidates():
+    """A successful slow strategic response must not disappear on hand churn."""
+    import threading
+    import time
+
+    started = threading.Event()
+    release = threading.Event()
+
+    class Provider:
+        backend_name = "deepseek"
+        async_required = True
+
+        def plan(self, payload):
+            started.set()
+            release.wait(1)
+            preferred = payload["candidates"][0]["candidate_id"]
+            return BrainResponse(plan=StrategicPlan.from_dict({
+                "plan_id": "slow-plan", "state_id": payload["state_id"],
+                "run_id": payload["run_id"], "current_objective": "保留战略目标",
+                "long_term_goal": "通关", "priority": ["survive"],
+                "preferred_candidates": [preferred], "avoid_candidates": [],
+                "resource_constraints": {}, "next_steps": [],
+                "replan_triggers": [], "reason": "慢响应", "uncertainty": "",
+                "expires_after": 2,
+            }, state_id=payload["state_id"], run_id=payload["run_id"]), backend="deepseek")
+
+    def candidate(label):
+        return ActionCandidate(candidate_id="combat:play:0:0", kind="combat",
+                               label=label, command={"command": "play", "card": 0,
+                               "target": 0})
+
+    provider = Provider()
+    orchestrator = StrategicOrchestrator(client=provider, backend="deepseek")
+    first = _state()
+    first["hand"] = [{"id": "Strike_R", "name": "Strike", "cost": 1}]
+    second = dict(first, current_hp=47, hand=[{"id": "Defend_R", "name": "Defend", "cost": 1}])
+    orchestrator.plan_for(first, candidates=[candidate("Strike")])
+    assert started.wait(1)
+    orchestrator.plan_for(second, candidates=[candidate("Defend")])
+    release.set()
+
+    accepted = None
+    deadline = time.monotonic() + 1
+    while time.monotonic() < deadline:
+        accepted, _ = orchestrator.plan_for(second, candidates=[candidate("Defend")])
+        if accepted is not None:
+            break
+        time.sleep(0.005)
+    assert accepted is not None
+    assert accepted.current_objective == "保留战略目标"
+    # The old positional candidate has a different signature and is removed;
+    # it cannot silently select Defend just because the ID stayed the same.
+    assert accepted.preferred_candidates == []
+
+
+def test_legacy_plan_without_candidate_signatures_keeps_goal_not_slot_ids():
+    state = _state()
+    candidates = [ActionCandidate(
+        candidate_id="combat:play:0:0", kind="combat", label="新牌",
+        command={"command": "play", "card": 0, "target": 0},
+    )]
+    plan = StrategicPlan(
+        plan_id="legacy", state_id="old", run_id="run-a",
+        current_objective="维持战略目标",
+        preferred_candidates=["combat:play:0:0"],
+        avoid_candidates=["combat:play:0:0"],
+    )
+    rebound = StrategicOrchestrator._rebind_plan(
+        plan, game=state, candidates=candidates, state_id="new",
+    )
+    assert rebound.current_objective == "维持战略目标"
+    assert rebound.preferred_candidates == []
+    assert rebound.avoid_candidates == []
+
+
+def test_reward_transition_requires_a_new_scene_plan():
+    import threading
+    import time
+
+    started = threading.Event()
+    release = threading.Event()
+
+    class Provider:
+        backend_name = "deepseek"
+        async_required = True
+        calls = []
+
+        def plan(self, payload):
+            self.calls.append(payload["state_id"])
+            started.set()
+            release.wait(1)
+            return BrainResponse(plan=StrategicPlan.from_dict({
+                "plan_id": "cross-scene", "state_id": payload["state_id"],
+                "run_id": payload["run_id"], "current_objective": "优先保留高价值奖励",
+                "long_term_goal": "通关", "priority": ["deck"],
+                "preferred_candidates": [], "avoid_candidates": [],
+                "resource_constraints": {}, "next_steps": [],
+                "replan_triggers": [], "reason": "战略上下文", "uncertainty": "",
+                "expires_after": 2,
+            }, state_id=payload["state_id"], run_id=payload["run_id"]), backend="deepseek")
+
+    provider = Provider()
+    orchestrator = StrategicOrchestrator(client=provider, backend="deepseek")
+    combat = _state()
+    reward = dict(combat, screen_type="CARD_REWARD", floor=3,
+                  screen_state={"cards": [{"id": "PommelStrike"}]})
+    orchestrator.plan_for(combat, candidates=build_action_candidates(combat))
+    assert started.wait(1)
+    orchestrator.plan_for(reward, candidates=build_action_candidates(reward))
+    release.set()
+    deadline = time.monotonic() + 1
+    accepted = None
+    while time.monotonic() < deadline:
+        accepted, _ = orchestrator.plan_for(reward, candidates=build_action_candidates(reward))
+        if accepted is not None:
+            break
+        time.sleep(0.005)
+    assert accepted is not None
+    assert accepted.current_objective == "优先保留高价值奖励"
+    assert accepted.state_id == orchestrator.last_state_id
+    assert len(provider.calls) == 2
+    assert provider.calls[-1] == accepted.state_id
 
 
 def test_old_result_cannot_commit_after_same_run_id_is_reset():

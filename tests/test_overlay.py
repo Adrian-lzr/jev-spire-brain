@@ -174,6 +174,8 @@ def test_server_serves_page_health_and_publish():
         with urllib.request.urlopen(base + "/", timeout=5) as r:
             html = r.read().decode("utf-8")
             assert "JEV" in html and "EventSource" in html
+            assert "function displayText" in html
+            assert 'replaceAll("文本不可用", fallback)' in html
 
         # Cross-process publishing lands in subscribers...
         sink = Sink()

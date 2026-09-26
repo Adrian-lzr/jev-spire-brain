@@ -143,8 +143,8 @@ def _clean_env(monkeypatch_target: str = "JEVBRAIN_MAX_ACTIONS") -> dict:
     return saved
 
 
-def test_default_action_limit_is_5000():
-    """5000, user call 2026-09-22 evening. The budget is now per run (reset on
+def test_default_action_limit_is_20000():
+    """20000, user call 2026-09-26. The budget is per run (reset on
     every menu->in_game edge) and the unmodeled-screen ladder removed the only
     loop that ever reached the cap, so the cap is backstop duty and can be
     generous. History of this number: jespire's 200 killed a healthy run
@@ -154,7 +154,7 @@ def test_default_action_limit_is_5000():
     try:
         with tempfile.TemporaryDirectory() as tmp:
             transport = _play(_StubAgent(), log_path=None)
-            assert transport.max_commands == 5000
+            assert transport.max_commands == 20000
     finally:
         if saved is not None:
             os.environ["JEVBRAIN_MAX_ACTIONS"] = saved

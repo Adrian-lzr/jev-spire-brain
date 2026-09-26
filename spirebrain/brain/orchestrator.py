@@ -69,6 +69,10 @@ class StrategicOrchestrator:
         self._plan_screen = ""
         self._plan_act = 0
         self._plan_floor = 0
+        # A strategic request is scoped to a scene/act/floor. Combat hand and
+        # HP churn belongs to the tactical layer and must not supersede an
+        # in-flight provider request on every poll.
+        self._pending_scope: tuple[str, int, int] | None = None
 
     @property
     def backend_name(self) -> str:
@@ -101,6 +105,7 @@ class StrategicOrchestrator:
             self._plan_screen = ""
             self._plan_act = 0
             self._plan_floor = 0
+            self._pending_scope = None
 
     def request_replan(self, reason: str = "player_deviation") -> None:
         """Invalidate the cached plan without discarding run memory."""
@@ -113,21 +118,71 @@ class StrategicOrchestrator:
             self._pending_key = None
             self._pending_state_id = ""
             self._pending_run_id = ""
+            self._pending_scope = None
 
-    def _drain_plan_results(self) -> None:
-        """Apply only the latest state-bound result on the game thread."""
+    @staticmethod
+    def _rebind_plan(plan: StrategicPlan, *, game: dict, candidates,
+                     state_id: str) -> StrategicPlan:
+        """Move strategic context to the current state without moving actions.
+
+        A network response may legitimately arrive after combat HP/hand/intent
+        changed.  The objective and resource constraints remain useful within
+        the same strategic scope, but positional candidate IDs do not.  Keep
+        only preferences whose generation-time signatures still match, then
+        bind the surviving candidates to the current snapshot.
+        """
+        rebound = copy.deepcopy(plan)
+        if rebound.bindings_bound:
+            current = {c.candidate_id: c.candidate_signature
+                       for c in candidates if c.legal}
+            rebound.preferred_candidates = [
+                candidate_id for candidate_id in rebound.preferred_candidates
+                if rebound.candidate_bindings.get(candidate_id) == current.get(candidate_id)
+            ]
+            rebound.avoid_candidates = [
+                candidate_id for candidate_id in rebound.avoid_candidates
+                if rebound.avoid_bindings.get(candidate_id) == current.get(candidate_id)
+            ]
+        else:
+            # Legacy/in-memory plans without provenance may still carry
+            # positional IDs. Preserve the strategy, never those references.
+            rebound.preferred_candidates = []
+            rebound.avoid_candidates = []
+        rebound.state_id = state_id
+        rebound.bind_candidates(list(candidates))
+        return rebound
+
+    def _drain_plan_results(self, game: dict | None = None,
+                            candidates=None, state_id: str | None = None) -> None:
+        """Apply a current-run result, rebinding actions after combat churn.
+
+        Exact state matching is still required for a concrete action.  The
+        strategic objective may cross ordinary combat polling changes when the
+        run, generation and scene/act/floor scope are unchanged.
+        """
         while True:
             try:
                 result = self._plan_results.get_nowait()
             except queue.Empty:
                 return
-            (state_id, run_id, run_epoch, generation, trigger_key, game, previous,
+            (result_state_id, result_run_id, result_run_epoch, generation, trigger_key,
+             result_game, previous,
              response) = result
+            current_game = game or {}
+            current_state_id = state_id or stable_state_id(current_game)
+            current_scope = self._strategic_scope(current_game) if game is not None else None
             with self._plan_lock:
-                current = self._pending_key == (state_id, generation, run_id, run_epoch)
+                exact = self._pending_key == (result_state_id, generation,
+                                              result_run_id, result_run_epoch)
+                same_scope = (current_scope is None or
+                              self._pending_scope == current_scope)
+            # Combat polling changes the state ID frequently, but the
+            # scene/act/floor scope still makes the strategic context valid.
+            # A scene transition does not: it must trigger a fresh request.
+            current = exact or same_scope
             if (not current or generation != self.generation
-                    or run_id != self.memory.run_id
-                    or run_epoch != self.memory.run_epoch):
+                    or result_run_id != self.memory.run_id
+                    or result_run_epoch != self.memory.run_epoch):
                 # The player already changed screens/runs.  A late strategic
                 # answer must never overwrite the current recommendation.
                 continue
@@ -135,24 +190,33 @@ class StrategicOrchestrator:
                 self._pending_key = None
                 self._pending_state_id = ""
                 self._pending_run_id = ""
+                self._pending_scope = None
             self.last_response = response
-            self.last_state_id = state_id
-            self.last_trigger_key = trigger_key
-            self.last_screen = _screen(game)
-            self.last_hp_snapshot = int(game.get("current_hp", game.get("hp", 0)) or 0)
-            self.last_gold_snapshot = int(game.get("gold", 0) or 0)
-            self.last_deck_snapshot = len(game.get("deck") or [])
-            self.last_inventory_snapshot = tuple(str(x) for x in (game.get("relics") or [])) + tuple(
-                str(x) for x in (game.get("potions") or []))
+            live_game = current_game if game is not None else result_game
+            live_state_id = current_state_id if game is not None else result_state_id
+            self.last_state_id = live_state_id
+            self.last_trigger_key = self._trigger_key(live_game) if game is not None else trigger_key
+            self.last_screen = _screen(live_game)
+            self.last_hp_snapshot = int(live_game.get("current_hp", live_game.get("hp", 0)) or 0)
+            self.last_gold_snapshot = int(live_game.get("gold", 0) or 0)
+            self.last_deck_snapshot = len(live_game.get("deck") or [])
+            self.last_inventory_snapshot = tuple(str(x) for x in (live_game.get("relics") or [])) + tuple(
+                str(x) for x in (live_game.get("potions") or []))
             self.plan_uses = 0
             if response.plan is not None:
-                self.current_plan = response.plan
+                if game is not None and candidates is not None:
+                    self.current_plan = self._rebind_plan(
+                        response.plan, game=live_game, candidates=candidates,
+                        state_id=live_state_id,
+                    )
+                else:
+                    self.current_plan = response.plan
                 self.plan_valid = True
-                self._plan_screen = _screen(game)
-                self._plan_act = int(game.get("act", 0) or 0)
-                self._plan_floor = int(game.get("floor", game.get("floor_num", 0)) or 0)
-                self.memory.set_plan(response.plan)
-            elif previous is not None and self._can_reuse_plan(previous, game):
+                self._plan_screen = _screen(live_game)
+                self._plan_act = int(live_game.get("act", 0) or 0)
+                self._plan_floor = int(live_game.get("floor", live_game.get("floor_num", 0)) or 0)
+                self.memory.set_plan(self.current_plan)
+            elif previous is not None and self._can_reuse_plan(previous, live_game):
                 # Keep a short cached plan through a transient timeout/invalid
                 # JSON response.  Candidate reconciliation still filters any
                 # item that disappeared from the live state.
@@ -205,6 +269,7 @@ class StrategicOrchestrator:
             self._pending_key = key
             self._pending_state_id = state_id
             self._pending_run_id = run_id
+            self._pending_scope = self._strategic_scope(game)
             self._queued_plan = job
             self.last_response = BrainResponse(
                 backend=self.backend_name, error="战略规划进行中", fallback=True)
@@ -270,6 +335,14 @@ class StrategicOrchestrator:
             state_key = repr(state)
         return f"{screen}:{act}:{floor}:{gold}:{hp}:{deck}:{state_key}"
 
+    @staticmethod
+    def _strategic_scope(game: dict) -> tuple[str, int, int]:
+        return (
+            _screen(game),
+            int(game.get("act", 0) or 0),
+            int(game.get("floor", game.get("floor_num", 0)) or 0),
+        )
+
     def _needs_replan(self, game: dict, trigger: str | None = None) -> bool:
         if self.current_plan is None:
             return True
@@ -312,7 +385,7 @@ class StrategicOrchestrator:
         candidates = list(candidates if candidates is not None else build_action_candidates(game))
         state_id = stable_state_id(game)
         self.memory.observe(game, state_id=state_id)
-        self._drain_plan_results()
+        self._drain_plan_results(game, candidates, state_id)
         if not self._needs_replan(game, trigger):
             return self._usable_plan(game), self.last_response
         actual_trigger = trigger or ("screen_change" if _screen(game) != self.last_screen else "state")
@@ -321,9 +394,12 @@ class StrategicOrchestrator:
         trigger_key = self._trigger_key(game)
         if self.async_planning:
             with self._plan_lock:
+                # Keep one request for the current strategic scope. In combat,
+                # each hand/HP animation is a tactical update; replacing the
+                # request makes a valid result almost impossible to publish.
                 same_request_pending = (
-                    self._pending_state_id == state_id
-                    and self._pending_run_id == self.memory.run_id
+                    self._pending_run_id == self.memory.run_id
+                    and self._pending_scope == self._strategic_scope(game)
                 )
             if same_request_pending:
                 return None, self.last_response

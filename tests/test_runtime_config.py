@@ -139,6 +139,15 @@ def test_runtime_config_supports_mainland_openai_compatible_presets(tmp_path: Pa
     assert config.openai_endpoint.endswith("/v1/chat/completions")
 
 
+def test_project_strategy_default_leaves_room_for_complete_json_plan():
+    """The tracked project config must not truncate compatible-model plans."""
+    root = Path(__file__).resolve().parents[1]
+    config = resolve_runtime_config(root, environ={}, dotenv={})
+    assert config.max_output_tokens >= 2400
+    assert config.timeout_ms >= 12000
+    assert config.decision_budget_ms >= 12000
+
+
 def test_strategy_endpoint_and_budget_are_effective(tmp_path: Path):
     config = resolve_runtime_config(
         tmp_path,
