@@ -385,13 +385,20 @@ class OpenAIStrategicClient:
         provider adapter deliberately has one protocol and one parser.
         """
         user_text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        # Moonshot's Kimi K3 endpoint currently only accepts temperature=1.
+        # Sending the normal low-temperature planning value (0.1) makes the
+        # request fail with HTTP 400 before the model can return a plan. Keep
+        # the conservative default for other OpenAI-compatible models and
+        # constrain only the K3 family to the provider-supported value.
+        model_name = str(self.model or "").strip().lower()
+        temperature = 1 if model_name.startswith("kimi-k3") else 0.1
         body = {
             "model": self.model,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_text},
             ],
-            "temperature": 0.1,
+            "temperature": temperature,
             "max_tokens": self.max_output_tokens,
         }
         if self.structured_output:

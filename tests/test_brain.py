@@ -134,6 +134,18 @@ def test_openai_response_is_parsed_without_exposing_commands():
     assert requests and "Authorization" in requests[0][0].headers
 
 
+def test_kimi_k3_uses_provider_supported_temperature():
+    client = OpenAIStrategicClient(api_key="test", model="kimi-k3")
+    body = client._request_body({"state_id": "s1", "run_id": "r1"})
+    assert body["temperature"] == 1
+
+
+def test_other_models_keep_low_temperature_planning_default():
+    client = OpenAIStrategicClient(api_key="test", model="gpt-test")
+    body = client._request_body({"state_id": "s1", "run_id": "r1"})
+    assert body["temperature"] == 0.1
+
+
 def test_agent_uses_gpt_preference_and_keeps_command_legal(tmp_path):
     client = MockStrategicClient(preferred=["combat:end"], objective="保留能量")
     agent = SpireBrainAgent(jev_backend="mock", brain_backend="mock",
