@@ -318,7 +318,7 @@ async function readConfig() {
   document.getElementById("openaiModel").value = publicConfig.brain_model || publicConfig.openai_model || "gpt-4.1-mini";
   document.getElementById("openaiEndpoint").value = publicConfig.brain_endpoint || publicConfig.openai_endpoint || "https://api.openai.com/v1/responses";
   document.getElementById("jevBackend").value = publicConfig.jev_backend || "mock";
-  document.getElementById("openaiKeyState").textContent = publicConfig.secrets.openai_api_key ? "· 本机已配置" : "· 未配置";
+  document.getElementById("openaiKeyState").textContent = (publicConfig.secrets.brain_api_key || publicConfig.secrets.openai_api_key) ? "· 本机已配置" : "· 未配置";
   document.getElementById("openrouterKeyState").textContent = publicConfig.secrets.openrouter_api_key ? "· 本机已配置" : "· 未配置";
   document.getElementById("typesafeKeyState").textContent = publicConfig.secrets.typesafe_api_key ? "· 本机已配置" : "· 未配置";
   document.getElementById("cloudflareAccountState").textContent = publicConfig.secrets.cloudflare_account_id ? "· 本机已配置" : "· 未配置";
@@ -332,6 +332,10 @@ async function readConfig() {
   document.getElementById("effectiveConfig").textContent = `已保存：JEV ${savedJev}，战略大脑 ${savedBrain}；实际生效：JEV ${effective.jev_backend || publicConfig.jev_backend}（${sourceName(sources.jev_backend)}）；战略大脑 ${effective.brain_backend || publicConfig.brain_backend}（${sourceName(sources.brain_backend)}）。配置指纹 ${effective.config_id || "未知"}。${effective.restart_required ? "保存后需重启 agent 才生效。" : ""}`;
 }
 
+async function ensureConfigLoaded() {
+  if (!publicConfig) await readConfig();
+}
+
 function configValues() {
   const data = Object.fromEntries(new FormData(configForm).entries());
   for (const key of ["clear_openai", "clear_openrouter", "clear_typesafe", "clear_cloudflare_account", "clear_cloudflare_token"]) delete data[key];
@@ -341,6 +345,11 @@ function configValues() {
   if (configForm.elements.clear_typesafe.checked) data.clear_secrets.push("typesafe_api_key");
   if (configForm.elements.clear_cloudflare_account.checked) data.clear_secrets.push("cloudflare_account_id");
   if (configForm.elements.clear_cloudflare_token.checked) data.clear_secrets.push("cloudflare_api_token");
+  // Keep the canonical runtime names in sync with the legacy form names.
+  // Without this, editing the model in the UI only changed OPENAI_MODEL while
+  // BRAIN_MODEL continued to win at runtime.
+  if (data.openai_model !== undefined) data.brain_model = data.openai_model;
+  if (data.openai_endpoint !== undefined) data.brain_endpoint = data.openai_endpoint;
   return data;
 }
 
@@ -374,11 +383,14 @@ document.getElementById("applySetup").addEventListener("click", async event => {
   button.disabled = true;
   result.textContent = "正在应用…";
   try {
+    await ensureConfigLoaded();
     const values = configValues();
     const saved = await postConfig("/api/config/save", values);
     const setup = await postConfig("/api/launcher/setup", {
-      jev_backend: values.jev_backend || "mock",
-      brain_backend: values.brain_backend || "openai",
+      jev_backend: values.jev_backend,
+      brain_backend: values.brain_backend,
+      brain_model: values.brain_model,
+      brain_endpoint: values.brain_endpoint,
       mode: "advise",
     });
     result.textContent = setup.message || "已应用，请启动游戏";
@@ -389,7 +401,7 @@ document.getElementById("applySetup").addEventListener("click", async event => {
   } finally { button.disabled = false; }
 });
 const brainPresets = {
-  deepseek: ["deepseek-chat", "https://api.deepseek.com/v1/chat/completions"],
+  deepseek: ["deepseek-flash", "https://api.deepseek.com/v1/chat/completions"],
   qwen: ["qwen-plus", "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"],
   zhipu: ["glm-4.5", "https://open.bigmodel.cn/api/paas/v4/chat/completions"],
   moonshot: ["kimi-k2-0711-preview", "https://api.moonshot.cn/v1/chat/completions"],

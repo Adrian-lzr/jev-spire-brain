@@ -90,6 +90,15 @@ def save_config(path: Path, data: dict) -> dict:
     """Update managed dotenv entries atomically while preserving other lines."""
     if not isinstance(data, dict):
         raise ValueError("配置格式无效")
+    # The dashboard historically used the legacy ``openai_*`` field names,
+    # while the live launcher resolves the canonical ``brain_*`` aliases first.
+    # Normalize the legacy form before writing so saving the UI cannot leave a
+    # stale model/endpoint in BRAIN_MODEL/BRAIN_ENDPOINT.
+    data = dict(data)
+    if "brain_model" not in data and "openai_model" in data:
+        data["brain_model"] = data["openai_model"]
+    if "brain_endpoint" not in data and "openai_endpoint" in data:
+        data["brain_endpoint"] = data["openai_endpoint"]
     values: dict[str, str] = {}
     for field, env_name in CONFIG_KEYS.items():
         if field in data:

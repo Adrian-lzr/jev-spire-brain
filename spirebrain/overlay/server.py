@@ -330,8 +330,29 @@ def _make_handler(feed: DecisionFeed, page_path: Path, env_path: Path):
                     return
                 if path == "/api/launcher/setup":
                     from spirebrain.install_mod_config import default_command, main as install_main
-                    backend = str(body.get("jev_backend") or "mock")
-                    brain_backend = str(body.get("brain_backend") or "openai")
+                    # Never let an omitted form value silently downgrade a
+                    # configured live provider to mock/openai.  The dashboard
+                    # may call this endpoint after saving only part of the
+                    # form, so resolve missing fields from the saved dotenv
+                    # snapshot and pass the complete provider configuration to
+                    # CommunicationMod.
+                    from spirebrain.runtime_config import read_dotenv, resolve_runtime_config
+                    saved_values = read_dotenv(env_path)
+                    saved_runtime = resolve_runtime_config(
+                        env_path.parent, environ={}, dotenv=saved_values)
+                    backend = str(body.get("jev_backend") or saved_runtime.jev_backend)
+                    brain_backend = str(body.get("brain_backend") or saved_runtime.brain_backend)
+                    brain_model = str(
+                        body.get("brain_model") or body.get("openai_model")
+                        or saved_runtime.openai_model
+                    )
+                    brain_endpoint = str(
+                        body.get("brain_endpoint") or body.get("openai_endpoint")
+                        or saved_runtime.openai_endpoint
+                    )
+                    jev_endpoint = str(
+                        body.get("jev_endpoint") or saved_runtime.jev_endpoint
+                    )
                     mode = str(body.get("mode") or "advise")
                     if backend not in {"mock", "openrouter", "official", "llm", "cloudflare"}:
                         raise ValueError("JEV 后端无效")
@@ -342,6 +363,9 @@ def _make_handler(feed: DecisionFeed, page_path: Path, env_path: Path):
                     command = default_command(
                         backend, mode=mode, auto_start=mode == "play",
                         brain_backend=brain_backend,
+                        brain_model=brain_model,
+                        brain_endpoint=brain_endpoint,
+                        jev_endpoint=jev_endpoint,
                         dashboard_url=f"http://127.0.0.1:{self.server.server_port}/publish",
                         open_dashboard=True,
                     )
