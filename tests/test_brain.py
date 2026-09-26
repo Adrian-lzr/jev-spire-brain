@@ -134,6 +134,27 @@ def test_openai_response_is_parsed_without_exposing_commands():
     assert requests and "Authorization" in requests[0][0].headers
 
 
+def test_kimi_k3_uses_provider_supported_temperature():
+    client = OpenAIStrategicClient(api_key="test", model="kimi-k3")
+    body = client._request_body({"state_id": "s1", "run_id": "r1"})
+    assert body["temperature"] == 1
+
+
+def test_other_models_keep_low_temperature_planning_default():
+    client = OpenAIStrategicClient(api_key="test", model="gpt-test")
+    body = client._request_body({"state_id": "s1", "run_id": "r1"})
+    assert body["temperature"] == 0.1
+
+
+def test_deepseek_compatible_model_requests_portable_json_object():
+    client = OpenAIStrategicClient(api_key="test", model="deepseek-flash")
+    body = client._request_body({"state_id": "s1", "run_id": "r1"})
+    assert body["response_format"] == {"type": "json_object"}
+    from spirebrain.brain.gpt_client import PLAN_SCHEMA
+    schema = json.loads(body["messages"][0]["content"].split("JSON Schema:\n", 1)[1])
+    assert schema == PLAN_SCHEMA
+
+
 def test_agent_uses_gpt_preference_and_keeps_command_legal(tmp_path):
     client = MockStrategicClient(preferred=["combat:end"], objective="保留能量")
     agent = SpireBrainAgent(jev_backend="mock", brain_backend="mock",
@@ -145,6 +166,38 @@ def test_agent_uses_gpt_preference_and_keeps_command_legal(tmp_path):
     assert detail["source_type"] == "gpt_strategy"
     assert detail["strategic_goal"] == "保留能量"
     assert detail["alternative_command"] == {"command": "play", "card": 0, "target": 0}
+
+
+def test_strategic_context_is_visible_when_local_executor_picks_legal_move(tmp_path):
+    class ContextOnlyClient:
+        backend_name = "mock"
+        async_required = False
+
+        def plan(self, payload):
+            state_id = str(payload["state_id"])
+            run_id = str(payload["run_id"])
+            plan = StrategicPlan.from_dict({
+                "plan_id": "context-only", "state_id": state_id,
+                "run_id": run_id, "current_objective": "优先保留生命和能量",
+                "long_term_goal": "通关", "priority": ["survive"],
+                "preferred_candidates": [], "avoid_candidates": [],
+                "resource_constraints": {}, "next_steps": [],
+                "replan_triggers": [], "reason": "战略上下文", "uncertainty": "",
+                "expires_after": 2,
+            }, state_id=state_id, run_id=run_id)
+            return BrainResponse(plan=plan, backend="mock")
+
+    client = ContextOnlyClient()
+    agent = SpireBrainAgent(jev_backend="mock", brain_backend="mock",
+                            brain_client=client, log_dir=tmp_path)
+    command = agent.choose_action(_combat())
+    assert check_action(_combat(), command)[0]
+    detail = agent.history[-1]["detail"]
+    assert detail["brain_source"] == "gpt_strategy"
+    assert detail["strategic_goal"] == "优先保留生命和能量"
+    assert detail["selection_basis"] == "strategic_context_local_choice"
+    assert detail["source_type"] == "rule_fallback"
+    assert detail["reason"] != "战略上下文"
 
 
 def test_shop_filters_unaffordable_items_and_replans_after_gold_change(tmp_path):
@@ -179,6 +232,36 @@ def test_openai_compatible_endpoint_uses_chat_completions_payload():
     assert body["messages"][0]["role"] == "system"
     assert "response_format" not in body
     assert "input" not in body
+
+
+def test_strategic_gateway_never_builds_responses_payload():
+    client = OpenAIStrategicClient(api_key="test", endpoint="https://gateway.test/v1")
+    body = client._request_body({"state_id": "s", "run_id": "r"})
+    assert "messages" in body
+    assert "input" not in body
+    assert "text" not in body
+
+
+def test_kimi_style_unicode_json_response_is_accepted():
+    import json
+    base = {"plan_id": "p", "state_id": "s", "run_id": "r",
+            "current_objective": "防御：中文", "long_term_goal": "生存",
+            "priority": [], "preferred_candidates": [], "avoid_candidates": [],
+            "resource_constraints": {}, "next_steps": [], "replan_triggers": [],
+            "reason": "中文：理由", "uncertainty": "", "expires_after": 1}
+    payload = {"choices": [{"message": {"content": json.dumps(base, ensure_ascii=False)}}]}
+
+    class Response:
+        def read(self): return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+
+    result = OpenAIStrategicClient(
+        api_key="test", model="kimi-k3", endpoint="https://kimi.test/v1/chat/completions",
+        opener=lambda request, timeout: Response(),
+    ).plan({"state_id": "s", "run_id": "r"})
+    assert result.fallback is False
+    assert result.plan.current_objective == "防御：中文"
 
 
 def test_openai_compatible_endpoint_can_opt_into_structured_output():
@@ -360,4 +443,7 @@ def test_network_strategic_planning_is_non_blocking_and_state_bound():
         time.sleep(0.01)
     assert accepted is not None
     assert accepted.state_id == orchestrator.last_state_id
-    assert provider.calls[-1] == orchestrator.last_state_id
+    # The response was issued for the original combat snapshot.  It is still
+    # useful strategic context after harmless combat churn, while the plan is
+    # rebound to the current state and concrete candidates are revalidated.
+    assert len(provider.calls) == 1

@@ -59,7 +59,10 @@ from spirebrain.brain.protocol import (
 from spirebrain.brain.planner import stable_state_id
 from spirebrain.guide.rules import GuideAwareClient, GuideBook, GuideResult
 from spirebrain.overlay.feed import DecisionFeed, decision_event, run_state_event
-from spirebrain.tactical.combat_greedy import Card, CombatState, play_order, recommend_action
+from spirebrain.tactical.combat_greedy import (
+    ActionSuggestion, Card, CombatState, play_order, recommend_action,
+)
+from spirebrain.tactical.combat_engine import CombatTacticalEngine
 from spirebrain.tactical.hp_budget import HPBudget
 from spirebrain.driver.legality import check_action
 from spirebrain.runtime_config import resolve_runtime_config
@@ -145,15 +148,21 @@ class SpireBrainAgent:
                  acceptance: str | None = None,
                  feed: DecisionFeed | None = None,
                  brain_backend: str | None = None,
+                 brain_model: str | None = None, brain_endpoint: str | None = None,
+                 jev_endpoint: str | None = None,
                  brain_client=None, async_planning: bool | None = None) -> None:
         self._constructor = {"jev_backend": jev_backend, "strategy_path": strategy_path,
                               "log_dir": log_dir, "acceptance": acceptance,
                               "brain_backend": brain_backend, "brain_client": brain_client,
+                              "brain_model": brain_model, "brain_endpoint": brain_endpoint,
+                              "jev_endpoint": jev_endpoint,
                               "async_planning": async_planning}
         strategy_file = Path(strategy_path) if strategy_path else ROOT / "config" / "strategy.json"
         self.strategy = json.loads(strategy_file.read_text(encoding="utf-8"))
         self.runtime_config = resolve_runtime_config(
-            ROOT, cli={"backend": jev_backend, "brain_backend": brain_backend},
+            ROOT, cli={"backend": jev_backend, "brain_backend": brain_backend,
+                       "brain_model": brain_model, "brain_endpoint": brain_endpoint,
+                       "jev_endpoint": jev_endpoint},
             strategy=self.strategy)
         jev_backend = self.runtime_config.jev_backend
         brain_backend = self.runtime_config.brain_backend
@@ -167,7 +176,8 @@ class SpireBrainAgent:
         jev_kwargs = {}
         if jev_backend == "openrouter":
             jev_kwargs.update(total_budget_ms=self.runtime_config.jev_budget_ms,
-                              max_retries=self.runtime_config.jev_max_retries)
+                              max_retries=self.runtime_config.jev_max_retries,
+                              endpoint=self.runtime_config.jev_endpoint)
         elif jev_backend == "official":
             jev_kwargs.update(total_budget_ms=self.runtime_config.jev_budget_ms,
                               max_retries=self.runtime_config.jev_max_retries)
@@ -245,6 +255,11 @@ class SpireBrainAgent:
         self._last_observed_terminal = False
         self._advice_revisions: dict[str, int] = {}
         self._last_final_decision: FinalDecision | None = None
+        self.combat_engine = CombatTacticalEngine(
+            depth=int(brain_cfg.get("combat_search_depth", 3) or 3),
+            node_limit=int(brain_cfg.get("combat_search_nodes", 64) or 64),
+            time_limit_ms=float(brain_cfg.get("combat_search_time_ms", 8.0) or 8.0),
+        )
         # Phase 1.5, the interaction layer: an optional live feed of everything
         # the brain is thinking. None (the default) changes nothing — the feed
         # is an observability side-channel, never a dependency.
@@ -322,14 +337,16 @@ class SpireBrainAgent:
                     "source": rule.source, "guide_rules": guide.evidence(),
                     **strategic_detail}
         if str(_get(game, "screen_type", default="")).upper() == COMBAT_SCREEN:
-            suggestion = recommend_action(game)
-            if suggestion is not None:
-                return {"status": "ready", "command": suggestion.command,
-                        "reason": suggestion.reason, "source_type": "rule_fallback",
+            diagnostics: list[dict] = []
+            candidates = build_action_candidates(game, diagnostics=diagnostics)
+            proposal = self.combat_engine.propose(game, candidates)
+            if proposal.candidate is not None:
+                return {"status": "ready", "command": dict(proposal.candidate.command),
+                        "reason": proposal.reason, "source_type": "rule_fallback",
                         "source": "游戏实时战斗状态；本地战术规则",
-                        "combat_facts": dict(suggestion.facts),
-                        "selection_basis": suggestion.facts.get("decision_basis", "local_tactical_rule"),
-                        "uncertain": bool(suggestion.uncertain),
+                        "combat_facts": dict(proposal.facts),
+                        "selection_basis": proposal.reason_code,
+                        "uncertain": bool(proposal.uncertainty),
                         **strategic_detail,
                         "guide_rules": guide.evidence()}
         return {"status": "thinking", "label": "正在分析当前局面…",
@@ -379,8 +396,12 @@ class SpireBrainAgent:
             max_hp=max_hp,
             gold=_as_int(_get(game, "gold", default=0)),
             deck=deck,
-            relics=[str(r if isinstance(r, str) else _get(r, "name", "relic_id", default=""))
-                    for r in (_get(game, "relics", default=[]) or [])],
+            relics=[(
+                str(r) if isinstance(r, str) else
+                (str(_get(r, "name", default=""))
+                 if "\ufffd" not in str(_get(r, "name", default=""))
+                 else str(_get(r, "id", "relic_id", default="未知遗物")))
+            ) for r in (_get(game, "relics", default=[]) or [])],
             potions=[str(p if isinstance(p, str) else _get(p, "name", "potion_id", default=""))
                      for p in (_get(game, "potions", default=[]) or [])],
             goal=self.goal,
@@ -658,6 +679,8 @@ class SpireBrainAgent:
                     reason=str(detail.get("reason", "") or ""),
                     jev_confidence=float(decision.confidence or 0.0),
                     guide_rules=self.guide_result.evidence(),
+                    plan=self._active_plan,
+                    budget=self._active_budget,
                 )
                 execution_detail = execution.detail()
                 detail.update(execution_detail)
@@ -814,6 +837,7 @@ class SpireBrainAgent:
             "screen": str(_get(self._active_game, "screen_type", default="")).upper(),
             "act": _as_int(_get(self._active_game, "act", default=0)),
             "floor": _as_int(_get(self._active_game, "floor", "floor_num", default=0)),
+            "state_blob": dict(self._active_game or {}),
         })
         self.trace.record("decision", {
             "run_id": final.run_id, "state_id": final.state_id,
@@ -846,20 +870,6 @@ class SpireBrainAgent:
             "act": _as_int(_get(self._active_game, "act", default=0)),
             "floor": _as_int(_get(self._active_game, "floor", "floor_num", default=0)),
         })
-        if request_id:
-            response = self._active_brain_response
-            self.trace.record("provider_response", {
-                "run_id": final.run_id, "run_epoch": final.context.run_epoch,
-                "state_id": final.state_id, "decision_id": final.decision_id,
-                "request_id": request_id, "plan_id": final.plan_id,
-                "provider": getattr(response, "backend", self.strategic.backend_name),
-                "model": getattr(response, "model", ""),
-                "latency_ms": getattr(response, "latency_ms", None),
-                "usage": getattr(response, "usage", {}) or {},
-                "error": getattr(response, "error", "") or None,
-                "error_kind": getattr(response, "error_kind", "") or None,
-                "fallback": bool(getattr(response, "fallback", False)),
-            })
         self._last_final_decision = final
         return command
 
@@ -1336,10 +1346,16 @@ class SpireBrainAgent:
                      for m in monsters],
         )
 
-        # JEV decides posture; the code decides the cards. The gate is only
+        # The bounded local engine decides the current card from legal
+        # candidates. JEV may still refine the already-legal set below. The
+        # risk gate is only
         # consulted when the incoming damage threatens the act's HP budget, so a
         # routine turn costs zero JEV calls.
-        suggestion = recommend_action(game)
+        proposal = self.combat_engine.propose(game, self._active_candidates)
+        suggestion = (ActionSuggestion(
+            command=dict(proposal.candidate.command), reason=proposal.reason,
+            uncertain=bool(proposal.uncertainty), facts=dict(proposal.facts))
+            if proposal.candidate is not None else recommend_action(game))
         incoming = sum(max(0, e["damage"]) for e in state.enemies if "attack" in e["intent"])
         defensive_posture = False
         if incoming > self._budget().remaining_budget:

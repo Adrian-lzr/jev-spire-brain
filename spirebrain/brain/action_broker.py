@@ -496,12 +496,12 @@ def reconcile(*, game: dict, candidates: list[ActionCandidate], fallback: dict,
     elif source == "jev_tactical":
         selection_basis = "jev_tactical_within_strategy"
     else:
-        selection_basis = "local_fallback"
+        selection_basis = "strategic_context_local_choice" if plan else "local_fallback"
     detail = ExecutionDecision(
         primary_candidate=selected,
         alternative_candidate=alternative,
         strategic_goal=(plan.current_objective if plan else ""),
-        reason=(plan.reason if plan and plan.reason else reason),
+        reason=(plan.reason if source == "gpt_strategy" and plan and plan.reason else reason),
         source_type=source,
         state_id=state_id,
         plan_id=plan.plan_id if plan else "",

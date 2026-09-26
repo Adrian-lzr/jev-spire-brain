@@ -266,6 +266,8 @@ def default_command(backend: str = DEFAULT_BACKEND, *, auto_start: bool = False,
                    klass: str | None = None, ascension: int | None = None,
                    mode: str | None = None, dashboard_url: str | None = None,
                    brain_backend: str | None = None,
+                   brain_model: str | None = None, brain_endpoint: str | None = None,
+                   jev_endpoint: str | None = None,
                    open_dashboard: bool = False) -> str:
     """`<python> <repo>/run_agent.py --backend <backend> [agent flags]`.
 
@@ -293,6 +295,12 @@ def default_command(backend: str = DEFAULT_BACKEND, *, auto_start: bool = False,
     agent = f"{sys.executable} {ROOT / 'run_agent.py'} --backend {backend}"
     if brain_backend:
         agent += f" --brain-backend {brain_backend}"
+    if brain_model:
+        agent += f" --brain-model {brain_model}"
+    if brain_endpoint:
+        agent += f" --brain-endpoint {brain_endpoint}"
+    if jev_endpoint:
+        agent += f" --jev-endpoint {jev_endpoint}"
     if klass:
         agent += f" --class {klass}"
     if ascension is not None:

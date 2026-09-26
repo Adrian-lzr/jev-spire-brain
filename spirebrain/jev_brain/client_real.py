@@ -382,6 +382,8 @@ class OpenRouterJevClient(OfficialJevClient):
         total_budget_ms: int = 2500,
         **kw: Any,
     ) -> None:
+        if endpoint.rstrip("/") in {"https://openrouter.ai", "https://openrouter.ai/api/v1"}:
+            endpoint = OPENROUTER_SYSTEMONE
         super().__init__(api_key=api_key, model=model, endpoint=endpoint,
                          timeout=timeout, max_retries=max_retries,
                          total_budget_ms=total_budget_ms, **kw)

@@ -20,3 +20,14 @@ def test_no_alternative_is_serialized_when_missing():
     event = advice_event(advice)
     assert event["alternative_label"] == ""
     assert event["alternative_command"] is None
+
+
+def test_feed_replaces_unusable_advice_text_with_readable_fallback():
+    advice = Advice(point="combat", screen="COMBAT", command={"command": "play"},
+                    key=("combat", "play"), label="出 Strike → 文本不可用",
+                    reason="目标：\ufffd", status="fast_advice",
+                    alternative_label="文本不可用")
+    event = advice_event(advice)
+    assert event["label"] == "出 Strike → 目标信息缺失"
+    assert event["reason"] == "目标：文本缺失"
+    assert event["alternative_label"] == "目标信息缺失"

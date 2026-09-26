@@ -160,7 +160,10 @@ def run_state_event(agent) -> dict:
             "character": run.character,
             "gold": run.gold,
             "deck_size": len(run.deck or []),
-            "relics": list(run.relics or []),
+            # Values have already passed through GameSnapshot normalization;
+            # keep them as Unicode strings so the browser never has to guess
+            # which legacy code page produced a relic name.
+            "relics": [_display_name(name) for name in (run.relics or [])],
         })
     strategic = getattr(agent, "strategic", None)
     if strategic is not None:
@@ -194,6 +197,27 @@ def run_state_event(agent) -> dict:
                                      else "fallback"),
     })
     return state
+
+
+def _display_name(value) -> str:
+    """Return a stable, readable label even when CM supplied mojibake."""
+    if isinstance(value, dict):
+        name = str(value.get("name") or "")
+        identity = str(value.get("id") or value.get("relic_id") or "")
+        if "\ufffd" in name or name == "文本不可用" or not name.strip():
+            return identity or "未知遗物"
+        return name
+    text = str(value)
+    if "\ufffd" in text or text == "文本不可用":
+        return "未知遗物"
+    return text
+
+
+def _safe_display_text(value: object, fallback: str = "文本缺失") -> str:
+    text = str(value or "")
+    if "\ufffd" in text or "文本不可用" in text:
+        return text.replace("文本不可用", fallback).replace("\ufffd", fallback)
+    return text
 
 
 def decision_event(decision, command: dict) -> dict:
@@ -239,11 +263,11 @@ def advice_event(advice, tally: dict | None = None,
         "record_kind": "advice_history",
         "point": advice.point,
         "screen": advice.screen,
-        "label": advice.label,
+        "label": _safe_display_text(advice.label, "目标信息缺失"),
         "verb": str((advice.command or {}).get("command", "")),
         "command": advice.command,
         "key": list(advice.key) if advice.key else None,
-        "reason": advice.reason,
+        "reason": _safe_display_text(advice.reason),
         "confidence": round(float(advice.confidence or 0.0), 4),
         "raw_model_confidence": (round(float(advice.raw_model_confidence), 4)
                                   if advice.raw_model_confidence is not None else None),
@@ -274,9 +298,9 @@ def advice_event(advice, tally: dict | None = None,
         "brain_source": advice.brain_source,
         "jev_confidence": round(float(advice.jev_confidence or 0.0), 4),
         "alternative_command": advice.alternative_command,
-        "alternative_label": advice.alternative_label,
-        "alternative_reason": advice.alternative_reason,
-        "alternative_condition": advice.alternative_condition,
+        "alternative_label": _safe_display_text(advice.alternative_label, "目标信息缺失"),
+        "alternative_reason": _safe_display_text(advice.alternative_reason),
+        "alternative_condition": _safe_display_text(advice.alternative_condition),
         "uncertain": bool(advice.uncertain),
         "candidates": _jsonable(advice.candidates),
         "candidate_id": advice.candidate_id,

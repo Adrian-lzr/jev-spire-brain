@@ -139,6 +139,15 @@ def test_runtime_config_supports_mainland_openai_compatible_presets(tmp_path: Pa
     assert config.openai_endpoint.endswith("/v1/chat/completions")
 
 
+def test_project_strategy_default_leaves_room_for_complete_json_plan():
+    """The tracked project config must not truncate compatible-model plans."""
+    root = Path(__file__).resolve().parents[1]
+    config = resolve_runtime_config(root, environ={}, dotenv={})
+    assert config.max_output_tokens >= 2400
+    assert config.timeout_ms >= 12000
+    assert config.decision_budget_ms >= 12000
+
+
 def test_strategy_endpoint_and_budget_are_effective(tmp_path: Path):
     config = resolve_runtime_config(
         tmp_path,
@@ -154,6 +163,17 @@ def test_strategy_endpoint_and_budget_are_effective(tmp_path: Path):
     assert config.jev_max_retries == 1
 
 
+def test_compatible_base_endpoint_gets_chat_route_and_jev_endpoint_is_effective(tmp_path: Path):
+    config = resolve_runtime_config(
+        tmp_path,
+        environ={"OPENAI_BRAIN_ENDPOINT": "https://gateway.test/v1",
+                 "OPENROUTER_ENDPOINT": "https://openrouter.test"},
+        strategy={"brain": {}, "jev": {"backend": "openrouter"}},
+    )
+    assert config.openai_endpoint == "https://gateway.test/v1/chat/completions"
+    assert config.jev_endpoint == "https://openrouter.test"
+
+
 def test_dashboard_public_config_distinguishes_saved_and_effective(tmp_path: Path):
     from spirebrain.overlay.config import get_public_config
     (tmp_path / ".env").write_text("BRAIN_BACKEND=mock\nJEV_BACKEND=mock\n", encoding="utf-8")
@@ -161,3 +181,55 @@ def test_dashboard_public_config_distinguishes_saved_and_effective(tmp_path: Pat
     assert public["saved"]["brain_backend"] == "mock"
     assert public["effective"]["brain_backend"] == "mock"
     assert all(isinstance(value, bool) for value in public["secrets"].values())
+
+
+def test_dashboard_legacy_model_fields_update_canonical_brain_aliases(tmp_path: Path):
+    from spirebrain.overlay.config import save_config
+
+    path = tmp_path / ".env"
+    save_config(path, {
+        "brain_backend": "deepseek",
+        "openai_model": "deepseek-flash",
+        "openai_endpoint": "https://api.deepseek.com/v1/chat/completions",
+    })
+    values = dict(line.split("=", 1) for line in path.read_text(encoding="utf-8").splitlines()
+                  if "=" in line)
+    assert values["BRAIN_MODEL"] == "deepseek-flash"
+    assert values["BRAIN_ENDPOINT"].endswith("/chat/completions")
+
+
+def test_launcher_setup_uses_saved_provider_when_form_omits_it(tmp_path: Path, monkeypatch):
+    from spirebrain.overlay.server import DashboardServer
+    import json
+    import urllib.request
+
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "JEV_BACKEND=openrouter\nBRAIN_BACKEND=deepseek\n"
+        "BRAIN_MODEL=deepseek-flash\n"
+        "BRAIN_ENDPOINT=https://api.deepseek.com/v1/chat/completions\n",
+        encoding="utf-8",
+    )
+    captured = {}
+
+    def fake_install(argv):
+        captured["argv"] = argv
+        return 0
+
+    monkeypatch.setattr("spirebrain.install_mod_config.main", fake_install)
+    server = DashboardServer(port=0, env_path=env_path)
+    server.start_background()
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{server.port}/api/launcher/setup",
+            data=json.dumps({"mode": "advise"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            assert json.loads(response.read())["ok"] is True
+    finally:
+        server.shutdown()
+    command = captured["argv"][0]
+    assert "--backend openrouter" in command
+    assert "--brain-backend deepseek" in command
+    assert "--brain-model deepseek-flash" in command

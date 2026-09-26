@@ -7,39 +7,42 @@ from __future__ import annotations
 
 import argparse
 import json
-import tempfile
 from pathlib import Path
 
-from .replay import run_fixture
+from .replay import run_fixture, _fixture_kind
 
 MODES = ("rules", "jev", "strategic", "full")
 
 
 def evaluate_fixture(path: str | Path, modes=MODES) -> dict:
     path = Path(path)
-    base = run_fixture(path)
     result = {}
+    if not modes:
+        raise ValueError("at least one evaluation mode is required")
     for mode in modes:
-        # The current replay harness is local and deterministic.  Mode labels
-        # are retained in the report so future scripted providers can be
-        # substituted without changing the result schema.
+        base = run_fixture(path, mode=mode)
         result[mode] = {
             "mode": mode,
             "fixture": str(path),
             "fixture_type": base.get("fixture_type", "synthetic"),
             "sample_count": base.get("messages", 0),
             "decision_count": base.get("recommendations", 0),
-            "legal_action_rate": 1.0 if base.get("passed") else 0.0,
+            "legal_action_rate": base["candidate_legality"]["rate"],
+            "candidate_legality": base["candidate_legality"],
+            "advise_wire_safety": base["advise_wire_safety"],
+            "game_rejections": None,
             "fallback_rate": (base.get("fallbacks", 0) / base.get("recommendations", 1)
                                if base.get("recommendations") else None),
-            "provider_calls": 0,
+            "provider_calls": base.get("provider_calls", 0),
+            "jev_calls": base.get("jev_calls", 0),
+            "strategic_calls": base.get("strategic_calls", 0),
             "providers_enabled": {
                 "jev": mode in {"jev", "full"},
                 "strategic": mode in {"strategic", "full"},
             },
             "first_advice_latency": None,
             "complete_advice_latency": None,
-            "expired_result_count": 0,
+            "expired_result_count": None,
             "unobserved_ratio": None,
             "adoption_rate": None,
             "real_outcomes": "unknown",
@@ -49,7 +52,7 @@ def evaluate_fixture(path: str | Path, modes=MODES) -> dict:
         }
     return {"fixture": str(path), "fixture_type": base.get("fixture_type", "synthetic"),
             "modes": result,
-            "limitations": ["synthetic replay validates legality and timing only; adoption and win rate are unknown"]}
+            "limitations": ["synthetic state replay validates wire safety and candidate legality; scheduler timing, adoption and win rate are not measured"]}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -64,7 +67,15 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"error": "input_missing", "input": str(target)}, ensure_ascii=False))
         return 2
     modes = MODES if args.mode == "all" else (args.mode,)
-    reports = [evaluate_fixture(f, modes) for f in files]
+    state_files = [path for path in files if _fixture_kind(path) == "state_sequence"]
+    if not state_files:
+        print(json.dumps({"error": "state_sequence_fixture_missing"}, ensure_ascii=False))
+        return 2
+    try:
+        reports = [evaluate_fixture(f, modes) for f in state_files]
+    except (ValueError, OSError) as exc:
+        print(json.dumps({"error": "invalid_fixture", "kind": type(exc).__name__}))
+        return 2
     output = {"fixture_count": len(reports), "modes": modes, "reports": reports,
               "real_outcomes": "unknown"}
     rendered = json.dumps(output, ensure_ascii=False, indent=2)

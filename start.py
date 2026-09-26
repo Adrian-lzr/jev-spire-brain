@@ -100,7 +100,7 @@ def start_dashboard(port: int, open_browser: bool) -> tuple[object, str]:
 
 
 def mod_config_command(url: str, backend: str, auto_start: bool, mode: str,
-                       brain_backend: str | None = None) -> str:
+                       brain_backend: str | None = None, runtime=None) -> str:
     """The exact command line CommunicationMod should launch, with the dashboard wired.
 
     The mode is part of the command, never left implicit: this string is the only
@@ -113,6 +113,9 @@ def mod_config_command(url: str, backend: str, auto_start: bool, mode: str,
     # The /publish endpoint, not the page: the agent POSTs events to it, and
     # default_command appends it when given the bare base URL.
     command = default_command(backend, brain_backend=brain_backend,
+                              brain_model=getattr(runtime, "openai_model", None),
+                              brain_endpoint=getattr(runtime, "openai_endpoint", None),
+                              jev_endpoint=getattr(runtime, "jev_endpoint", None),
                               auto_start=auto_start, mode=mode,
                               dashboard_url=url, open_dashboard=True)
     return command
@@ -174,6 +177,9 @@ def main(argv: list[str] | None = None) -> int:
     runtime = resolve_runtime_config(ROOT, cli={
         "backend": _value(argv, "backend"),
         "brain_backend": _value(argv, "brain-backend"),
+        "brain_model": _value(argv, "brain-model"),
+        "brain_endpoint": _value(argv, "brain-endpoint"),
+        "jev_endpoint": _value(argv, "jev-endpoint"),
     })
     backend = runtime.jev_backend
     brain_backend = runtime.brain_backend
@@ -254,7 +260,7 @@ def main(argv: list[str] | None = None) -> int:
             server.shutdown()
         return 0
 
-    command = mod_config_command(url, backend, auto_start, mode, brain_backend)
+    command = mod_config_command(url, backend, auto_start, mode, brain_backend, runtime)
     config_status = communication_config_status(command)
     print("\n[3/3] tell the game to launch the brain:")
     print(f"      {command}")

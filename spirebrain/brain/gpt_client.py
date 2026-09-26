@@ -77,6 +77,20 @@ def _json_text(value: Any) -> str:
     return text
 
 
+def _unicode_safe_json(value: Any) -> Any:
+    """Normalize gateway JSON without passing legacy-encoded text downstream."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    if isinstance(value, str):
+        return value.encode("utf-8", "replace").decode("utf-8", "replace")
+    if isinstance(value, list):
+        return [_unicode_safe_json(item) for item in value]
+    if isinstance(value, dict):
+        return {_unicode_safe_json(key): _unicode_safe_json(item)
+                for key, item in value.items()}
+    return value
+
+
 def _extract_text(body: dict) -> str:
     output_text = body.get("output_text")
     if isinstance(output_text, str) and output_text.strip():
@@ -253,6 +267,9 @@ class OpenAIStrategicClient:
         )
         self.timeout_ms = max(500, int(timeout_ms))
         self.max_calls = max(1, int(max_calls))
+        # Strategic plans are short, but 900 tokens is too small for some
+        # gateways that emit JSON with long candidate/context strings. Keep a
+        # bounded response while leaving enough room for a complete object.
         self.max_output_tokens = max(128, int(max_output_tokens))
         self.opener = opener or urllib.request.urlopen
         # Compatible gateways often reject vendor-specific json_schema output;
@@ -304,11 +321,18 @@ class OpenAIStrategicClient:
                     error_kind=("auth" if exc.code in {401, 403} else
                                 "rate_limit" if exc.code == 429 else "http"),
                 )
-            decoded = json.loads(raw.decode("utf-8"))
-            text = _extract_text(decoded)
+            decoded = _unicode_safe_json(json.loads(raw.decode("utf-8", "replace")))
+            text = _unicode_safe_json(_extract_text(decoded))
             if len(text.encode("utf-8", "replace")) > 64 * 1024:
                 raise PlanValidationError("模型响应超过 64KB 限制")
-            data = _unwrap_plan(json.loads(_json_text(text)))
+            try:
+                data = _unwrap_plan(json.loads(_json_text(text)))
+            except UnicodeError:
+                # Some compatible gateways build an intermediate latin-1
+                # string around otherwise valid Chinese JSON. Escaping first
+                # preserves the content while avoiding that codec path.
+                escaped = json.dumps(text, ensure_ascii=True)
+                data = _unwrap_plan(json.loads(json.loads(escaped)))
             data = _coerce_steps_plan(
                 data,
                 state_id=str(payload.get("state_id", "")),
@@ -336,6 +360,9 @@ class OpenAIStrategicClient:
                                  f"请求超时：{type(exc).__name__}" if isinstance(exc, TimeoutError)
                                  else f"网络错误：{type(exc).__name__}",
                                  error_kind="timeout" if isinstance(exc, TimeoutError) else "network")
+        except UnicodeError as exc:
+            return self._failure(request_id, started, f"计划解析编码失败：{type(exc).__name__}",
+                                 error_kind="unicode_parse")
         except (ValueError, KeyError, TypeError, json.JSONDecodeError, PlanValidationError) as exc:
             return self._failure(request_id, started, redact_text(f"计划解析失败：{exc}"),
                                  error_kind="parse_or_validation")
@@ -353,34 +380,46 @@ class OpenAIStrategicClient:
         )
 
     def _request_body(self, payload: dict) -> dict:
+        """Build the only supported wire shape: OpenAI-compatible chat.
+
+        The configured strategic gateway is not guaranteed to implement the
+        OpenAI Responses API. Sending a Responses payload to a compatible
+        ``/v1`` gateway produced opaque 401/404 fallbacks in live runs, so the
+        provider adapter deliberately has one protocol and one parser.
+        """
         user_text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        if "chat/completions" in self.endpoint:
-            body = {
-                "model": self.model,
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_text},
-                ],
-                "max_tokens": self.max_output_tokens,
-            }
-            if self.structured_output:
-                body["response_format"] = {
-                    "type": "json_schema",
-                    "json_schema": {"name": "strategic_plan", "strict": True,
-                                     "schema": PLAN_SCHEMA},
-                }
-            return body
-        return {
+        # Moonshot's Kimi K3 endpoint currently only accepts temperature=1.
+        # Sending the normal low-temperature planning value (0.1) makes the
+        # request fail with HTTP 400 before the model can return a plan. Keep
+        # the conservative default for other OpenAI-compatible models and
+        # constrain only the K3 family to the provider-supported value.
+        model_name = str(self.model or "").strip().lower()
+        temperature = 1 if model_name.startswith("kimi-k3") else 0.1
+        body = {
             "model": self.model,
-            "input": [
-                {"role": "system", "content": [{"type": "input_text", "text": SYSTEM_PROMPT}]},
-                {"role": "user", "content": [{"type": "input_text", "text": user_text}]},
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT + "\nJSON Schema:\n" +
+                 json.dumps(PLAN_SCHEMA, ensure_ascii=False, separators=(",", ":"))},
+                {"role": "user", "content": user_text},
             ],
-            "temperature": 0.1,
-            "max_output_tokens": self.max_output_tokens,
-            "text": {"format": {"type": "json_schema", "name": "strategic_plan",
-                                  "strict": True, "schema": PLAN_SCHEMA}},
+            "temperature": temperature,
+            "max_tokens": self.max_output_tokens,
         }
+        # DeepSeek and several OpenAI-compatible mainland gateways support the
+        # portable JSON-object mode even when they reject OpenAI's strict
+        # json_schema extension. It prevents the truncated prose/empty-content
+        # responses observed in live runs while keeping local schema validation
+        # authoritative.
+        json_model = model_name.startswith(("deepseek", "kimi", "qwen", "glm"))
+        if self.structured_output:
+            body["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": "strategic_plan", "strict": True,
+                                 "schema": PLAN_SCHEMA},
+            }
+        elif json_model:
+            body["response_format"] = {"type": "json_object"}
+        return body
 
 
 class LoggingStrategicClient:
@@ -406,7 +445,9 @@ class LoggingStrategicClient:
         if self.event_sink is not None:
             try:
                 self.event_sink("provider_request", {**identity, "provider": self.backend_name,
-                                                       "model": getattr(self.inner, "model", "")})
+                    "model": getattr(self.inner, "model", ""),
+                    "state_blob": payload.get("state"),
+                    "candidate_blob": payload.get("candidates")})
             except Exception:
                 pass
         try:
@@ -447,7 +488,8 @@ class LoggingStrategicClient:
                     "provider": result.backend or self.backend_name,
                     "model": result.model, "latency_ms": record["latency_ms"],
                     "usage": result.usage, "error": result.error, "error_kind": result.error_kind,
-                    "fallback": bool(result.fallback)})
+                    "fallback": bool(result.fallback),
+                    "response_blob": plan})
             except Exception:
                 pass
         return result

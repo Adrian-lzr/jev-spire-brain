@@ -11,6 +11,9 @@ from pathlib import Path
 from spirebrain.driver.agent import SpireBrainAgent
 from spirebrain.driver.stdio import StdioTransport
 from spirebrain.brain.protocol import BrainResponse, StrategicPlan
+from spirebrain.jev_brain.client import JevResponse
+from spirebrain.driver.legality import check_action
+from spirebrain.brain.gpt_client import MockStrategicClient, UnavailableStrategicClient
 
 
 class ReplayStrategicClient:
@@ -56,21 +59,32 @@ class ReplayStrategicClient:
 def load_fixed_responses(path: str | Path) -> list[dict]:
     """Load only structured plans from a synthetic response fixture."""
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    if not isinstance(payload, dict) or payload.get("fixture_type") != "synthetic":
+    if (not isinstance(payload, dict) or payload.get("fixture_type") != "synthetic"
+            or payload.get("kind") != "fixed_provider_responses"):
         raise ValueError("fixed response fixture must be marked synthetic")
     responses = payload.get("responses", [])
-    if not isinstance(responses, list) or not all(isinstance(item, dict) for item in responses):
+    if not isinstance(responses, list) or not responses or not all(isinstance(item, dict) for item in responses):
         raise ValueError("responses must be an array of objects")
     return responses[:32]
+
+
+def _fixture_kind(path: Path) -> str:
+    """Read only the small header used to route a replay fixture."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    return str(payload.get("kind", "")) if isinstance(payload, dict) else ""
 
 
 def run_timing_fixture(path: str | Path) -> dict:
     """Validate a synthetic event-order fixture without running providers."""
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    if not isinstance(payload, dict) or payload.get("fixture_type") != "synthetic":
+    if (not isinstance(payload, dict) or payload.get("fixture_type") != "synthetic"
+            or payload.get("kind") != "scheduler_scenario"):
         raise ValueError("timing fixture must be marked synthetic")
     events = payload.get("events", [])
-    if not isinstance(events, list):
+    if not isinstance(events, list) or not events:
         raise ValueError("events must be an array")
     expired = [event for event in events if isinstance(event, dict)
                and event.get("event_type") == "expired_result"]
@@ -79,16 +93,53 @@ def run_timing_fixture(path: str | Path) -> dict:
             "passed": all(isinstance(event, dict) for event in events)}
 
 
-def run_fixture(path: Path) -> dict:
+def run_fixture(path: Path, *, mode: str = "rules") -> dict:
+    if mode not in {"rules", "jev", "strategic", "full"}:
+        raise ValueError(f"unknown replay mode: {mode}")
     payload = json.loads(path.read_text(encoding="utf-8"))
-    messages = payload.get("messages", []) if isinstance(payload, dict) else payload
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path}: fixture must be an object")
+    if payload.get("fixture_type") != "synthetic":
+        raise ValueError(f"{path}: fixture_type must be synthetic")
+    kind = payload.get("kind")
+    if kind != "state_sequence":
+        raise ValueError(f"{path}: kind must be state_sequence")
+    messages = payload.get("messages", [])
     if not isinstance(messages, list):
         raise ValueError(f"{path}: messages must be an array")
+    if not messages:
+        raise ValueError(f"{path}: messages must not be empty")
+    if not all(isinstance(message, dict) and isinstance(message.get("game_state"), dict)
+               for message in messages):
+        raise ValueError("messages must contain structured game_state objects")
     with tempfile.TemporaryDirectory(prefix="spirebrain-replay-") as tmp:
-        agent = SpireBrainAgent(jev_backend="mock", brain_backend="none", log_dir=tmp)
+        brain_backend = "mock" if mode in {"strategic", "full"} else "none"
+        agent = SpireBrainAgent(jev_backend="mock", brain_backend=brain_backend, log_dir=tmp)
+        strategic = (MockStrategicClient() if mode in {"strategic", "full"}
+                     else UnavailableStrategicClient("disabled for replay"))
+        agent.strategic.provider = strategic
+        agent.strategic.planner.provider = strategic
+        logged_jev = agent.jev.inner
+        if mode in {"rules", "strategic"}:
+            # A rules/strategic-only replay must not accidentally exercise JEV
+            # through a scene handler.  The local adapter returns an empty
+            # response, so callers take their documented rule fallback without
+            # producing a provider event or a fake call count.
+            agent.jev.ask = lambda state, questions: JevResponse(
+                answers={}, latency_ms=0, backend="disabled", model="disabled")
         # Force synchronous local advice for deterministic offline replay. No
         # network provider or background worker is involved in this mode.
         agent.clone_for_advice = lambda: None
+        legality = []
+        choose = agent.choose_action
+
+        def checked_choose(state):
+            command = choose(state)
+            if command.get("command") not in {"wait", "state"}:
+                legality.append(check_action(state, command)[0])
+            return command
+
+        agent.choose_action = checked_choose
         output = io.StringIO()
         transport = StdioTransport(agent, mode="advise", log_path=None,
                                     advice_path=None, warn_stream=io.StringIO())
@@ -97,6 +148,9 @@ def run_fixture(path: Path) -> dict:
         commands = [line.strip().split(" ", 1)[0] for line in output.getvalue().splitlines()
                     if line.strip()]
         invalid = [command for command in commands if command not in {"wait", "state"}]
+        jev_calls = logged_jev.calls
+        strategic_calls = getattr(strategic, "calls", 0)
+        provider_calls = jev_calls + strategic_calls
     return {
         "fixture": str(path),
         "fixture_type": payload.get("fixture_type", "synthetic") if isinstance(payload, dict) else "synthetic",
@@ -106,7 +160,14 @@ def run_fixture(path: Path) -> dict:
         "advise_commands": commands,
         "invalid_advise_commands": invalid,
         "fallbacks": sum(1 for item in agent.history if item.get("fallback")),
-        "passed": not invalid,
+        "provider_calls": provider_calls,
+        "jev_calls": jev_calls,
+        "strategic_calls": strategic_calls,
+        "advise_wire_safety": not invalid,
+        "candidate_legality": {"checked": len(legality), "legal": sum(legality),
+                               "rate": sum(legality) / len(legality) if legality else None},
+        "game_rejections": None,
+        "passed": bool(transport.messages) and not invalid and all(legality),
     }
 
 
@@ -119,7 +180,11 @@ def main(argv: list[str] | None = None) -> int:
     if not files:
         print(json.dumps({"error": "input_missing", "input": str(root)}, ensure_ascii=False))
         return 2
-    results = [run_fixture(path) for path in files]
+    state_files = [path for path in files if _fixture_kind(path) == "state_sequence"]
+    if not state_files:
+        print(json.dumps({"error": "state_sequence_fixture_missing"}, ensure_ascii=False))
+        return 2
+    results = [run_fixture(path) for path in state_files]
     result = {"fixture_count": len(results), "passed": all(item["passed"] for item in results),
               "results": results}
     print(json.dumps(result, ensure_ascii=False, indent=2))

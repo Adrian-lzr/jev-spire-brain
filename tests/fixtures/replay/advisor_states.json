@@ -1,5 +1,6 @@
 {
   "fixture_type": "synthetic",
+  "kind": "state_sequence",
   "messages": [
     {
       "in_game": true,
