@@ -40,10 +40,12 @@ def evaluate_fixture(path: str | Path, modes=MODES) -> dict:
                 "jev": mode in {"jev", "full"},
                 "strategic": mode in {"strategic", "full"},
             },
-            "first_advice_latency": None,
-            "complete_advice_latency": None,
-            "expired_result_count": None,
-            "unobserved_ratio": None,
+            "first_advice_latency": base.get("first_advice_latency_ms"),
+            "complete_advice_latency": base.get("complete_advice_latency_ms"),
+            "expired_result_count": base.get("expired_result_count", 0),
+            "unobserved_ratio": (
+                base.get("unobserved_count", 0) / base.get("outcome_count", 1)
+                if base.get("outcome_count", 0) else None),
             "adoption_rate": None,
             "real_outcomes": "unknown",
             "decision_quality": "unknown",

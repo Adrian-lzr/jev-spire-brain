@@ -64,3 +64,54 @@ def test_search_honors_node_budget():
     result = search_sequences(state, depth=3, node_limit=1)
     assert result["nodes"] <= 1
     assert result["budget_exhausted"] is True
+
+
+def test_search_stops_when_injected_clock_exceeds_deadline(monkeypatch):
+    import spirebrain.tactical.combat_search as combat_search
+
+    ticks = iter((10.0, 10.0, 10.0, 10.010))
+    monkeypatch.setattr(combat_search, "monotonic", lambda: next(ticks))
+    state = _combat([
+        {"id": "Strike_R", "type": "ATTACK", "cost": 1,
+         "damage": 6, "is_playable": True},
+    ])
+
+    result = search_sequences(state, depth=2, node_limit=16, time_limit_ms=5)
+
+    assert result["budget_exhausted"] is True
+    assert result["nodes"] == 1
+    assert result["uncertainty"] == "search_budget_exhausted"
+
+
+def test_search_does_not_mutate_input_snapshot():
+    from copy import deepcopy
+
+    state = _combat([
+        {"id": "Bash", "type": "ATTACK", "cost": 2, "damage": 8,
+         "applies_vulnerable": 2, "is_playable": True},
+        {"id": "Strike_R", "type": "ATTACK", "cost": 1,
+         "damage": 6, "is_playable": True},
+    ], enemy_hp=40)
+    before = deepcopy(state)
+
+    search_sequences(state, depth=2)
+
+    assert state == before
+
+
+def test_search_time_budget_falls_back_to_a_legal_greedy_candidate():
+    from spirebrain.brain.action_broker import build_action_candidates
+    from spirebrain.tactical.combat_engine import CombatTacticalEngine
+
+    state = {"screen_type": "COMBAT", "available_commands": ["play", "end"],
+             "combat": _combat([
+                 {"id": "Strike_R", "type": "ATTACK", "cost": 1,
+                  "damage": 6, "has_target": True, "is_playable": True},
+             ], enemy_hp=20)}
+    proposal = CombatTacticalEngine(time_limit_ms=0).propose(
+        state, build_action_candidates(state))
+
+    assert proposal.candidate is not None
+    assert proposal.candidate.legal is True
+    assert proposal.reason_code == "greedy_fallback"
+    assert proposal.fallback_reason == "search_budget_exhausted"

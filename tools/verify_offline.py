@@ -30,13 +30,18 @@ def main(argv: list[str] | None = None) -> int:
     python = sys.executable
     fixture = root / "tests" / "fixtures" / "metrics" / "decision_trace.jsonl"
     replay = root / "tests" / "fixtures" / "replay" / "advisor_states.json"
+    representative = root / "tests" / "fixtures" / "replay" / "representative_states.json"
+    async_replay = root / "tests" / "fixtures" / "replay" / "async_scheduler.json"
     checks = [
         ("tests", [python, "-m", "pytest", "-q"]),
         ("compile", [python, "-m", "compileall", "-q", "spirebrain", "start.py", "run_agent.py",
                       "tools/auto_smoke.py", "tools/real_game_smoke.py"]),
         ("contracts", [python, "tools/check_contracts.py"]),
         ("metrics", [python, "-m", "spirebrain.analysis.metrics", "--input", str(fixture)]),
+        ("evaluation", [python, "-m", "spirebrain.analysis.evaluate", "--input", str(representative)]),
         ("replay", [python, "-m", "spirebrain.analysis.replay", "--input", str(replay)]),
+        ("async_replay", [python, "-m", "spirebrain.analysis.replay", "--input",
+                           str(async_replay), "--async-scheduler"]),
         ("launcher_smoke", [python, "tools/auto_smoke.py"]),
     ]
     results = [run_check(name, command, root) for name, command in checks]

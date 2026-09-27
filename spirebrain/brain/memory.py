@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 import copy
+import json
 from types import MappingProxyType
 from typing import Any
 
@@ -98,6 +99,11 @@ class RunMemorySnapshot:
     plan_state_id: str = ""
     plan_reason: str = ""
 
+    def __deepcopy__(self, memo):
+        """Snapshots are immutable; share them across worker boundaries."""
+        memo[id(self)] = self
+        return self
+
     def digest(self, limit: int | None = None) -> dict:
         events = list(self.events)
         if limit is not None:
@@ -167,6 +173,66 @@ class RunMemory:
             deviations=tuple(_freeze(dict(x)) for x in self.deviations),
             plan_id=self.plan_id, plan_state_id=self.plan_state_id,
             plan_reason=self.plan_reason,
+        )
+
+    def sync_from_snapshot(self, snapshot: RunMemorySnapshot, *,
+                           preserve_plan: bool = True) -> list[dict]:
+        """Replace worker facts from an owner snapshot and return new deviations.
+
+        The background advisor is a private decision worker, not a second
+        memory owner. It may retain its last strategic plan between jobs, but
+        factual run state and player feedback always come from the main loop.
+        """
+        if not isinstance(snapshot, RunMemorySnapshot):
+            raise TypeError("snapshot must be a RunMemorySnapshot")
+
+        same_run = (self.run_id == snapshot.run_id
+                    and self.run_epoch == snapshot.run_epoch)
+        previous_plan = (self.current_objective, self.plan_id,
+                         self.plan_state_id, self.plan_reason)
+        prior_deviations = {
+            self._deviation_key(_thaw(event)) for event in self.deviations
+        }
+
+        if not same_run:
+            self.reset(snapshot.run_id)
+        self.max_events = max(1, int(snapshot.max_events))
+        self.run_id = str(snapshot.run_id or "")
+        self.run_epoch = int(snapshot.run_epoch)
+        self.character = str(snapshot.character or "")
+        self.act = int(snapshot.act)
+        self.floor = int(snapshot.floor)
+        self.hp = int(snapshot.hp)
+        self.max_hp = int(snapshot.max_hp)
+        self.gold = int(snapshot.gold)
+        self.deck = [_name(_thaw(value)) for value in snapshot.deck]
+        self.relics = [_name(_thaw(value)) for value in snapshot.relics]
+        self.potions = [_name(_thaw(value)) for value in snapshot.potions]
+        self.events = deque((_thaw(event) for event in snapshot.events),
+                            maxlen=self.max_events)
+        self.deviations = deque((_thaw(event) for event in snapshot.deviations),
+                                maxlen=self.max_events)
+
+        if preserve_plan and same_run:
+            (self.current_objective, self.plan_id,
+             self.plan_state_id, self.plan_reason) = previous_plan
+        else:
+            self.current_objective = str(snapshot.current_objective or "")
+            self.plan_id = str(snapshot.plan_id or "")
+            self.plan_state_id = str(snapshot.plan_state_id or "")
+            self.plan_reason = str(snapshot.plan_reason or "")
+
+        return [dict(event) for event in self.deviations
+                if self._deviation_key(event) not in prior_deviations]
+
+    @staticmethod
+    def _deviation_key(event: dict) -> tuple[str, str, str, str]:
+        return (
+            str(event.get("state_id", "") or ""),
+            str(event.get("decision_id", "") or ""),
+            str(event.get("advised", "") or ""),
+            json.dumps(event.get("actual"), sort_keys=True, ensure_ascii=False,
+                       default=str, separators=(",", ":")),
         )
 
     def identify_run(self, game: dict) -> str:

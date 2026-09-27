@@ -214,7 +214,7 @@ def main(argv: list[str] | None = None) -> int:
         if not ok:
             print("\nThe checks above name what is missing and how to fix it.")
             print("You can still watch a simulated run right now: python start.py --demo")
-            if "--setup" not in argv and not do_setup_saved():
+            if "--setup" not in argv:
                 print("(this does not block starting the dashboard below)")
         print()
 
@@ -309,8 +309,8 @@ def detect_backend() -> str:
 
 
 def do_setup_saved() -> bool:
-    """Legacy compatibility helper; startup no longer trusts this marker."""
-    return (ROOT / "config" / ".setup-done").exists()
+    """Deprecated compatibility helper; repository markers are never trusted."""
+    return False
 
 
 if __name__ == "__main__":

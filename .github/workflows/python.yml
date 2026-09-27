@@ -16,7 +16,20 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install --upgrade pytest
-      # This runner executes tests, compilation, contracts, metrics and replay
-      # independently, so a failure in one check cannot hide the others.
-      # It uses only committed synthetic data and never calls a provider.
-      - run: python tools/verify_offline.py
+      # Keep the checks separate so a failure in one layer cannot hide the
+      # result of another. All inputs below are committed synthetic fixtures;
+      # no provider, game installation or game configuration is used.
+      - name: Python tests
+        run: python -m pytest -q
+      - name: Python compilation
+        run: python -m compileall -q spirebrain start.py run_agent.py tools
+      - name: Cross-language contract
+        run: python tools/check_contracts.py
+      - name: Offline metrics
+        run: python -m spirebrain.analysis.metrics --input tests/fixtures/metrics/decision_trace.jsonl
+      - name: Four-stack replay evaluation
+        run: python -m spirebrain.analysis.evaluate --input tests/fixtures/replay/representative_states.json
+      - name: Deterministic replay
+        run: python -m spirebrain.analysis.replay --input tests/fixtures/replay/advisor_states.json
+      - name: Launcher smoke (offline)
+        run: python tools/auto_smoke.py

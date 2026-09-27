@@ -61,7 +61,8 @@ class StrategicPlanner:
               memory: RunMemory | RunMemorySnapshot | None = None,
               previous: StrategicPlan | None = None,
               generation: int = 0,
-              budget: DecisionBudget | None = None) -> BrainResponse:
+              budget: DecisionBudget | None = None,
+              decision_id: str = "") -> BrainResponse:
         state_id = stable_state_id(game)
         run_id = memory.run_id if memory else "local"
         # Memory is observed and committed by the owning game loop.  A planner
@@ -72,6 +73,7 @@ class StrategicPlanner:
             "state_id": state_id,
             "run_id": run_id,
             "run_epoch": int(getattr(memory, "run_epoch", 0) or 0),
+            "decision_id": str(decision_id or ""),
             # The request ID is included even before a new plan exists.  This
             # lets logs and providers correlate a timeout with the exact state
             # that requested it without treating it as an executable command.
@@ -81,12 +83,33 @@ class StrategicPlanner:
             "max_plan_steps": self.max_plan_steps,
             "state": compact_state(game),
             "strategy_context": strategy_context(game),
-            "memory": memory.digest(self.memory_events) if memory else {},
+            "memory": (memory.digest(self.memory_events)
+                       if memory and hasattr(memory, "digest")
+                       else (dict(memory) if isinstance(memory, dict) else {})),
             "guide_rules": list(guide_rules or [])[:20],
             "candidates": [candidate.model_dict() for candidate in candidates if candidate.legal],
             "previous_plan": previous.model_dict() if previous else None,
             "generated_at": time.time(),
         }
+        # Enforce the shared decision budget at the planner boundary as well
+        # as inside HTTP adapters.  Scripted and local providers may not call
+        # ``DecisionBudget.reserve`` themselves; a zero-call budget must still
+        # be a hard guarantee for every provider implementation.
+        if budget is not None:
+            if budget.calls >= budget.max_calls:
+                budget.exhausted = budget.exhausted or "max_model_calls"
+                return BrainResponse(
+                    backend=getattr(self.provider, "backend_name", "unknown"),
+                    error="max_model_calls_before_start", error_kind="budget_exhausted",
+                    fallback=True,
+                )
+            if budget.remaining_ms <= 0:
+                budget.exhausted = budget.exhausted or "decision_deadline"
+                return BrainResponse(
+                    backend=getattr(self.provider, "backend_name", "unknown"),
+                    error="decision_deadline_before_start", error_kind="budget_exhausted",
+                    fallback=True,
+                )
         try:
             with use_budget(budget):
                 result = self.provider.plan(payload)

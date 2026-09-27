@@ -1,0 +1,39 @@
+{
+  "fixture_type": "synthetic",
+  "kind": "scheduler_scenario",
+  "responses": [
+    {
+      "current_objective": "旧状态目标",
+      "long_term_goal": "完成回放",
+      "priority": ["survive"],
+      "preferred_candidates": [],
+      "avoid_candidates": [],
+      "resource_constraints": {},
+      "next_steps": ["等待新状态"],
+      "replan_triggers": ["state_changed"],
+      "reason": "状态 A 固定响应",
+      "uncertainty": "",
+      "expires_after": 2
+    },
+    {
+      "current_objective": "新状态目标",
+      "long_term_goal": "完成回放",
+      "priority": ["survive"],
+      "preferred_candidates": [],
+      "avoid_candidates": [],
+      "resource_constraints": {},
+      "next_steps": ["继续当前状态"],
+      "replan_triggers": [],
+      "reason": "状态 B 固定响应",
+      "uncertainty": "",
+      "expires_after": 2
+    }
+  ],
+  "replay_events": [
+    {"op": "queue", "state": {"run_id": "async-run", "screen_type": "EVENT", "act": 1, "floor": 1, "screen_state": {"options": ["a", "b"]}}},
+    {"op": "complete"},
+    {"op": "queue", "state": {"run_id": "async-run", "screen_type": "EVENT", "act": 1, "floor": 2, "screen_state": {"options": ["c", "d"]}}},
+    {"op": "complete"},
+    {"op": "poll", "state": {"run_id": "async-run", "screen_type": "EVENT", "act": 1, "floor": 2, "screen_state": {"options": ["c", "d"]}}}
+  ]
+}

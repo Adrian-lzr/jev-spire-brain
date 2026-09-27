@@ -8,6 +8,7 @@ from spirebrain.analysis.replay import run_fixture, load_fixed_responses
 
 
 FIXTURE = Path(__file__).parent / "fixtures/replay/advisor_states.json"
+REPRESENTATIVE = Path(__file__).parent / "fixtures/replay/representative_states.json"
 
 
 def test_four_modes_execute_distinct_offline_stacks():
@@ -24,6 +25,18 @@ def test_four_modes_execute_distinct_offline_stacks():
         assert mode["advise_wire_safety"] is True
         assert mode["real_outcomes"] == "unknown"
         assert mode["game_rejections"] is None
+
+
+def test_representative_replay_has_thirty_distinct_states_and_real_provider_counts():
+    modes = evaluate_fixture(REPRESENTATIVE)["modes"]
+    assert all(report["sample_count"] >= 30 for report in modes.values())
+    assert all(report["decision_count"] >= 30 for report in modes.values())
+    assert modes["rules"]["provider_calls"] == 0
+    assert modes["jev"]["jev_calls"] > 0
+    assert modes["strategic"]["strategic_calls"] > 0
+    assert modes["full"]["provider_calls"] == (
+        modes["full"]["jev_calls"] + modes["full"]["strategic_calls"])
+    assert all(report["real_outcomes"] == "unknown" for report in modes.values())
 
 
 @pytest.mark.parametrize("payload", [[], {},

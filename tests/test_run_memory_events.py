@@ -239,6 +239,92 @@ def test_inflight_combat_request_is_not_replaced_by_poll_noise():
     assert accepted.current_objective == "先保证生存"
 
 
+def test_changed_event_options_supersede_same_scope_inflight_plan():
+    """A late answer for old event choices must not replace the current plan."""
+    import threading
+
+    from spirebrain.brain.protocol import BrainResponse, StrategicPlan
+    from spirebrain.brain.orchestrator import StrategicOrchestrator
+    from spirebrain.brain.planner import stable_state_id
+
+    first_started = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+    release_second = threading.Event()
+    second_returning = threading.Event()
+
+    class Provider:
+        backend_name = "openai"
+        async_required = True
+
+        def __init__(self):
+            self.calls = 0
+
+        def plan(self, payload):
+            self.calls += 1
+            call = self.calls
+            if call == 1:
+                first_started.set()
+                assert release_first.wait(2)
+                objective = "old event"
+            else:
+                second_started.set()
+                assert release_second.wait(2)
+                objective = "current event"
+                second_returning.set()
+            plan = StrategicPlan.from_dict({
+                "plan_id": f"event-{call}", "state_id": payload["state_id"],
+                "run_id": payload["run_id"], "current_objective": objective,
+                "long_term_goal": "finish the run", "priority": [],
+                "preferred_candidates": [], "avoid_candidates": [],
+                "resource_constraints": {}, "next_steps": [],
+                "replan_triggers": [], "reason": "controlled fixture",
+                "uncertainty": "", "expires_after": 2,
+            }, state_id=payload["state_id"], run_id=payload["run_id"])
+            return BrainResponse(plan=plan, backend="openai")
+
+    provider = Provider()
+    owner = StrategicOrchestrator(client=provider, backend="openai")
+    old_state = {
+        "run_id": "run-event", "screen_type": "EVENT", "act": 1, "floor": 8,
+        "screen_state": {"options": ["trade", "leave"]},
+        "available_commands": ["choose", "wait", "state"],
+    }
+    current_state = dict(old_state, screen_state={"options": ["fight", "leave"]})
+
+    owner.plan_for(old_state, candidates=[])
+    assert first_started.wait(1)
+    poll_noise = dict(old_state, poll_uuid="irrelevant-poll-change")
+    owner.plan_for(poll_noise, candidates=[])
+    assert owner._queued_plan is None
+    assert owner.invalidated_plan_requests == 0
+    owner.plan_for(current_state, candidates=[])
+
+    # The event options changed within the same screen/act/floor scope. A new
+    # task must replace the pending one even though the first HTTP call cannot
+    # be cancelled.
+    assert owner._queued_plan is not None
+    assert owner._pending_state_id == stable_state_id(current_state)
+
+    release_first.set()
+    assert second_started.wait(1)
+    accepted, _ = owner.plan_for(current_state, candidates=[])
+    assert accepted is None
+    assert owner.memory.plan_id != "event-1"
+    assert owner.expired_plan_result_reasons["superseded_request"] == 1
+
+    release_second.set()
+    assert second_returning.wait(1)
+    result = owner._plan_results.get(timeout=1)
+    owner._plan_results.put_nowait(result)
+    accepted, _ = owner.plan_for(current_state, candidates=[])
+    assert accepted is not None
+    assert accepted.plan_id == "event-2"
+    assert owner.memory.plan_id == "event-2"
+    assert owner.invalidated_plan_requests == 1
+    assert owner.plan_invalidation_reasons == {"strategic_inputs_changed": 1}
+
+
 def test_late_combat_plan_keeps_strategy_but_rebinds_changed_candidates():
     """A successful slow strategic response must not disappear on hand churn."""
     import threading

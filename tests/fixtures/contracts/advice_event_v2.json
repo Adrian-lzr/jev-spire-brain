@@ -1,0 +1,70 @@
+{
+  "schema_version": 2,
+  "payload": {
+    "current_state_id": "state-contract-1",
+    "last_advice": {
+      "record_kind": "advice_history",
+      "point": "combat",
+      "screen": "COMBAT",
+      "label": "出 Strike",
+      "verb": "play",
+      "command": {"command": "play", "card": 0, "target": 0},
+      "reason": "当前一步可覆盖已知来袭伤害。",
+      "confidence": null,
+      "fallback": true,
+      "state_id": "state-contract-1",
+      "run_id": "run-contract-1",
+      "run_epoch": 1,
+      "decision_id": "decision-contract-1",
+      "request_id": null,
+      "plan_id": null,
+      "advice_revision": 1,
+      "status": "fast_advice",
+      "display_status": "local_advice",
+      "source_type": "rule_fallback",
+      "strategic_goal": "",
+      "uncertain": false,
+      "alternative_command": null,
+      "alternative_label": ""
+    },
+    "run_state": {
+      "mode": "advise",
+      "config_id": "offline-contract",
+      "model_connection_status": "fallback"
+    }
+  },
+  "expected_python": {
+    "point": "combat",
+    "screen": "COMBAT",
+    "command": {"command": "play", "card": 0, "target": 0},
+    "confidence": 0.0,
+    "fallback": true,
+    "state_id": "state-contract-1",
+    "run_id": "run-contract-1",
+    "run_epoch": 1,
+    "decision_id": "decision-contract-1",
+    "request_id": "",
+    "plan_id": null,
+    "advice_revision": 1,
+    "status": "fast_advice",
+    "display_status": "local_advice",
+    "source_type": "rule_fallback",
+    "uncertain": false,
+    "alternative_command": null,
+    "alternative_label": ""
+  },
+  "expected_java": {
+    "stateId": "state-contract-1",
+    "planId": "",
+    "strategicGoal": "",
+    "alternativeLabel": "",
+    "alternativeCondition": "",
+    "adviceConfidence": 0.0,
+    "uncertain": false,
+    "displayStatus": "local_advice",
+    "adviceSource": "规则兜底",
+    "mode": "advise",
+    "configId": "offline-contract",
+    "modelConnectionStatus": "fallback"
+  }
+}

@@ -180,11 +180,12 @@ Two bugs this work found, both pinned by tests afterwards:
 - [x] **One-command launcher (2026-09-22)** — `start.py`: doctor → dashboard →
   browser, in three labelled steps, every failure naming its fix. `--demo`
   plays a simulated run with no game and no key; `--setup` writes the mod
-  config with the dashboard pre-wired and is remembered
-  (`config/.setup-done`), so the whole routine afterwards is
-  `python start.py` + start the game. Backend auto-detects (openrouter with a
-  key, mock without) — the demo never depends on a key. Found by testing:
-  `install_mod_config.check_argv` flagged URLs as missing files; fixed there
+  config with the dashboard pre-wired. Setup validity is derived from the
+  current generated config, not a tracked repository marker, so a fresh clone
+  and a moved checkout are diagnosed instead of silently treated as configured.
+  Backend auto-detects (openrouter with a key, mock without) — the demo never
+  depends on a key. Found by testing: `install_mod_config.check_argv` flagged
+  URLs as missing files; fixed there
 - [x] 18 overlay tests + 5 launcher tests (`tests/test_start.py`); 15/15 test
   files green
 
@@ -366,3 +367,13 @@ Offline Python tests and the cross-language static contract check run in GitHub
 Actions. Real game validation and Java compilation remain environment-dependent:
 they require the installed Slay the Spire, ModTheSpire, BaseMod and game JARs.
 No win-rate claim is made until paired real-game runs are available.
+
+## Closed-loop execution plan status (2026-09-27)
+
+The current implementation branch has completed the offline portions of the
+state, combat, lifecycle, replay and cross-language work. The reproducible
+verification report is in
+[`docs/engineering/verification-report-2026-09-27.md`](engineering/verification-report-2026-09-27.md).
+This is not a claim that the entire plan is complete: Linux runtime evidence,
+real Java/game integration, live providers, expert labels and paired outcomes
+remain explicitly unverified.

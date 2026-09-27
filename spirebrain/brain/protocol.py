@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import hashlib
 import json
+import copy
 import time
 from typing import Any, Protocol
 
@@ -90,6 +91,12 @@ class DecisionContext:
                 seed=str(getattr(self.run, "seed", "") or ""),
                 mode=str(getattr(self.run, "mode", "advise") or "advise"),
             )
+        # A context crosses the main-loop/worker boundary.  Copy the state at
+        # creation time so later CommunicationMod polling cannot mutate the
+        # evidence associated with an in-flight decision.  The live state is
+        # intentionally still exposed as a normal mapping for compatibility;
+        # callers must treat it as a snapshot and never write through it.
+        self.state = copy.deepcopy(dict(self.state or {}))
 
     @property
     def run_id(self) -> str:
@@ -104,6 +111,43 @@ class DecisionContext:
         return (self.run_id == str(run_id) and self.run_epoch == int(run_epoch)
                 and self.state_id == str(state_id)
                 and (generation is None or self.generation == int(generation)))
+
+
+@dataclass(frozen=True)
+class DecisionRequest:
+    """Immutable worker input created by the owning game-loop boundary.
+
+    Providers and tactical workers receive this value instead of references to
+    the live session.  ``state``/``memory``/``candidates`` are copied once at
+    construction, which prevents a late response from observing a newer hand,
+    plan or run epoch.
+    """
+
+    context: DecisionContext
+    state: dict = field(default_factory=dict, repr=False)
+    memory: Any = field(default_factory=dict, repr=False)
+    candidates: tuple = ()
+    plan: Any = None
+    deadline_monotonic: float | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "state", copy.deepcopy(dict(self.state or {})))
+        # RunMemorySnapshot implements immutable sharing; mutable compatibility
+        # mappings are still defensively copied.
+        object.__setattr__(self, "memory", copy.deepcopy(self.memory))
+        object.__setattr__(self, "candidates", tuple(copy.deepcopy(list(self.candidates or ()))))
+        object.__setattr__(self, "plan", copy.deepcopy(self.plan))
+
+
+@dataclass(frozen=True)
+class DecisionResult:
+    """Worker output; only the owning loop may commit it to live state."""
+
+    request: DecisionRequest
+    proposal: Any = None
+    response: Any = None
+    error: str = ""
+    expired: bool = False
 
 
 @dataclass

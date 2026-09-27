@@ -44,6 +44,8 @@ class LoggingJevClient(JevClient):
         identity = {key: context.get(key) for key in
                     ("run_id", "run_epoch", "decision_id", "state_id", "plan_id", "config_id")}
         identity["request_id"] = request_id
+        identity["logical_request_id"] = str(context.get("logical_request_id") or request_id)
+        identity["attempt_id"] = str(context.get("attempt_id") or f"{request_id}:1")
         if self.event_sink is not None:
             try:
                 self.event_sink("provider_request", {**identity, "provider": self.backend_name,

@@ -184,8 +184,10 @@ With **real JEV** put `OPENROUTER_API_KEY=...` in a `.env` file, then:
 python start.py --setup     # also writes the game's mod config (backs up the old one)
 ```
 
-`--setup` is remembered — after the first time, plain `python start.py` is the
-whole routine.
+`--setup` is the only command that writes the game config. Plain
+`python start.py` performs a read-only validity check each time and reports
+whether the saved CommunicationMod command is current; it never relies on a
+tracked repository marker or overwrites a custom config.
 
 The advisor now has an optional strategic model layer above JEV. Put
 `OPENAI_API_KEY=...` (or the provider-neutral `BRAIN_API_KEY=...`) in `.env` to

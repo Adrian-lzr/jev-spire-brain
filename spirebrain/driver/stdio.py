@@ -504,6 +504,14 @@ class StdioTransport:
         return self.handle_message(message)
 
     def run(self, instream: Iterable[str], outstream, *, send_ready: bool = True) -> int:
+        """Run the pipe and close background work with a bounded wait on exit."""
+        try:
+            return self._run_messages(instream, outstream, send_ready=send_ready)
+        finally:
+            self.close()
+
+    def _run_messages(self, instream: Iterable[str], outstream, *,
+                      send_ready: bool = True) -> int:
         """The real loop. Returns the number of commands sent."""
         if send_ready:
             # Point (1) of the module docstring. Without this the game waits ten
@@ -564,6 +572,20 @@ class StdioTransport:
                             pass
                 break
         return self.commands
+
+    def close(self, timeout_ms: int = 100) -> bool:
+        """Ask owned workers to stop, without waiting indefinitely on a provider."""
+        complete = True
+        for owner in (self.advisor, self.agent):
+            closer = getattr(owner, "close", None)
+            if closer is None:
+                continue
+            try:
+                complete = bool(closer(timeout_ms=timeout_ms)) and complete
+            except Exception:
+                self.errors += 1
+                complete = False
+        return complete
 
     def _log(self, raw: str, command: str | None) -> None:
         """Every message and answer, for post-mortem. Never stdout.

@@ -20,6 +20,7 @@ command. Two rules keep that honest:
 from __future__ import annotations
 
 import json
+import copy
 import time
 from pathlib import Path
 
@@ -255,6 +256,11 @@ class SpireBrainAgent:
         self._last_observed_terminal = False
         self._advice_revisions: dict[str, int] = {}
         self._last_final_decision: FinalDecision | None = None
+        # The decision identity is created before planning/provider work.  It
+        # is copied into the planner payload and retained by the finalization
+        # boundary instead of being regenerated after a provider returns.
+        self._active_decision_id = ""
+        self._active_advice_revision = 0
         self.combat_engine = CombatTacticalEngine(
             depth=int(brain_cfg.get("combat_search_depth", 3) or 3),
             node_limit=int(brain_cfg.get("combat_search_nodes", 64) or 64),
@@ -286,6 +292,55 @@ class SpireBrainAgent:
         constructor["async_planning"] = False
         return SpireBrainAgent(**constructor, feed=None)
 
+    def adopt_run_snapshot(self, snapshot, memory_snapshot=None,
+                           plan_snapshot=None) -> None:
+        """Adopt owner identity, facts, and the current plan as snapshots.
+
+        ``plan_snapshot`` is optional for compatibility with older callers;
+        when supplied, the clone never treats its local plan as authoritative.
+        """
+        run_id = str(getattr(snapshot, "run_id", "") or "")
+        run_epoch = int(getattr(snapshot, "run_epoch", 0) or 0)
+        seed = str(getattr(snapshot, "seed", "") or "")
+        mode = str(getattr(snapshot, "mode", "advise") or "advise")
+        session_changed = (
+            self.run_session.run_id != run_id
+            or self.run_session.run_epoch != run_epoch
+        )
+        if session_changed:
+            self.begin_new_run(run_id, seed=seed)
+        memory = self.strategic.memory
+        if memory.run_id != run_id or memory.run_epoch != run_epoch:
+            self.strategic.reset(run_id=run_id)
+            memory = self.strategic.memory
+        self.run_session.run_id = run_id
+        self.run_session.run_epoch = run_epoch
+        self.run_session.seed = seed
+        self.run_session.mode = mode
+        if memory_snapshot is not None:
+            new_deviations = memory.sync_from_snapshot(
+                memory_snapshot, preserve_plan=True)
+            if new_deviations and not session_changed:
+                # Feedback is committed by the owner. Invalidate the worker's
+                # cached plan only after importing that committed fact.
+                self.strategic.request_replan("player_deviation")
+        if plan_snapshot is not None:
+            self.strategic.current_plan = copy.deepcopy(plan_snapshot)
+            self.strategic.plan_valid = self.strategic.current_plan is not None
+        elif memory_snapshot is not None:
+            owner_plan_id = str(memory_snapshot.plan_id or "")
+            worker_plan_id = str(getattr(self.strategic.current_plan, "plan_id", "") or "")
+            if owner_plan_id != worker_plan_id:
+                # The snapshot only contains bounded plan metadata, not the
+                # full candidate bindings. A changed owner plan is therefore
+                # conservatively invalidated until the owner sends its full
+                # immutable plan snapshot.
+                self.strategic.current_plan = None
+                self.strategic.plan_valid = False
+        else:
+            memory.run_id = run_id
+            memory.run_epoch = run_epoch
+
     def begin_new_run(self, run_id: str = "", *, seed: str = "") -> None:
         """Reset all live-run state before the first state of a new run.
 
@@ -305,6 +360,8 @@ class SpireBrainAgent:
         self._active_candidates = []
         self._active_plan = None
         self._active_brain_response = None
+        self._active_decision_id = ""
+        self._active_advice_revision = 0
         self.hp = None
         try:
             self.strategic.reset(run_id=run_id)
@@ -313,6 +370,10 @@ class SpireBrainAgent:
 
     # Explicit alias for integrations that name the boundary after its effect.
     reset_run_state = begin_new_run
+
+    def close(self, timeout_ms: int = 100) -> bool:
+        """Close model workers without allowing shutdown to wait on the network."""
+        return self.strategic.close(timeout_ms=timeout_ms)
 
     def quick_advice(self, game: dict) -> dict:
         """Immediate, model-free advice or a truthful waiting/coverage state."""
@@ -514,21 +575,21 @@ class SpireBrainAgent:
                     reason="无法从连续状态确定玩家行动",
                     observed_state=observed_state,
                 )
-                trace_kind = "unobserved"
+                trace_kind = "unobserved_record"
             else:
                 event = memory.record_observed_action(
                     action, state_id=advice.state_id,
                     decision_id=advice.decision_id, evidence=outcome.evidence,
                     observed_state=observed_state,
                 )
-                trace_kind = "fact"
+                trace_kind = "fact_memory"
                 if outcome.verdict == "mismatch":
                     event = memory.record_deviation(
                         advice.candidate_id or advice.label, str(actual),
                         state_id=advice.state_id, decision_id=advice.decision_id,
                         evidence=outcome.evidence, observed_state=observed_state,
                     )
-                    trace_kind = "deviation"
+                    trace_kind = "deviation_record"
                     # This invalidates only pending strategic work. The player
                     # action itself remains a fact in memory.
                     self.strategic.request_replan("player_deviation")
@@ -552,7 +613,7 @@ class SpireBrainAgent:
                 result, state_id=state_id or self._observed_state_id,
                 decision_id=decision_id, evidence=evidence,
             )
-            self.trace.record("result", {
+            self.trace.record("result_record", {
                 "record_kind": "result_record",
                 "run_id": event.get("run_id", self.run_session.run_id),
                 "run_epoch": event.get("run_epoch", self.run_session.run_epoch),
@@ -577,6 +638,22 @@ class SpireBrainAgent:
         self.snapshot = GameSnapshot.from_communication(game)
         game = self.snapshot.payload
         self.observe(game)
+        # AdviseSession creates the identity before dispatching a background
+        # task.  Direct/legacy callers may omit it; in that case this is the
+        # single compatibility boundary that creates one.  Provider wrappers
+        # receive the same value through ``game``/planner payload.
+        state_for_decision = self.snapshot.state_id
+        supplied_decision_id = str(_get(game, "decision_id", default="") or "")
+        run_id = self.run_session.run_id or self.strategic.memory.run_id or "local"
+        self._active_decision_id = supplied_decision_id or \
+            f"{run_id}:{state_for_decision[:16]}:{self._decision_sequence}"
+        try:
+            self._active_advice_revision = int(_get(game, "advice_revision", default=0) or 0)
+        except (TypeError, ValueError):
+            self._active_advice_revision = 0
+        # GameSnapshot intentionally keeps unknown CommunicationMod fields;
+        # make the identity explicit for all downstream planner/provider code.
+        game["decision_id"] = self._active_decision_id
         self.guide_result = self.guide.evaluate(game, self._budget().remaining_budget)
         self._guide_client.active = self.guide_result.evidence()
         character = str(_get(game, "character", "class", "player_class", default="")).upper()
@@ -631,6 +708,7 @@ class SpireBrainAgent:
                     guide_rules=self.guide_result.evidence(),
                     trigger=trigger,
                     budget=self._active_budget,
+                    decision_id=self._active_decision_id,
                 )
         except Exception as exc:  # strategic planning is a non-fatal side channel
             self._active_brain_response = None
@@ -740,9 +818,17 @@ class SpireBrainAgent:
         state_for_trace = self.snapshot.state_id if self.snapshot else self._observed_state_id
         run_id = self.run_session.run_id or self.strategic.memory.run_id
         self.run_session.observe(run_id)
-        decision_id = f"{run_id}:{state_for_trace[:16]}:{self._decision_sequence}"
-        revision = self._advice_revisions.get(state_for_trace, 0) + 1
-        self._advice_revisions[state_for_trace] = revision
+        # The identity was created before any provider call. Reusing it here
+        # keeps provider request/response, decision and advice events in one
+        # chain. A legacy caller that bypassed the normal entry still gets a
+        # single compatibility fallback, never a second post-hoc identity.
+        decision_id = self._active_decision_id or \
+            f"{run_id}:{state_for_trace[:16]}:{self._decision_sequence}"
+        self._active_decision_id = decision_id
+        revision = self._active_advice_revision or \
+            (self._advice_revisions.get(state_for_trace, 0) + 1)
+        self._advice_revisions[state_for_trace] = max(
+            self._advice_revisions.get(state_for_trace, 0), revision)
         context = DecisionContext(
             run=self.run_session, state_id=state_for_trace, decision_id=decision_id,
             config_id=self.runtime_config.config_id, generation=self._decision_sequence,
@@ -788,27 +874,11 @@ class SpireBrainAgent:
         decision = final.legacy_decision
         command = dict(final.command)
         request_id = final.request_id
-        if request_id and request_id not in self._traced_requests:
-            self._traced_requests.add(request_id)
-            if len(self._traced_requests) > 4096:
-                # Request IDs are only a per-process deduplication aid. Keep a
-                # bounded window so a long run cannot turn this set into a leak.
-                self._traced_requests = set(list(self._traced_requests)[-2048:])
-            response = self._active_brain_response
-            usage = getattr(response, "usage", {}) or {}
-            self.trace.record("provider_request", {
-                "run_id": final.run_id, "state_id": final.state_id,
-                "decision_id": final.decision_id, "request_id": request_id,
-                "plan_id": final.plan_id, "brain_backend": self.strategic.backend_name,
-                "request_latency_ms": (int(detail["brain_latency_ms"])
-                                        if detail.get("brain_latency_ms") is not None else None),
-                "cost_usd": usage.get("cost_usd", usage.get("cost")),
-                "fallback": bool(detail.get("brain_error")),
-                "fallback_reason": detail.get("brain_error", "") or None,
-                "error_kind": getattr(response, "error_kind", "") or None,
-                "budget": self._active_budget.snapshot() if self._active_budget else None,
-                "timeout": "timeout" in str(detail.get("brain_error", "")).lower(),
-            })
+        # Provider wrappers own provider_request/provider_response events at the
+        # actual request boundary.  The finalization/recording boundary must
+        # remain record-only: writing a synthetic provider_request here creates
+        # a duplicate attempt (and can lose the original request identity).
+        # Keep request_id for the decision/advice linkage below.
         if decision is not None:
             self._append_history({
                 "point": decision.point, "value": decision.value,
@@ -1406,12 +1476,15 @@ class SpireBrainAgent:
             tactical_confidence = 0.0
             if tactical is not None:
                 tactical_candidate, tactical_confidence = tactical
+                rebound_facts = self.combat_engine.facts_for_candidate(
+                    game, tactical_candidate, prior=suggestion.facts)
+                rebound_facts.update({"decision_basis": "jev_tactical_pick",
+                                      "jev_selected_candidate": tactical_candidate.candidate_id})
                 suggestion = type(suggestion)(
                     command=dict(tactical_candidate.command),
                     reason=f"JEV 在 GPT 战略目标内选择：{tactical_candidate.label}。",
-                    uncertain=bool(tactical_candidate.uncertainty),
-                    facts={**suggestion.facts, "decision_basis": "jev_tactical_pick",
-                           "jev_selected_candidate": tactical_candidate.candidate_id},
+                    uncertain=bool(rebound_facts.get("uncertainty")),
+                    facts=rebound_facts,
                 )
             return self._finalize_and_record(Decision("combat", suggestion.command, tactical_confidence,
                                          tactical is None,

@@ -9,6 +9,7 @@ from spirebrain.brain.action_broker import build_action_candidates, reconcile
 from spirebrain.brain.protocol import (
     ActionCandidate,
     DecisionContext,
+    DecisionRequest,
     DecisionProposal,
     FinalDecision,
     RunSession,
@@ -33,6 +34,23 @@ def test_decision_budget_is_injectable_and_stops_new_calls():
     assert budget.remaining_ms == 0
     with use_budget(budget):
         assert budget is not None
+
+
+def test_decision_request_freezes_worker_inputs_from_live_state_and_memory():
+    session = RunSession(run_id="run-a", run_epoch=3, seed="seed-a")
+    state = {"screen_type": "COMBAT", "hand": [{"id": "Strike", "cost": 1}]}
+    memory = {"events": [{"kind": "observed", "value": 1}]}
+    candidates = [{"candidate_id": "c1", "command": {"command": "wait"}}]
+    request = DecisionRequest(
+        context=DecisionContext(session, "state-a", "decision-a", state=state),
+        state=state, memory=memory, candidates=candidates,
+    )
+    state["hand"][0]["cost"] = 9
+    memory["events"][0]["value"] = 9
+    candidates[0]["command"]["command"] = "play"
+    assert request.state["hand"][0]["cost"] == 1
+    assert request.memory["events"][0]["value"] == 1
+    assert request.candidates[0]["command"]["command"] == "wait"
 
 
 def test_budget_shortens_jev_timeout_without_network():

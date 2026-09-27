@@ -406,6 +406,27 @@ def test_grid_confirm_phase_survives_the_transport_end_to_end():
         assert transport.ladder_events == 0
 
 
+def test_stdio_eof_closes_advisor_and_agent_workers():
+    import io
+    from spirebrain.driver.stdio import StdioTransport
+
+    class LifecycleAgent:
+        def __init__(self):
+            self.closed = []
+
+        def close(self, timeout_ms=100):
+            self.closed.append(timeout_ms)
+            return True
+
+    agent = LifecycleAgent()
+    transport = StdioTransport(agent, mode="play", log_path=None,
+                               advice_path=None, warn_stream=io.StringIO())
+
+    assert transport.run([], io.StringIO(), send_ready=False) == 0
+    assert transport.advisor._closed is True
+    assert agent.closed == [100]
+
+
 if __name__ == "__main__":
     import traceback
 

@@ -8,13 +8,15 @@ import time
 from pathlib import Path
 
 from spirebrain.redaction import redact_text
-from spirebrain.analysis.event_contract import make_event, decision_chain
+from spirebrain.analysis.event_contract import make_event, decision_chain, validate_event
 from spirebrain.analysis.replay_blob import ReplayBlobStore
 
 
 _LOCK = threading.Lock()
+_SEQUENCES: dict[str, int] = {}
 _FIELDS = {
-    "run_id", "run_epoch", "state_id", "decision_id", "request_id", "plan_id",
+    "run_id", "run_epoch", "state_id", "decision_id", "request_id",
+    "logical_request_id", "attempt_id", "plan_id",
     "advice_revision", "screen", "point", "config_id", "brain_backend", "brain_source",
     "jev_backend", "source_type", "source", "status", "rule_ids", "candidates",
     "filtered_candidates", "selected_candidate_id", "candidate_signature", "command", "alternative",
@@ -28,6 +30,7 @@ _FIELDS = {
     "result", "evidence", "record_kind", "act", "floor", "cost_usd", "timeout", "http_status", "expired_result",
     "expired_result_count", "fixture_type", "code_version", "previous_advice_revision", "replacement_reason", "usage", "provider_request_id",
     "state_blob", "candidate_blob", "response_blob",
+    "contract_errors",
 }
 
 
@@ -51,20 +54,29 @@ class DecisionTrace:
 
     def __init__(self, path: str | Path, config_id: str = "") -> None:
         self.path = Path(path)
+        self._sequence_key = str(self.path.resolve())
         self.config_id = str(config_id)
-        self._sequence = 0
+        with _LOCK:
+            if self._sequence_key not in _SEQUENCES:
+                _SEQUENCES[self._sequence_key] = self._read_last_sequence()
+            self._sequence = _SEQUENCES[self._sequence_key]
         self.blobs = ReplayBlobStore(self.path.parent / "decision_blobs")
 
+    def _read_last_sequence(self) -> int:
+        sequence = 0
+        try:
+            with self.path.open("r", encoding="utf-8") as stream:
+                for line in stream:
+                    try:
+                        value = json.loads(line)
+                        sequence = max(sequence, int(value.get("trace_sequence", 0)))
+                    except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+                        continue
+        except OSError:
+            pass
+        return sequence
+
     def record(self, event_type: str, fields: dict) -> bool:
-        self._sequence += 1
-        record = {
-            "schema_version": 2,
-            "timestamp": time.time(),
-            "ts": time.time(),
-            "trace_sequence": self._sequence,
-            "event_type": str(event_type),
-            "config_id": self.config_id,
-        }
         safe_fields = {key: _safe(value) for key, value in fields.items()
                        if key in _FIELDS and key != "config_id"}
         # Preserve bounded, sanitized state and candidate snapshots by content
@@ -76,17 +88,40 @@ class DecisionTrace:
                     safe_fields[field_name] = self.blobs.put(value)
                 except (OSError, TypeError, ValueError):
                     safe_fields[field_name] = None
-        record.update(safe_fields)
-        record = make_event(event_type, fields=record, timestamp=record["timestamp"])
-        record["trace_sequence"] = self._sequence
-        try:
-            line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            with _LOCK, self.path.open("a", encoding="utf-8") as stream:
-                stream.write(line)
-            return True
-        except (OSError, UnicodeError, TypeError, ValueError):
-            return False
+        with _LOCK:
+            sequence = _SEQUENCES.get(self._sequence_key)
+            if sequence is None:
+                sequence = self._read_last_sequence()
+            sequence += 1
+            _SEQUENCES[self._sequence_key] = sequence
+            self._sequence = sequence
+            timestamp = time.time()
+            record = {
+                "schema_version": 2,
+                "timestamp": timestamp,
+                "ts": timestamp,
+                "trace_sequence": sequence,
+                "event_type": str(event_type),
+                "config_id": self.config_id,
+            }
+            record.update(safe_fields)
+            record = make_event(event_type, fields=record, timestamp=timestamp)
+            record["trace_sequence"] = sequence
+            # Validate producer semantics at the write boundary.  A malformed
+            # diagnostic event must remain observable without ever blocking the
+            # game loop, so errors are attached to the record rather than
+            # raising or dropping the event.
+            contract_errors = validate_event(record, strict=True)
+            if contract_errors:
+                record["contract_errors"] = contract_errors
+            try:
+                line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                with self.path.open("a", encoding="utf-8") as stream:
+                    stream.write(line)
+                return True
+            except (OSError, UnicodeError, TypeError, ValueError):
+                return False
 
     def find_decision(self, decision_id: str) -> dict:
         records = []

@@ -30,6 +30,8 @@ import copy
 from pathlib import Path
 from typing import Any, Callable
 
+from spirebrain.brain.protocol import RunSessionSnapshot
+from spirebrain.brain.action_broker import build_action_candidates
 from spirebrain.driver.modes import ADVISE_POLL_VERBS
 from spirebrain.driver.legality import check_action
 from spirebrain.driver.witness import (
@@ -100,12 +102,28 @@ class AdviseSession:
         self._latest_state_id: str | None = None
         self._generation = 0
         self._decision_sequence = 0
+        self._advice_revisions: dict[str, int] = {}
         self._state_started_at: dict[str, float] = {}
         self._first_advice_latency: dict[str, int] = {}
         self._work_lock = threading.Lock()
         self._work_running = False
         self._queued_work: tuple | None = None
-        self._completed: queue.Queue = queue.Queue()
+        self._worker_thread: threading.Thread | None = None
+        self._closed = False
+        self.dropped_completions = 0
+        self._completed: queue.Queue = queue.Queue(maxsize=1)
+
+    def close(self, timeout_ms: int = 100) -> bool:
+        """Invalidate outstanding advice and wait a bounded time for its worker."""
+        with self._work_lock:
+            self._closed = True
+            self._generation += 1
+            self._queued_work = None
+            thread = self._worker_thread
+        if thread is None or thread is threading.current_thread():
+            return True
+        thread.join(max(0, min(250, int(timeout_ms))) / 1000.0)
+        return not thread.is_alive()
 
     def reset_run(self) -> None:
         """A new run invalidates any advice pending from the old one.
@@ -141,6 +159,8 @@ class AdviseSession:
         every ~1/3 second, and re-asking JEV on each one would turn a $0.001
         decision into a per-second bill for a player who is simply thinking.
         """
+        if self._closed:
+            return self._poll(available)
         # Include the legal command view in the recommendation identity.  Poll
         # metadata and animation noise are removed by the shared projection.
         fp = self._fingerprint(dict(game, available_commands=available))
@@ -222,6 +242,22 @@ class AdviseSession:
         # The worker receives a private snapshot. It never shares nested live
         # CommunicationMod objects with the main loop.
         payload = copy.deepcopy(dict(game, available_commands=available))
+        # Carry the main-loop decision identity into the private worker.  The
+        # worker must not mint a second ID after a provider request has begun.
+        if self._current_decision_id:
+            payload["decision_id"] = self._current_decision_id
+        owner_session = getattr(self.agent, "run_session", None)
+        snapshot = getattr(owner_session, "snapshot", None)
+        run_snapshot = (snapshot() if callable(snapshot) else RunSessionSnapshot(
+            run_id=str(payload.get("run_id") or payload.get("runId") or ""),
+            run_epoch=int(getattr(owner_session, "run_epoch", 0) or 0),
+            seed=str(payload.get("seed") or ""), mode="advise"))
+        owner_memory = getattr(getattr(self.agent, "strategic", None), "memory", None)
+        memory_snapshotter = getattr(owner_memory, "snapshot", None)
+        memory_snapshot = memory_snapshotter() if callable(memory_snapshotter) else None
+        owner_strategic = getattr(self.agent, "strategic", None)
+        owner_plan = (copy.deepcopy(getattr(owner_strategic, "current_plan", None))
+                      if getattr(owner_strategic, "plan_valid", False) else None)
         try:
             quick = self.agent.quick_advice(payload)
         except Exception as exc:  # noqa: BLE001
@@ -247,13 +283,15 @@ class AdviseSession:
                                  quick.get("guide_rules", []),
                                  point=SCREEN_POINT.get(screen_of(game), "navigation"))
         with self._work_lock:
-            run_epoch = int(getattr(getattr(self.agent, "run_session", None),
-                                   "run_epoch", 0) or 0)
-            self._queued_work = (fp, payload, self._generation, run_epoch)
+            if self._closed:
+                return
+            self._queued_work = (fp, payload, self._generation, run_snapshot,
+                                 memory_snapshot, owner_plan)
             if not self._work_running:
                 self._work_running = True
-                threading.Thread(target=self._work_loop, daemon=True,
-                                 name="SpireBrainAdvice").start()
+                self._worker_thread = threading.Thread(
+                    target=self._work_loop, daemon=True, name="SpireBrainAdvice")
+                self._worker_thread.start()
 
     def _work_loop(self) -> None:
         while True:
@@ -262,14 +300,44 @@ class AdviseSession:
                 self._queued_work = None
                 if job is None:
                     self._work_running = False
+                    if self._worker_thread is threading.current_thread():
+                        self._worker_thread = None
                     return
-                fp, payload, generation, run_epoch = job
+                fp, payload, generation, run_snapshot, memory_snapshot, owner_plan = job
+            run_id = str(getattr(run_snapshot, "run_id", "") or "")
+            run_epoch = int(getattr(run_snapshot, "run_epoch", 0) or 0)
             try:
+                adopt = getattr(self._worker_agent, "adopt_run_snapshot", None)
+                if adopt is not None:
+                    adopt(run_snapshot, memory_snapshot, owner_plan)
                 command = self._worker_agent.choose_action(payload)
                 entry = dict(self._worker_agent.history[-1]) if self._worker_agent.history else None
-                self._completed.put((fp, generation, run_epoch, payload, command, entry, None))
+                worker_plan = None
+                strategic = getattr(self._worker_agent, "strategic", None)
+                if strategic is not None and getattr(strategic, "plan_valid", False):
+                    worker_plan = copy.deepcopy(getattr(strategic, "current_plan", None))
+                self._enqueue_completed((fp, generation, run_id, run_epoch,
+                                         payload, command, entry, None, worker_plan))
             except Exception as exc:  # noqa: BLE001 - failure becomes a panel status
-                self._completed.put((fp, generation, run_epoch, payload, None, None, exc))
+                self._enqueue_completed((fp, generation, run_id, run_epoch,
+                                         payload, None, None, exc, None))
+
+    def _enqueue_completed(self, result: tuple) -> None:
+        """Keep only the newest worker completion if the poll loop falls behind."""
+        try:
+            self._completed.put_nowait(result)
+            return
+        except queue.Full:
+            pass
+        try:
+            self._completed.get_nowait()
+            self.dropped_completions += 1
+        except queue.Empty:
+            pass
+        try:
+            self._completed.put_nowait(result)
+        except queue.Full:
+            self.dropped_completions += 1
 
     def _begin_decision(self, fp: str, state_id: str, game: dict | None = None) -> None:
         self._decision_sequence += 1
@@ -290,20 +358,40 @@ class AdviseSession:
     def _drain_completed(self) -> None:
         while True:
             try:
-                fp, generation, run_epoch, payload, command, entry, error = self._completed.get_nowait()
+                completed = self._completed.get_nowait()
             except queue.Empty:
                 return
+            if len(completed) >= 9:
+                (fp, generation, run_id, run_epoch, payload,
+                 command, entry, error, worker_plan) = completed
+            else:
+                (fp, generation, run_id, run_epoch, payload,
+                 command, entry, error) = completed
+                worker_plan = None
             current_epoch = int(getattr(getattr(self.agent, "run_session", None),
                                        "run_epoch", 0) or 0)
+            current_run_id = str(getattr(getattr(self.agent, "run_session", None),
+                                         "run_id", "") or "")
+            run_changed = bool(run_id and current_run_id and run_id != current_run_id)
+            entry_run_id = str((entry or {}).get("run_id", "") or "")
+            try:
+                entry_run_epoch = int((entry or {}).get("run_epoch", run_epoch) or 0)
+            except (TypeError, ValueError):
+                entry_run_epoch = -1
+            worker_identity_mismatch = bool(
+                entry and ((run_id and entry_run_id and entry_run_id != run_id)
+                           or entry_run_epoch != run_epoch))
             if (generation != self._generation or fp != self._latest_fp
-                    or run_epoch != current_epoch):
+                    or run_epoch != current_epoch or run_changed
+                    or worker_identity_mismatch):
                 self._trace("expired_result", {
                     "decision_id": (entry or {}).get("decision_id") if entry else self._current_decision_id,
-                    "state_id": semantic_state_id(payload), "run_id": (entry or {}).get("run_id", ""),
+                    "state_id": semantic_state_id(payload), "run_id": run_id or entry_run_id,
                     "run_epoch": run_epoch, "request_id": (entry or {}).get("request_id", ""),
                     "expired_result": True,
                     "fallback_reason": ("generation_mismatch" if generation != self._generation
                                          else "state_changed" if fp != self._latest_fp
+                                         else "worker_identity_mismatch" if worker_identity_mismatch
                                          else "run_changed"),
                 })
                 continue  # the player already changed the game state
@@ -322,6 +410,15 @@ class AdviseSession:
                     try:
                         feed.publish("decision", dict(entry))
                     except Exception:  # noqa: BLE001 - diagnostics are optional
+                        pass
+            if worker_plan is not None:
+                owner_strategic = getattr(self.agent, "strategic", None)
+                commit = getattr(owner_strategic, "commit_worker_plan", None)
+                if commit is not None:
+                    try:
+                        commit(worker_plan, payload,
+                               candidates=build_action_candidates(payload))
+                    except Exception:  # noqa: BLE001 - proposal commit is non-fatal
                         pass
             self._record_action(payload, command, self._worker_agent,
                                 semantic_state_id(payload),
@@ -380,10 +477,11 @@ class AdviseSession:
             observed_run_epoch = int((entry or {}).get("run_epoch", 0) or 0)
         except (TypeError, ValueError):
             observed_run_epoch = 0
-        try:
-            advice_revision = int((entry or {}).get("advice_revision", 0) or 0)
-        except (TypeError, ValueError):
-            advice_revision = 0
+        decision_id = str((entry or {}).get("decision_id") or
+                          game.get("decision_id") or
+                          getattr(self, "_current_decision_id", "") or "")
+        advice_revision = self._next_advice_revision(
+            decision_id, command, detail, point, label_for(payload, command, point))
         advice = Advice(
             point=point, screen=screen, command=command,
             key=advice_key(payload, command, point),
@@ -424,7 +522,7 @@ class AdviseSession:
             combat_facts=dict(detail.get("combat_facts", {}) or {}),
             status=("fast_advice" if provisional or source_type in {"guide_rule", "rule_fallback"}
                     else "model_ready"),
-            decision_id=getattr(self, "_current_decision_id", ""),
+            decision_id=decision_id,
             request_id=str(detail.get("brain_request_id", "") or ""),
             first_advice_latency_ms=first_latency,
             decision_latency_ms=decision_latency,
@@ -444,6 +542,28 @@ class AdviseSession:
         print(f"[advise] {point} -> {advice_line(command)}"
               f" (conf {confidence:.2f}, msg {self.message_count()})",
               file=self.warn_stream, flush=True)
+
+    def _next_advice_revision(self, decision_id: str, command: dict,
+                              detail: dict, point: str, label: str) -> int:
+        """Allocate revisions at the display boundary, not in a worker.
+
+        A fast local proposal starts at revision 1.  A model result only
+        increments it when it materially changes the displayed proposal;
+        repeated observations therefore do not create fake replacements.
+        """
+        key = str(decision_id or "")
+        previous = self.tracker.pending
+        if previous is None or previous.decision_id != key:
+            revision = 1
+        else:
+            same = (previous.command == command and
+                    previous.source_type == str(detail.get("source_type", "") or "") and
+                    previous.candidate_id == str(detail.get("candidate_id", "") or "") and
+                    previous.reason == str(detail.get("reason", "") or "") and
+                    previous.label == label)
+            revision = previous.advice_revision if same else previous.advice_revision + 1
+        self._advice_revisions[key] = revision
+        return revision
 
     def _poll(self, available: Any) -> str | None:
         """The only thing advisor mode is allowed to send.
@@ -598,7 +718,7 @@ class AdviseSession:
                           "tally": dict(self.tracker.tally),
                           "agreement": self.tracker.agreement}
         self._advice_log(event)
-        self._trace("outcome", {
+        self._trace(record_kind, {
             "record_kind": ("unobserved_record" if outcome.verdict == "unobserved"
                              else "deviation_record" if outcome.verdict == "mismatch"
                              else "fact_memory"),

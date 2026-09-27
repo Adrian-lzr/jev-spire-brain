@@ -5,7 +5,8 @@ The mass-audience contract, enforced here:
     a fix-it line;
   * the mod-config command it prints must pass install_mod_config's own argv
     check (no quotes, no spaces in paths, every file exists);
-  * `--setup` is remembered, so the choice is made once;
+  * `--setup` is explicit and idempotent; ordinary startup only diagnoses the
+    current CommunicationMod config;
   * `--demo` plays a full simulated run on the started dashboard.
 """
 
@@ -77,7 +78,7 @@ def test_detect_backend_never_raises_and_picks_mock_without_key(monkeypatch=None
             start_mod.ROOT = original_root
 
 
-def test_setup_marker_round_trip():
+def test_repository_setup_marker_never_changes_setup_state():
     with tempfile.TemporaryDirectory() as tmp:
         original_root = start_mod.ROOT
         try:
@@ -85,7 +86,7 @@ def test_setup_marker_round_trip():
             assert start_mod.do_setup_saved() is False
             (Path(tmp) / "config").mkdir()
             (Path(tmp) / "config" / ".setup-done").write_text("x", encoding="utf-8")
-            assert start_mod.do_setup_saved() is True
+            assert start_mod.do_setup_saved() is False
         finally:
             start_mod.ROOT = original_root
 

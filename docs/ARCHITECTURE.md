@@ -1,6 +1,6 @@
 # Jev Spire Brain 架构说明
 
-本文描述当前仓库中的实际实现（2026-09-24），不是未来功能清单。项目的目标是为《杀戮尖塔》提供游戏内实时建议：玩家继续操作，agent 只在 `advise` 模式观察状态并给出当前一步建议。
+本文描述当前仓库中的实际实现（2026-09-27），不是未来功能清单。项目的目标是为《杀戮尖塔》提供游戏内实时建议：玩家继续操作，agent 只在 `advise` 模式观察状态并给出当前一步建议。
 
 ## 1. 运行链路
 
@@ -68,10 +68,10 @@ JEV 是战术层：只能在本地已确认合法、且符合战略约束的候�
 ## 6. 当前已知边界与后续顺序
 
 1. `stdio.py` 仍同时承担传输生命周期和部分兼容路由；后续可按行为边界拆出 transport/guards/modes，但必须保持现有协议和 `advise` 约束。
-2. Python、网页和 Java overlay 的决策点标签还没有完全收敛到单一生成文件，需要契约测试防止漂移。
+2. Python、网页和 Java overlay 目前通过共享 JSON fixture 和静态消费者检查约束字段、空值、默认值与枚举；Java 游戏依赖缺失时仍不会伪造编译通过。
 3. `gamedata.py`、真实 provider、`analysis/*` 的直接测试仍需补齐，尤其是超时、HTTP 错误、无效 JSON 和缓存降级。
 4. `deck_policy.synergy_weight` 已删除，因为仓库没有读取点；流派协同规则继续由 `spirebrain/cards/knowledge.py` 管理，避免保留失效配置。
-5. 需要建立固定场景回放集，再根据最弱场景改进战斗目标、商店预算和未知卡牌效果模型；不能只凭单局体验调整策略。
+5. 战斗搜索已覆盖可见确定性卡牌×目标分支，但力量、虚弱、复杂 Power、随机效果和遗物链仍会降级；需要继续用固定回放集评估目标、商店预算和未知效果模型。
 
 ## 7. 兼容契约
 
@@ -115,8 +115,9 @@ outcome groups for one decision ID. GPT and JEV logging adapters emit
 retaining their legacy JSONL files.
 
 Offline replay uses fixed structured responses and synthetic fault fixtures. The
-four-mode evaluator (`rules`, `jev`, `strategic`, `full`) never calls a provider;
-adoption and real game outcomes remain unknown unless explicitly observed.
+four-mode evaluator (`rules`, `jev`, `strategic`, `full`) runs distinct local
+stacks with countable scripted providers; it never calls a real provider.
+Adoption and real game outcomes remain unknown unless explicitly observed.
 
 The CommunicationMod payload is normalized into a semantic state projection in
 `spirebrain/driver/decision_state.py`. `state_id` identifies the game state;

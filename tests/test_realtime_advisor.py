@@ -148,3 +148,161 @@ def test_slow_model_does_not_block_poll_and_late_result_is_dropped():
     session.advise(changed, ["wait"], False)
     assert agent.feed.events[-1][1]["status"] == "unavailable"
     assert not any(data.get("status") == "ready" for _, data in agent.feed.events)
+
+
+def test_advisor_completion_queue_is_bounded_and_latest_wins():
+    agent = SlowAgent()
+    session = AdviseSession(agent, advice_path=None, poll_frames=20,
+                           warn_stream=io.StringIO(), ensure_offered=lambda line, *a, **k: line,
+                           fingerprint=lambda g: json.dumps(g, sort_keys=True), message_count=lambda: 1)
+
+    session._enqueue_completed(("old", 1, 0, {}, None, None, None))
+    session._enqueue_completed(("new", 2, 0, {}, None, None, None))
+
+    assert session._completed.maxsize == 1
+    assert session._completed.get_nowait()[0] == "new"
+    assert session.dropped_completions == 1
+
+
+def test_advisor_close_is_bounded_and_invalidates_late_completion():
+    agent = SlowAgent()
+    session = AdviseSession(agent, advice_path=None, poll_frames=20,
+                           warn_stream=io.StringIO(), ensure_offered=lambda line, *a, **k: line,
+                           fingerprint=lambda g: json.dumps(g, sort_keys=True), message_count=lambda: 1)
+    assert session.advise(game(), ["choose", "wait"], True) == "wait 20"
+    assert agent.started.wait(1)
+
+    assert session.close(timeout_ms=5) is False
+    agent.release.set()
+    assert session.close(timeout_ms=250) is True
+    session._drain_completed()
+    assert not any(data.get("status") == "ready" for _, data in agent.feed.events)
+
+
+def test_advice_worker_uses_the_owner_run_epoch(tmp_path):
+    agent = SpireBrainAgent(jev_backend="mock", brain_backend="none", log_dir=tmp_path)
+    agent.begin_new_run("run-identity", seed="same-seed")
+    agent.strategic.memory.record_deviation(
+        "old-advice", "observed-action", state_id="prior-state",
+        decision_id="prior-decision", evidence={"source": "test"},
+    )
+    state = combat_game()
+    state.update(run_id="run-identity", seed="same-seed")
+    available = ["play", "end", "wait", "state"]
+    session = AdviseSession(
+        agent, advice_path=None, poll_frames=20,
+        warn_stream=io.StringIO(), ensure_offered=lambda line, *a, **k: line,
+        fingerprint=lambda g: json.dumps(g, sort_keys=True), message_count=lambda: 1,
+    )
+
+    assert session.advise(state, available, True) == "wait 20"
+    worker = session._worker_agent
+    assert worker is not None
+    thread = session._worker_thread
+    if thread is not None:
+        thread.join(timeout=2)
+    session._drain_completed()
+
+    assert worker.history
+    assert worker.history[-1]["run_epoch"] == agent.run_session.run_epoch
+    assert worker.strategic.memory.run_epoch == agent.strategic.memory.run_epoch
+    assert worker.strategic.memory.digest()["deviations"] == agent.strategic.memory.digest()["deviations"]
+    assert session.tracker.pending is not None
+    assert session.tracker.pending.run_epoch == agent.run_session.run_epoch
+    session.close()
+
+
+def test_advice_worker_adopts_owner_memory_and_invalidates_plan_after_deviation(tmp_path):
+    from spirebrain.brain.protocol import BrainResponse
+
+    agent = SpireBrainAgent(jev_backend="mock", brain_backend="none", log_dir=tmp_path)
+    agent.begin_new_run("run-memory", seed="same-seed")
+    worker = agent.clone_for_advice()
+
+    worker.adopt_run_snapshot(agent.run_session.snapshot(), agent.strategic.memory.snapshot())
+    worker.strategic.plan_valid = True
+    agent.strategic.memory.record_deviation(
+        "combat:play:0:1", "end turn", state_id="state-a",
+        decision_id="decision-a", evidence={"screen": "COMBAT"},
+        observed_state={"screen_type": "COMBAT", "energy": 0},
+    )
+
+    worker.adopt_run_snapshot(agent.run_session.snapshot(), agent.strategic.memory.snapshot())
+
+    worker_memory = worker.strategic.memory.digest()
+    owner_memory = agent.strategic.memory.digest()
+    assert worker_memory["deviations"] == owner_memory["deviations"]
+    assert worker_memory["recent_events"][-1]["event_type"] == "deviation_record"
+    assert worker.strategic.plan_valid is False
+
+    calls = []
+
+    class CaptureProvider:
+        backend_name = "capture"
+
+        def plan(self, payload):
+            calls.append(payload)
+            return BrainResponse(backend=self.backend_name, error="offline fixture",
+                                 fallback=True)
+
+    worker.strategic.planner.provider = CaptureProvider()
+    state = combat_game()
+    state.update(run_id="run-memory", seed="same-seed")
+    worker.choose_action(state)
+
+    assert calls
+    assert any(event["event_type"] == "deviation_record"
+               for event in calls[0]["memory"]["recent_events"])
+    assert agent.strategic.memory.digest() == owner_memory
+
+
+def test_advice_worker_plan_is_committed_by_owner_after_current_result(tmp_path):
+    from spirebrain.brain.planner import stable_state_id
+    from spirebrain.brain.protocol import BrainResponse, StrategicPlan
+
+    class Provider:
+        backend_name = "mock"
+        async_required = False
+
+        def plan(self, payload):
+            state_id = stable_state_id(payload["state"])
+            plan = StrategicPlan.from_dict({
+                "plan_id": "worker-plan", "state_id": state_id,
+                "run_id": payload["run_id"], "current_objective": "保留能量",
+                "long_term_goal": "稳定通过当前战斗", "priority": ["survive"],
+                "preferred_candidates": [], "avoid_candidates": [],
+                "resource_constraints": {}, "next_steps": ["观察敌方意图"],
+                "replan_triggers": ["enemy_changed"], "reason": "固定回放响应",
+                "uncertainty": "", "expires_after": 2,
+            }, state_id=state_id, run_id=payload["run_id"])
+            return BrainResponse(plan=plan, backend=self.backend_name,
+                                 request_id="fixed-request")
+
+    agent = SpireBrainAgent(jev_backend="mock", brain_backend="mock",
+                            brain_client=Provider(), async_planning=False,
+                            log_dir=tmp_path)
+    agent.begin_new_run("run-plan", seed="seed-plan")
+    state = combat_game()
+    state.update(run_id="run-plan", seed="seed-plan")
+    available = ["play", "end", "wait", "state"]
+    session = AdviseSession(
+        agent, advice_path=None, poll_frames=20,
+        warn_stream=io.StringIO(), ensure_offered=lambda line, *a, **k: line,
+        fingerprint=lambda g: json.dumps(g, sort_keys=True), message_count=lambda: 1,
+    )
+
+    assert session.advise(state, available, True) == "wait 20"
+    worker = session._worker_agent
+    assert worker is not None
+    thread = session._worker_thread
+    if thread is not None:
+        thread.join(timeout=2)
+    session._drain_completed()
+
+    assert session.tracker.pending is not None
+    assert session.tracker.pending.plan_id == "worker-plan"
+    assert agent.strategic.plan_valid is True
+    assert agent.strategic.current_plan.plan_id == "worker-plan"
+    assert agent.strategic.memory.plan_id == "worker-plan"
+    assert agent.strategic.current_plan is not worker.strategic.current_plan
+    session.close()

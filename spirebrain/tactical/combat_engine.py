@@ -12,7 +12,7 @@ from typing import Any, Mapping, Sequence
 
 from spirebrain.brain.protocol import ActionCandidate
 from .combat_greedy import ActionSuggestion, recommend_action
-from .combat_search import search_sequences
+from .combat_search import evaluate_card, search_sequences
 
 
 @dataclass(frozen=True)
@@ -54,26 +54,37 @@ class CombatTacticalEngine:
                                   node_limit=self.node_limit,
                                   time_limit_ms=self.time_limit_ms)
         sequence = tuple(result.get("sequence") or ())
-        if not sequence or result.get("confidence") != "verified":
+        if (not sequence or result.get("confidence") != "verified"
+                or result.get("budget_exhausted")):
             fallback = recommend_action(dict(game))
             if fallback is not None:
                 selected = next((c for c in legal if self._matches(c, fallback.command)), None)
                 if selected is not None:
+                    fallback_reason = ("search_budget_exhausted"
+                                       if result.get("budget_exhausted")
+                                       else str(result.get("uncertainty", "search_unavailable")))
                     return CombatProposal(
                         selected,
                         facts={**fallback.facts, "search": result},
                         reason_code="greedy_fallback",
                         reason=fallback.reason,
-                        uncertainty=fallback.facts.get("uncertainty", result.get("uncertainty", "unknown")),
-                        confidence="estimated" if fallback.uncertain else "verified",
-                        fallback_reason=str(result.get("uncertainty", "search_unavailable")),
+                        uncertainty=(str(result.get("uncertainty"))
+                                     if result.get("uncertainty") not in (None, "", "none")
+                                     else fallback.facts.get("uncertainty", "unknown")),
+                        confidence=("estimated" if fallback.uncertain or
+                                    result.get("uncertainty") not in (None, "", "none")
+                                    else "verified"),
+                        fallback_reason=fallback_reason,
                     )
+            fallback_reason = ("search_budget_exhausted"
+                               if result.get("budget_exhausted")
+                               else str(result.get("uncertainty", "search_unavailable")))
             return CombatProposal(
                 next((c for c in legal if c.kind == "end"), legal[0]),
                 facts={"search": result}, reason_code="rule_fallback",
                 reason="战斗效果未完整解析，暂不推断精确出牌。",
                 uncertainty=str(result.get("uncertainty", "unknown_effect")),
-                fallback_reason=str(result.get("uncertainty", "search_unavailable")),
+                fallback_reason=fallback_reason,
             )
 
         first_index = int(sequence[0])
@@ -95,21 +106,74 @@ class CombatTacticalEngine:
                 reason="搜索结果对应的目标或手牌已变化，已重新等待当前状态。",
                 uncertainty="stale_candidate", fallback_reason="candidate_invalidated")
 
-        facts = {}
-        if result.get("facts"):
+        # Facts at the boundary describe the selected current action only.
+        # Aggregate sequence values remain explicitly projected evidence and
+        # must never overwrite the first card's damage/lethal fields.
+        facts = dict(result.get("immediate_facts") or {})
+        if not facts and result.get("facts"):
             facts = result["facts"][0].__dict__.copy()
         facts.update({k: result[k] for k in (
-            "damage", "block", "lethal_confirmed", "target_index", "nodes",
-            "budget_exhausted") if k in result})
-        reason = ("确认击杀来袭敌人，优先消除本回合威胁。"
-                  if result.get("lethal_confirmed") else
-                  "当前出牌顺序可覆盖已知来袭伤害。"
-                  if result.get("block", 0) else
-                  "按已验证的伤害与能量收益选择当前一步。")
+            "target_index", "nodes", "budget_exhausted") if k in result})
+        facts["projected_remaining_incoming_damage"] = result.get(
+            "remaining_incoming_damage")
+        combat = self._combat(game)
+        player = combat.get("player") or {}
+        try:
+            current_block = max(0, int(player.get("block", 0) or 0))
+        except (TypeError, ValueError):
+            current_block = 0
+        try:
+            immediate_threat = max(0, int(facts.get("remaining_incoming_damage", 0) or 0))
+        except (TypeError, ValueError):
+            immediate_threat = 0
+        try:
+            immediate_block = max(0, int(facts.get("block", 0) or 0))
+        except (TypeError, ValueError):
+            immediate_block = 0
+        uncovered = max(0, immediate_threat - current_block - immediate_block)
+        facts["uncovered_incoming_damage"] = uncovered
+        facts["incoming_threat_covered"] = uncovered == 0
+        facts["projected_sequence"] = list(result.get("projected_sequence") or ())
+        facts["projected_damage"] = result.get("damage")
+        facts["projected_block"] = result.get("block")
+        if facts.get("lethal_confirmed") and immediate_threat == 0:
+            reason = "当前一步可击杀来袭敌人，消除其本回合威胁。"
+        elif facts.get("lethal_confirmed") and uncovered:
+            reason = (f"当前一步可击杀一个来袭敌人，但其他敌人仍有"
+                      f" {immediate_threat} 点来袭伤害，预计未格挡 {uncovered} 点。")
+        elif immediate_threat and uncovered == 0:
+            reason = f"当前一步可覆盖已知的 {immediate_threat} 点来袭伤害。"
+        elif immediate_block:
+            reason = (f"当前一步提供 {immediate_block} 点格挡，仍预计承受"
+                      f" {uncovered} 点来袭伤害。")
+        else:
+            reason = "按已验证的伤害与能量收益选择当前一步。"
         alternative = next((c for c in legal if c.candidate_id != selected.candidate_id), None)
         return CombatProposal(selected, alternative, facts=facts,
                               reason_code="bounded_search", reason=reason,
                               confidence="verified", uncertainty="")
+
+    def facts_for_candidate(self, game: Mapping[str, Any], candidate: ActionCandidate, *, prior: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """Rebind combat evidence after arbitration changes the action."""
+        command = dict(candidate.command)
+        if command.get("command") != "play":
+            return {"action_candidate_id": candidate.candidate_id,
+                    "candidate_signature": candidate.candidate_signature,
+                    "uncertainty": "not_combat_card",
+                    "confidence": "unsupported",
+                    "decision_basis": "arbitrated_action"}
+        card_index = command.get("card")
+        if not isinstance(card_index, int):
+            return {"action_candidate_id": candidate.candidate_id,
+                    "candidate_signature": candidate.candidate_signature,
+                    "uncertainty": "unknown_card", "confidence": "unsupported"}
+        target_index = command.get("target")
+        facts = evaluate_card(self._combat(game), card_index,
+                              target_index if isinstance(target_index, int) else None).__dict__.copy()
+        facts.update({"action_candidate_id": candidate.candidate_id,
+                      "candidate_signature": candidate.candidate_signature,
+                      "decision_basis": "arbitrated_action"})
+        return facts
 
     def advise(self, game: Mapping[str, Any], candidates: Sequence[ActionCandidate]) -> ActionSuggestion | None:
         """Compatibility helper for callers that still consume ActionSuggestion."""

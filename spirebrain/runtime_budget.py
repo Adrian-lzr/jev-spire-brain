@@ -40,6 +40,11 @@ class DecisionBudget:
     def remaining_ms(self) -> int:
         return max(0, self.total_ms - self.elapsed_ms)
 
+    @property
+    def deadline(self) -> float:
+        """Monotonic deadline captured for immutable worker requests."""
+        return float(self.started_at) + (self.total_ms / 1000.0)
+
     def reserve(self, requested_ms: int, *, minimum_ms: int = 1) -> int:
         """Reserve one provider call and return its bounded timeout in ms."""
         with self._lock:
