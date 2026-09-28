@@ -216,5 +216,4 @@ def test_jev_dotenv_key_is_explicitly_passed_for_openrouter_and_official(
         assert key not in seen["body"]
         public = json.dumps(config.public_dict())
         assert key not in public
-        assert "api_key" not in public.lower()
-
+    assert "api_key" not in public.lower()
