@@ -15,6 +15,20 @@ def test_synthetic_replay_keeps_advise_commands_safe():
     assert set(result["advise_commands"]) <= {"wait", "state"}
 
 
+def test_replay_can_run_same_strategic_input_with_rag_control_arm():
+    from spirebrain.analysis.replay import run_fixture
+
+    fixture = ROOT / "fixtures" / "replay" / "advisor_states.json"
+    enabled = run_fixture(fixture, mode="strategic", knowledge_enabled=True)
+    disabled = run_fixture(fixture, mode="strategic", knowledge_enabled=False)
+
+    assert enabled["knowledge_enabled"] is True
+    assert disabled["knowledge_enabled"] is False
+    assert enabled["messages"] == disabled["messages"]
+    assert enabled["knowledge_citation_count"] >= 0
+    assert disabled["knowledge_citation_count"] == 0
+
+
 def test_metrics_contract_counts_provider_request_and_unknown_outcome():
     from spirebrain.analysis.metrics import load_records, summarize
 
@@ -31,6 +45,97 @@ def test_metrics_contract_counts_provider_request_and_unknown_outcome():
     # Metrics must never echo request bodies or credentials.  This fixture is
     # intentionally the only source rendered by the assertion.
     assert "Authorization" not in json.dumps(report)
+
+
+def test_metrics_reports_skipped_and_unattributed_trace_events():
+    from spirebrain.analysis.metrics import summarize
+
+    report = summarize([
+        {"event_type": "decision_skipped", "decision_id": "d"},
+        {"event_type": "provider_request", "request_id": "old-request"},
+    ])
+
+    assert report["skipped_before_start_count"] == 1
+    assert report["unattributed_event_count"] == 1
+
+
+def test_metrics_deduplicates_provider_attempt_log_lines():
+    from spirebrain.analysis.metrics import summarize
+
+    report = summarize([
+        {"event_type": "provider_request", "run_id": "r", "decision_id": "d",
+         "request_id": "q", "attempt_id": "q:1"},
+        {"event_type": "provider_request", "run_id": "r", "decision_id": "d",
+         "request_id": "q", "attempt_id": "q:1"},
+    ])
+
+    assert report["provider_calls"] == 1
+    assert report["provider_duplicate_event_count"] == 1
+    assert report["efficiency"]["provider_calls"] == 1
+
+
+def test_metrics_combines_advice_and_decision_scene_coverage_in_event_order():
+    from spirebrain.analysis.metrics import summarize
+
+    report = summarize([
+        {"event_type": "decision", "decision_id": "d1", "screen": "COMBAT",
+         "fallback": True, "reason": "local"},
+        {"event_type": "advice", "decision_id": "d2", "screen": "SHOP",
+         "fallback": False},
+        {"event_type": "advice", "decision_id": "d1", "screen": "COMBAT",
+         "fallback": False},
+    ])
+
+    assert report["scene_coverage"] == {"COMBAT": 1, "SHOP": 1}
+    assert report["fallback_rate"] == 0.0
+    assert report["fallback_reasons"] == {}
+
+
+def test_metrics_accepts_result_record_and_ignores_structured_outcome_as_win_label():
+    from spirebrain.analysis.metrics import summarize
+
+    report = summarize([
+        {"event_type": "result_record", "decision_id": "d1",
+         "result": "win", "evidence": {"screen": "VICTORY"}},
+        {"event_type": "outcome", "decision_id": "d2",
+         "result": {"hp": 4}, "verdict": "unobserved"},
+    ])
+
+    assert report["result_count"] == 1
+    assert report["real_outcomes"] == {"win": 1}
+    assert report["unobserved_ratio"] == 1.0
+
+
+def test_metrics_uses_canonical_provider_response_latency_once():
+    from spirebrain.analysis.metrics import summarize
+
+    report = summarize([
+        {"event_type": "provider_request", "run_id": "r", "decision_id": "d",
+         "request_id": "q", "attempt_id": "q:1", "latency_ms": 10},
+        {"event_type": "provider_response", "run_id": "r", "decision_id": "d",
+         "request_id": "q", "attempt_id": "q:1", "latency_ms": 125},
+    ])
+
+    assert report["provider_calls"] == 1
+    assert report["provider_duplicate_event_count"] == 0
+    assert report["latency_ms"]["request_samples"] == 1
+    assert report["latency_ms"]["request_p50"] == 125
+
+
+def test_metrics_counts_only_same_event_type_duplicates():
+    from spirebrain.analysis.metrics import summarize
+
+    report = summarize([
+        {"event_type": "provider_request", "run_id": "r", "decision_id": "d",
+         "request_id": "q", "attempt_id": "q:1"},
+        {"event_type": "provider_request", "run_id": "r", "decision_id": "d",
+         "request_id": "q", "attempt_id": "q:1"},
+        {"event_type": "provider_response", "run_id": "r", "decision_id": "d",
+         "request_id": "q", "attempt_id": "q:1", "latency_ms": 4},
+    ])
+
+    assert report["provider_calls"] == 1
+    assert report["provider_duplicate_event_count"] == 1
 
 
 def test_metrics_cli_rejects_missing_and_empty_inputs(tmp_path, capsys):

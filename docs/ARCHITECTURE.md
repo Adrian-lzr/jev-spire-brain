@@ -13,6 +13,7 @@ CommunicationMod
        -> ActionBroker 合法候选和过滤诊断
        -> 场景处理器（地图、选牌、事件、火堆、商店、战斗、遗物）
        -> StrategicOrchestrator（GPT 战略计划，异步/缓存）
+          -> offline strategy RAG（来源引用的铁甲战士软证据）
        -> JEV tactical client（候选内局部判断）
        -> check_action() / CommunicationMod 命令
   -> overlay feed（游戏内面板）和 dashboard（浏览器）
@@ -51,6 +52,11 @@ seed 或 `run_id` 也不会继承旧记忆。
 
 GPT 是战略层：在新局、换幕、地图、奖励、商店、精英/Boss、构筑或资源发生重大变化时生成最多 2-5 步的短计划。普通战斗中的每张牌不重复请求 GPT，使用仍有效的计划和本地战术层。
 
+战略请求会附带一个本地、可复现的 `knowledge_context`。它来自
+`spirebrain/data/strategy_knowledge.jsonl` 的短篇来源引用断言，当前只覆盖铁甲战士；
+检索使用标准库 lexical TF-IDF-like 评分，不在游戏运行时联网。RAG 只能提供流派、路线和
+资源分配的软证据，不能提供卡牌数值、协议命令或候选 ID；本机游戏数据和硬规则优先级更高。
+
 JEV 是战术层：只能在本地已确认合法、且符合战略约束的候选中选择或评分，返回候选 ID、置信度和短判断。JEV 不生成自由格式命令。
 
 `GuideBook` 和 `check_action()` 是硬约束：角色未覆盖、资源不足、无效目标、药水槽已满、明确危险动作等情况直接过滤或降级。GPT 超时、无 Key、无效 JSON、断网时保留缓存计划或退回 JEV+规则；两者都不可用时只显示状态不足，并在 `advise` 模式发送 `wait/state`。
@@ -69,7 +75,7 @@ JEV 是战术层：只能在本地已确认合法、且符合战略约束的候�
 
 1. `stdio.py` 仍同时承担传输生命周期和部分兼容路由；后续可按行为边界拆出 transport/guards/modes，但必须保持现有协议和 `advise` 约束。
 2. Python、网页和 Java overlay 目前通过共享 JSON fixture 和静态消费者检查约束字段、空值、默认值与枚举；Java 游戏依赖缺失时仍不会伪造编译通过。
-3. `gamedata.py`、真实 provider、`analysis/*` 的直接测试仍需补齐，尤其是超时、HTTP 错误、无效 JSON 和缓存降级。
+3. `gamedata.py` 和真实 provider 的真机测试仍需补齐；离线 provider、超时、HTTP 错误、无效 JSON、缓存降级和 RAG 检索已有 fixture 覆盖。
 4. `deck_policy.synergy_weight` 已删除，因为仓库没有读取点；流派协同规则继续由 `spirebrain/cards/knowledge.py` 管理，避免保留失效配置。
 5. 战斗搜索已覆盖可见确定性卡牌×目标分支，但力量、虚弱、复杂 Power、随机效果和遗物链仍会降级；需要继续用固定回放集评估目标、商店预算和未知效果模型。
 
@@ -88,7 +94,7 @@ JEV 是战术层：只能在本地已确认合法、且符合战略约束的候�
 本地化回放使用 `tests/fixtures/gamedata/localization.json`。
 
 `python tools/verify_offline.py` 是 CI 与干净检出的独立检查入口：它分别运行
-测试、Python 编译、跨语言静态契约、合成指标和回放，即使前一项失败也会继续
+测试、Python 编译、跨语言静态契约、合成指标、四模式评测、回放和本地策略 RAG 检查，即使前一项失败也会继续
 输出后续结果。Java 构建仍需本地游戏依赖，CI 不伪造构建通过。
 
 `python -m spirebrain.analysis.replay --input tests/fixtures/replay` 将合成
@@ -118,6 +124,12 @@ Offline replay uses fixed structured responses and synthetic fault fixtures. The
 four-mode evaluator (`rules`, `jev`, `strategic`, `full`) runs distinct local
 stacks with countable scripted providers; it never calls a real provider.
 Adoption and real game outcomes remain unknown unless explicitly observed.
+For one trace decision, `python -m spirebrain.analysis.replay --input
+<decision_trace.jsonl> --decision-id <id>` verifies the content-addressed
+evidence; adding `--execute` rehydrates the owner-loop state and executable
+candidate blob, reruns local reconciliation and legality checks, and performs
+zero provider calls. Missing decisions, state blobs or candidate blobs fail
+instead of producing an empty success report.
 
 The CommunicationMod payload is normalized into a semantic state projection in
 `spirebrain/driver/decision_state.py`. `state_id` identifies the game state;

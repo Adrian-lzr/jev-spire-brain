@@ -28,11 +28,14 @@ class StrategicOrchestrator:
 
     def __init__(self, *, backend: str = "openai", model: str | None = None,
                  endpoint: str | None = None,
+                 api_key: str | None = None,
                  timeout_ms: int = 6000, max_plan_steps: int = 5,
                  memory_events: int = 20, max_output_tokens: int = 900,
-                 client=None, log_dir=None, async_planning: bool | None = None) -> None:
+                 client=None, log_dir=None, async_planning: bool | None = None,
+                 knowledge_enabled: bool = True) -> None:
         provider = client if client is not None else get_strategic_brain(
             backend,
+            api_key=api_key,
             model=model,
             endpoint=endpoint,
             timeout_ms=timeout_ms,
@@ -50,8 +53,20 @@ class StrategicOrchestrator:
         self.async_planning = bool(inferred_async if async_planning is None else async_planning)
         self.memory = RunMemory(max_events=memory_events)
         self.planner = StrategicPlanner(self.provider, max_plan_steps=max_plan_steps,
-                                        memory_events=memory_events)
+                                        memory_events=memory_events,
+                                        knowledge_enabled=knowledge_enabled)
         self.current_plan: StrategicPlan | None = None
+        # A late strategic answer may be too old to authorize a concrete
+        # action, but its objective/resource constraints can remain useful for
+        # the same run and act.  This read-only context is deliberately kept
+        # separate from ``current_plan`` so arbitration never consumes stale
+        # candidate preferences.
+        self.context_plan: StrategicPlan | None = None
+        self.context_plan_reason = ""
+        self.context_plan_state_id = ""
+        self.context_plan_retained = 0
+        self.context_plan_act = 0
+        self.context_plan_run_epoch = 0
         self.last_response = BrainResponse(backend=getattr(self.provider, "backend_name", "unknown"))
         self.last_state_id = ""
         self.last_trigger_key = ""
@@ -89,6 +104,7 @@ class StrategicOrchestrator:
         self._pending_scope: tuple[str, int, int] | None = None
         self.invalidated_plan_requests = 0
         self.plan_invalidation_reasons: dict[str, int] = {}
+        self.event_sink = None
 
     @property
     def backend_name(self) -> str:
@@ -99,6 +115,12 @@ class StrategicOrchestrator:
         # dropping it would make terminal/result events look orphaned.
         self.memory.reset("" if run_id is None else str(run_id))
         self.current_plan = None
+        self.context_plan = None
+        self.context_plan_reason = ""
+        self.context_plan_state_id = ""
+        self.context_plan_retained = 0
+        self.context_plan_act = 0
+        self.context_plan_run_epoch = self.memory.run_epoch
         self.last_response = BrainResponse(backend=self.backend_name)
         self.last_state_id = ""
         self.last_trigger_key = ""
@@ -110,10 +132,12 @@ class StrategicOrchestrator:
         self.last_gold_snapshot = None
         self.last_deck_snapshot = None
         self.last_inventory_snapshot = ()
+        queued = None
         with self._plan_lock:
             # A running request cannot be cancelled portably.  Advancing
             # generation makes its eventual result harmless; queued work can be
             # dropped immediately so a new run starts cleanly.
+            queued = self._queued_plan
             self._queued_plan = None
             self._pending_key = None
             self._pending_request = None
@@ -123,6 +147,8 @@ class StrategicOrchestrator:
             self._plan_act = 0
             self._plan_floor = 0
             self._pending_scope = None
+        if queued is not None:
+            self._record_skipped_plan(queued, "run_reset_before_start")
 
     def request_replan(self, reason: str = "player_deviation") -> None:
         """Invalidate the cached plan without discarding run memory."""
@@ -130,13 +156,17 @@ class StrategicOrchestrator:
         self.plan_uses = 0
         self.last_trigger_key = ""
         self.generation += 1
+        queued = None
         with self._plan_lock:
+            queued = self._queued_plan
             self._queued_plan = None
             self._pending_key = None
             self._pending_request = None
             self._pending_state_id = ""
             self._pending_run_id = ""
             self._pending_scope = None
+        if queued is not None:
+            self._record_skipped_plan(queued, f"{reason}_before_start")
 
     def close(self, timeout_ms: int = 100) -> bool:
         """Invalidate pending work and wait only a bounded time for its worker."""
@@ -238,7 +268,27 @@ class StrategicOrchestrator:
             if discard_reason:
                 # The player already changed screens/runs.  A late strategic
                 # answer must never overwrite the current recommendation.
+                if (response.plan is not None and game is not None
+                        and result_run_id == self.memory.run_id
+                        and result_run_epoch == self.memory.run_epoch
+                        and self._context_scope_compatible(request.state, current_game)):
+                    self._retain_context_plan(response.plan, current_game, discard_reason)
                 self._record_expired_plan_result(discard_reason)
+                self._emit_trace_event("expired_result", {
+                    "run_id": result_run_id, "run_epoch": result_run_epoch,
+                    "decision_id": context.decision_id or None,
+                    "state_id": result_state_id,
+                    "request_id": response.request_id or None,
+                    "provider_request_ids": ([response.request_id]
+                                              if response.request_id else []),
+                    "plan_id": getattr(response.plan, "plan_id", "") or None,
+                    "expired_result": True, "fallback_reason": discard_reason,
+                    "generation": generation, "trigger": context.trigger,
+                    "pending_state_id": self._pending_state_id or None,
+                    "pending_generation": (self._pending_key[1]
+                                            if self._pending_key else None),
+                    "pending_run_id": self._pending_run_id or None,
+                })
                 continue
             with self._plan_lock:
                 self._pending_key = None
@@ -271,12 +321,22 @@ class StrategicOrchestrator:
                 self._plan_act = int(live_game.get("act", 0) or 0)
                 self._plan_floor = int(live_game.get("floor", live_game.get("floor_num", 0)) or 0)
                 self.memory.set_plan(self.current_plan)
+                self.context_plan = copy.deepcopy(self.current_plan)
+                self.context_plan_reason = "current_plan"
+                self.context_plan_state_id = live_state_id
+                self.context_plan_act = int(live_game.get("act", 0) or 0)
+                self.context_plan_run_epoch = self.memory.run_epoch
             elif previous is not None and self._can_reuse_plan(previous, live_game):
                 # Keep a short cached plan through a transient timeout/invalid
                 # JSON response.  Candidate reconciliation still filters any
                 # item that disappeared from the live state.
                 self.current_plan = previous
                 self.plan_valid = True
+                self.context_plan = copy.deepcopy(previous)
+                self.context_plan_reason = "cached_plan"
+                self.context_plan_state_id = live_state_id
+                self.context_plan_act = int(live_game.get("act", 0) or 0)
+                self.context_plan_run_epoch = self.memory.run_epoch
             else:
                 self.plan_valid = False
 
@@ -290,6 +350,70 @@ class StrategicOrchestrator:
         floor = int(game.get("floor", game.get("floor_num", 0)) or 0)
         return (not self._plan_act or act == self._plan_act) and \
             (not self._plan_floor or floor == self._plan_floor)
+
+    @staticmethod
+    def _context_scope_compatible(previous: dict, current: dict) -> bool:
+        """Allow a late objective to survive ordinary same-act navigation.
+
+        A context plan never authorizes a command. Keeping it across a floor
+        transition is still useful for the player's strategic target, but a
+        different act can invalidate HP/resource assumptions and must clear it.
+        """
+        try:
+            previous_act = int(previous.get("act", 0) or 0)
+            current_act = int(current.get("act", 0) or 0)
+        except (AttributeError, TypeError, ValueError):
+            return False
+        return previous_act > 0 and previous_act == current_act
+
+    def _retain_context_plan(self, plan: StrategicPlan, game: dict,
+                             reason: str) -> None:
+        """Store only strategic meaning from a stale provider response."""
+        retained = copy.deepcopy(plan)
+        # Candidate IDs are bound to the old state. Remove them from the
+        # context copy so a future caller cannot accidentally treat this as an
+        # executable preference. The owner loop will request a fresh plan when
+        # a strategic trigger requires concrete choices.
+        retained.preferred_candidates = []
+        retained.avoid_candidates = []
+        retained.candidate_bindings = {}
+        retained.avoid_bindings = {}
+        retained.bindings_bound = False
+        retained.state_id = stable_state_id(game)
+        self.context_plan = retained
+        self.context_plan_reason = str(reason or "stale_result")
+        self.context_plan_state_id = retained.state_id
+        self.context_plan_act = int(game.get("act", 0) or 0)
+        self.context_plan_run_epoch = self.memory.run_epoch
+        self.context_plan_retained += 1
+        self._emit_trace_event("strategic_context_retained", {
+            "run_id": self.memory.run_id or None,
+            "run_epoch": self.memory.run_epoch,
+            "decision_id": None,
+            "state_id": retained.state_id,
+            "plan_id": retained.plan_id or None,
+            "fallback_reason": str(reason or "stale_result"),
+            "context_only": True,
+            "generation": self.generation,
+            "act": self.context_plan_act,
+        })
+
+    def tactical_context_for(self, game: dict) -> dict | None:
+        """Return a scoped strategic goal, never stale candidate preferences."""
+        plan = self.context_plan
+        game_run_id = str(game.get("run_id", game.get("runId", "")) or "")
+        if (plan is None or plan.run_id != self.memory.run_id
+                or (game_run_id and game_run_id != self.memory.run_id)
+                or self.context_plan_run_epoch != self.memory.run_epoch
+                or self.context_plan_act <= 0
+                or int(game.get("act", 0) or 0) != self.context_plan_act):
+            return None
+        return {
+            "plan_id": plan.plan_id,
+            "goal": plan.current_objective,
+            "resource_constraints": copy.deepcopy(plan.resource_constraints),
+            "context_only": True,
+        }
 
     def _usable_plan(self, game: dict) -> StrategicPlan | None:
         plan = self.current_plan if self.plan_valid else None
@@ -331,6 +455,7 @@ class StrategicOrchestrator:
                     decision_id: str = "") -> None:
         """Queue one latest-wins strategic request and return immediately."""
         run_id = self.memory.run_id
+        replaced_job = None
         with self._plan_lock:
             if self._closed:
                 return
@@ -355,6 +480,7 @@ class StrategicOrchestrator:
                                        mode="advise"),
                 state_id=state_id, decision_id=str(decision_id or ""),
                 generation=self.generation,
+                trigger=trigger,
                 budget_ms=(budget.remaining_ms if budget is not None else None),
                 state=game_copy,
             )
@@ -372,6 +498,7 @@ class StrategicOrchestrator:
             self._pending_state_id = state_id
             self._pending_run_id = run_id
             self._pending_scope = self._strategic_scope(game)
+            replaced_job = self._queued_plan
             self._queued_plan = job
             self.last_response = BrainResponse(
                 backend=self.backend_name, error="战略规划进行中", fallback=True)
@@ -381,6 +508,31 @@ class StrategicOrchestrator:
                     target=self._plan_worker, daemon=True,
                     name="SpireBrainStrategic")
                 self._plan_thread.start()
+        if replaced_job is not None:
+            self._record_skipped_plan(replaced_job, "superseded_before_start")
+
+    def _emit_trace_event(self, event_type: str, fields: dict) -> None:
+        sink = self.event_sink
+        if callable(sink):
+            try:
+                sink(event_type, fields)
+            except Exception:
+                pass
+
+    def _record_skipped_plan(self, job, reason: str) -> None:
+        try:
+            request = job[0]
+            context = request.context
+        except (TypeError, IndexError, AttributeError):
+            return
+        self._emit_trace_event("decision_skipped", {
+            "run_id": context.run_id or None,
+            "run_epoch": context.run_epoch,
+            "decision_id": context.decision_id or None,
+            "state_id": context.state_id or None,
+            "reason": reason,
+            "generation": context.generation,
+        })
 
     def _plan_worker(self) -> None:
         while True:
@@ -440,23 +592,27 @@ class StrategicOrchestrator:
                         fallback=True,
                     )
             result = DecisionResult(request=request, response=response)
-            # A full slot always contains an older completion.  Replace it
-            # atomically; the main loop still performs the authoritative
-            # run/generation/scope check before committing this result.
-            try:
-                self._plan_results.put_nowait(result)
-            except queue.Full:
-                try:
-                    self._plan_results.get_nowait()
-                    self.dropped_plan_results += 1
-                except queue.Empty:
-                    pass
-                try:
-                    self._plan_results.put_nowait(result)
-                except queue.Full:
-                    # A concurrent consumer/producer won the race.  The
-                    # worker is non-critical to the communication loop.
-                    self.dropped_plan_results += 1
+            self._enqueue_plan_result(result)
+
+    def _enqueue_plan_result(self, result: DecisionResult) -> None:
+        """Keep the completion slot bounded and terminate every displaced task."""
+        try:
+            self._plan_results.put_nowait(result)
+            return
+        except queue.Full:
+            pass
+        try:
+            displaced = self._plan_results.get_nowait()
+        except queue.Empty:
+            displaced = None
+        if displaced is not None:
+            self.dropped_plan_results += 1
+            self._record_expired_plan_result("completion_queue_replaced", displaced)
+        try:
+            self._plan_results.put_nowait(result)
+        except queue.Full:
+            self.dropped_plan_results += 1
+            self._record_expired_plan_result("completion_queue_race", result)
 
     def _trigger_key(self, game: dict) -> str:
         screen = _screen(game)
@@ -469,6 +625,9 @@ class StrategicOrchestrator:
         deck = len(game.get("deck") or [])
         # Combat intentionally ignores hand/intent churn here; the tactical
         # layer refreshes every step without paying for a new strategic plan.
+        # Ordinary HP loss is also tactical noise while the player remains
+        # above the danger threshold. A slow strategic response can still be
+        # safely rebound to the current legal candidates when it completes.
         if screen == "COMBAT":
             inventory = tuple(str(x) for x in (game.get("relics") or [])) + tuple(
                 str(x) for x in (game.get("potions") or []))
@@ -565,6 +724,7 @@ class StrategicOrchestrator:
         return self._trigger_key(request.state) == self._trigger_key(game)
 
     def _invalidate_pending_request(self, reason: str) -> None:
+        queued = None
         with self._plan_lock:
             if self._pending_request is None:
                 return
@@ -578,12 +738,40 @@ class StrategicOrchestrator:
             self._pending_scope = None
             # Queued work has not started and may be replaced. Running provider
             # calls finish naturally; they no longer hold the commit identity.
+            queued = self._queued_plan
             self._queued_plan = None
+        if queued is not None:
+            self._record_skipped_plan(queued, f"{reason}_before_start")
 
-    def _record_expired_plan_result(self, reason: str) -> None:
+    def _record_expired_plan_result(self, reason: str,
+                                    result: DecisionResult | None = None) -> None:
         self.expired_plan_results += 1
         self.expired_plan_result_reasons[reason] = (
             self.expired_plan_result_reasons.get(reason, 0) + 1)
+        if result is None or result.request is None:
+            return
+        context = result.request.context
+        response = result.response
+        request_id = getattr(response, "request_id", "") or ""
+        with self._plan_lock:
+            pending_state_id = self._pending_state_id or None
+            pending_generation = (self._pending_key[1]
+                                  if self._pending_key else None)
+            pending_run_id = self._pending_run_id or None
+        self._emit_trace_event("expired_result", {
+            "run_id": context.run_id or None,
+            "run_epoch": context.run_epoch,
+            "decision_id": context.decision_id or None,
+            "state_id": context.state_id or None,
+            "request_id": request_id or None,
+            "provider_request_ids": [request_id] if request_id else [],
+            "plan_id": getattr(getattr(response, "plan", None), "plan_id", "") or None,
+            "expired_result": True, "fallback_reason": reason,
+            "generation": context.generation, "trigger": context.trigger,
+            "pending_state_id": pending_state_id,
+            "pending_generation": pending_generation,
+            "pending_run_id": pending_run_id,
+        })
 
     def _needs_replan(self, game: dict, trigger: str | None = None) -> bool:
         if self.current_plan is None:
@@ -612,8 +800,7 @@ class StrategicOrchestrator:
             if (gold != self.last_gold_snapshot or deck != self.last_deck_snapshot
                     or inventory != self.last_inventory_snapshot
                     or (self.last_hp_snapshot is not None and
-                        (abs(hp - self.last_hp_snapshot) >= 2
-                         or (previous_ratio > 0.30 >= current_ratio)))):
+                        previous_ratio > 0.30 >= current_ratio)):
                 return True
         if screen != self.last_screen:
             return True
@@ -686,9 +873,19 @@ class StrategicOrchestrator:
             # Plan state is committed here, after the synchronous provider has
             # returned and the current state has already been observed.
             self.memory.set_plan(response.plan)
+            self.context_plan = copy.deepcopy(response.plan)
+            self.context_plan_reason = "current_plan"
+            self.context_plan_state_id = state_id
+            self.context_plan_act = int(game.get("act", 0) or 0)
+            self.context_plan_run_epoch = self.memory.run_epoch
         elif previous_plan is not None and self._can_reuse_plan(previous_plan, game):
             self.current_plan = previous_plan
             self.plan_valid = True
+            self.context_plan = copy.deepcopy(previous_plan)
+            self.context_plan_reason = "cached_plan"
+            self.context_plan_state_id = state_id
+            self.context_plan_act = int(game.get("act", 0) or 0)
+            self.context_plan_run_epoch = self.memory.run_epoch
         return (self.current_plan if self.plan_valid else None), response
 
     def choose(self, game: dict, fallback: dict, *, candidates=None,
@@ -703,17 +900,40 @@ class StrategicOrchestrator:
         response = self.last_response
         if plan is None:
             plan = self._usable_plan(game)
+        # A late provider response may have lost its concrete candidate
+        # bindings, but its scoped objective is still useful context.  Keep
+        # that fact visible on the final decision when the current candidate
+        # set is non-empty.  The context is metadata only: reconcile() still
+        # receives no stale preferred/avoid IDs, so it cannot authorize an old
+        # slot or bypass local legality checks.
+        context_plan = self.context_plan
+        context_only = bool(
+            plan is None and context_plan is not None and candidates
+            and context_plan.run_id == self.memory.run_id
+            and self.context_plan_run_epoch == self.memory.run_epoch
+            and self.context_plan_act > 0
+            and int(game.get("act", 0) or 0) == self.context_plan_act
+        )
         state_id = stable_state_id(game)
         command, decision = reconcile(
             game=game, candidates=candidates, fallback=fallback, plan=plan,
             state_id=state_id, jev_confidence=jev_confidence, reason=reason,
         )
+        if context_only:
+            decision.source_type = "gpt_context"
+            decision.strategic_goal = context_plan.current_objective
+            decision.plan_id = context_plan.plan_id
+            decision.selection_basis = "strategic_context_local_choice"
+            if not decision.reason:
+                decision.reason = "按已接收的 GPT 战略目标，在当前合法候选中选择。"
         if response.error and decision.source_type == "rule_fallback":
             decision.reason = reason or "战略大脑不可用，沿用本地规则/JEV 建议。"
         self.plan_uses += 1
         return command, decision
 
-    def current_detail(self) -> dict:
+    def current_detail(self, game: dict | None = None) -> dict:
+        if game is not None:
+            return self.detail_for(game)
         plan = self.current_plan if self.plan_valid else None
         return {
             "run_id": self.memory.run_id,
@@ -727,6 +947,8 @@ class StrategicOrchestrator:
             "brain_latency_ms": self.last_response.latency_ms,
             "brain_request_id": self.last_response.request_id,
             "plan_scheduler": self._plan_scheduler_detail(),
+            "strategic_context_retained": self.context_plan_retained,
+            "strategic_context_reason": self.context_plan_reason,
         }
 
     def _plan_scheduler_detail(self) -> dict:
@@ -757,6 +979,29 @@ class StrategicOrchestrator:
                 "brain_latency_ms": self.last_response.latency_ms,
                 "brain_request_id": self.last_response.request_id,
                 "plan_scheduler": self._plan_scheduler_detail(),
+                "strategic_context_retained": self.context_plan_retained,
+                "strategic_context_reason": self.context_plan_reason,
+            }
+        context_plan = self.context_plan
+        if (context_plan is not None and self.context_plan_act > 0
+                and int(game.get("act", 0) or 0) == self.context_plan_act
+                and context_plan.run_id == self.memory.run_id
+                and self.context_plan_run_epoch == self.memory.run_epoch):
+            return {
+                "run_id": self.memory.run_id,
+                "run_epoch": self.memory.run_epoch,
+                "strategic_goal": context_plan.current_objective,
+                "long_term_goal": context_plan.long_term_goal,
+                "plan_id": context_plan.plan_id,
+                "brain_source": "gpt_context",
+                "brain_backend": self.backend_name,
+                "brain_error": self.last_response.error,
+                "brain_latency_ms": self.last_response.latency_ms,
+                "brain_request_id": self.last_response.request_id,
+                "strategic_context_only": True,
+                "strategic_context_reason": self.context_plan_reason,
+                "strategic_context_retained": self.context_plan_retained,
+                "plan_scheduler": self._plan_scheduler_detail(),
             }
         pending = bool(self._pending_key)
         return {
@@ -770,5 +1015,7 @@ class StrategicOrchestrator:
             "brain_error": self.last_response.error,
             "brain_latency_ms": self.last_response.latency_ms,
             "brain_request_id": self.last_response.request_id,
+            "strategic_context_retained": self.context_plan_retained,
+            "strategic_context_reason": self.context_plan_reason,
             "plan_scheduler": self._plan_scheduler_detail(),
         }

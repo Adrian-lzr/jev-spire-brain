@@ -55,6 +55,68 @@ def test_background_snapshot_is_deeply_immutable_and_does_not_follow_live_memory
         snapshot.events[0]["state_id"] = "changed"
 
 
+def test_replacing_unstarted_strategic_request_records_skipped_decision():
+    from spirebrain.brain.planner import stable_state_id
+
+    owner = StrategicOrchestrator(backend="mock", async_planning=True)
+    owner.memory.reset("run-a")
+    owner._plan_running = True  # Keep jobs queued and make replacement deterministic.
+    events = []
+    owner.event_sink = lambda kind, fields: events.append((kind, fields))
+
+    first = _state(screen="EVENT")
+    first["screen_state"] = {"options": ["left", "right"]}
+    owner.generation = 1
+    owner._queue_plan(first, [], [], "event_choice", None,
+                      stable_state_id(first), "first", decision_id="decision-a")
+    second = _state(screen="EVENT")
+    second["screen_state"] = {"options": ["left", "right", "leave"]}
+    owner.generation = 2
+    owner._queue_plan(second, [], [], "event_choice", None,
+                      stable_state_id(second), "second", decision_id="decision-b")
+
+    skipped = [fields for kind, fields in events if kind == "decision_skipped"]
+    assert len(skipped) == 1
+    assert skipped[0]["decision_id"] == "decision-a"
+    assert skipped[0]["state_id"] == stable_state_id(first)
+    assert skipped[0]["reason"] == "superseded_before_start"
+    owner._queued_plan = None
+
+
+def test_strategic_completion_queue_replacement_records_expired_result():
+    from spirebrain.brain.protocol import (
+        BrainResponse, DecisionContext, DecisionRequest, DecisionResult,
+        RunSessionSnapshot,
+    )
+
+    owner = StrategicOrchestrator(backend="mock", async_planning=True)
+    events = []
+    owner.event_sink = lambda kind, fields: events.append((kind, fields))
+
+    def result(decision_id, state_id, request_id):
+        context = DecisionContext(
+            run=RunSessionSnapshot(run_id="run-a", run_epoch=1),
+            state_id=state_id, decision_id=decision_id, generation=1,
+            state={"screen_type": "EVENT"},
+        )
+        request = DecisionRequest(context=context, state=context.state,
+                                  memory=owner.memory.snapshot())
+        return DecisionResult(request=request,
+                              response=BrainResponse(request_id=request_id,
+                                                     backend="fixture"))
+
+    owner._plan_results.put_nowait(result("decision-old", "state-old", "request-old"))
+    owner._enqueue_plan_result(result("decision-new", "state-new", "request-new"))
+
+    expired = [fields for kind, fields in events if kind == "expired_result"]
+    assert len(expired) == 1
+    assert expired[0]["decision_id"] == "decision-old"
+    assert expired[0]["state_id"] == "state-old"
+    assert expired[0]["request_id"] == "request-old"
+    assert expired[0]["fallback_reason"] == "completion_queue_replaced"
+    assert owner.expired_plan_result_reasons["completion_queue_replaced"] == 1
+
+
 def test_event_kinds_keep_advice_action_fact_result_and_unknown_separate():
     memory = RunMemory()
     memory.observe(_state(), state_id="s1")
@@ -222,7 +284,10 @@ def test_inflight_combat_request_is_not_replaced_by_poll_noise():
     orchestrator = StrategicOrchestrator(client=provider, backend="openai")
     first = _state("run-a")
     first["available_commands"] = ["wait", "state"]
-    second = dict(first, current_hp=49, animation_frame=2, poll_uuid="noise")
+    # A normal hit while still above the danger threshold is tactical churn;
+    # it must not cancel a slow strategic request. Candidate reconciliation at
+    # commit time still binds the plan to the current state.
+    second = dict(first, current_hp=45, animation_frame=2, poll_uuid="noise")
     orchestrator.plan_for(first, candidates=build_action_candidates(first))
     assert started.wait(1)
     orchestrator.plan_for(second, candidates=build_action_candidates(second))
@@ -239,7 +304,7 @@ def test_inflight_combat_request_is_not_replaced_by_poll_noise():
     assert accepted.current_objective == "先保证生存"
 
 
-def test_changed_event_options_supersede_same_scope_inflight_plan():
+def test_changed_event_options_supersede_same_scope_inflight_plan(tmp_path):
     """A late answer for old event choices must not replace the current plan."""
     import threading
 
@@ -284,7 +349,10 @@ def test_changed_event_options_supersede_same_scope_inflight_plan():
             return BrainResponse(plan=plan, backend="openai")
 
     provider = Provider()
-    owner = StrategicOrchestrator(client=provider, backend="openai")
+    owner = StrategicOrchestrator(client=provider, backend="openai", log_dir=tmp_path)
+    trace_events = []
+    owner.event_sink = lambda kind, fields: trace_events.append((kind, fields))
+    owner.provider.event_sink = owner.event_sink
     old_state = {
         "run_id": "run-event", "screen_type": "EVENT", "act": 1, "floor": 8,
         "screen_state": {"options": ["trade", "leave"]},
@@ -292,13 +360,13 @@ def test_changed_event_options_supersede_same_scope_inflight_plan():
     }
     current_state = dict(old_state, screen_state={"options": ["fight", "leave"]})
 
-    owner.plan_for(old_state, candidates=[])
+    owner.plan_for(old_state, candidates=[], decision_id="decision-old")
     assert first_started.wait(1)
     poll_noise = dict(old_state, poll_uuid="irrelevant-poll-change")
     owner.plan_for(poll_noise, candidates=[])
     assert owner._queued_plan is None
     assert owner.invalidated_plan_requests == 0
-    owner.plan_for(current_state, candidates=[])
+    owner.plan_for(current_state, candidates=[], decision_id="decision-new")
 
     # The event options changed within the same screen/act/floor scope. A new
     # task must replace the pending one even though the first HTTP call cannot
@@ -311,7 +379,18 @@ def test_changed_event_options_supersede_same_scope_inflight_plan():
     accepted, _ = owner.plan_for(current_state, candidates=[])
     assert accepted is None
     assert owner.memory.plan_id != "event-1"
+    context_detail = owner.detail_for(current_state)
+    assert context_detail["brain_source"] == "gpt_context"
+    assert context_detail["strategic_context_only"] is True
     assert owner.expired_plan_result_reasons["superseded_request"] == 1
+    first_provider_request = next(fields for kind, fields in trace_events
+                                  if kind == "provider_request"
+                                  and fields.get("decision_id") == "decision-old")
+    first_expiry = next(fields for kind, fields in trace_events
+                        if kind == "expired_result"
+                        and fields.get("decision_id") == "decision-old")
+    assert first_expiry["request_id"] == first_provider_request["request_id"]
+    assert first_expiry["state_id"] == first_provider_request["state_id"]
 
     release_second.set()
     assert second_returning.wait(1)
@@ -398,6 +477,61 @@ def test_legacy_plan_without_candidate_signatures_keeps_goal_not_slot_ids():
     assert rebound.current_objective == "维持战略目标"
     assert rebound.preferred_candidates == []
     assert rebound.avoid_candidates == []
+
+
+def test_late_strategic_result_is_display_context_but_not_an_action_plan():
+    owner = StrategicOrchestrator(backend="deepseek", async_planning=True)
+    owner.memory.reset("run-a")
+    stale = StrategicPlan(
+        plan_id="late-plan", state_id="old-state", run_id="run-a",
+        current_objective="保留生命并为精英战准备输出",
+        long_term_goal="稳健通关", resource_constraints={"gold_floor": 80},
+    )
+    current = _state(screen="CARD_REWARD")
+    owner._retain_context_plan(stale, current, "superseded_request")
+
+    detail = owner.detail_for(current)
+    assert detail["brain_source"] == "gpt_context"
+    assert detail["strategic_context_only"] is True
+    assert detail["strategic_goal"] == "保留生命并为精英战准备输出"
+
+    # Context is never passed to arbitration as a concrete candidate plan.
+    command, decision = owner.choose(
+        current, {"command": "state"}, candidates=[],
+    )
+    assert command == {"command": "state"}
+    assert decision.source_type == "rule_fallback"
+
+    owner.reset(run_id="run-b")
+    assert owner.context_plan is None
+    assert owner.detail_for(_state(run_id="run-b"))["brain_source"] != "gpt_context"
+
+
+def test_tactical_context_is_scoped_to_run_epoch_and_act():
+    owner = StrategicOrchestrator(backend="deepseek", async_planning=True)
+    owner.memory.reset("run-a")
+    plan = StrategicPlan(
+        plan_id="context-plan", state_id="old-state", run_id="run-a",
+        current_objective="为精英战保留资源",
+        preferred_candidates=["combat:play:0:0"],
+        avoid_candidates=["combat:end"],
+    )
+    current = _state(run_id="run-a", screen="COMBAT")
+    owner._retain_context_plan(plan, current, "superseded_request")
+
+    context = owner.tactical_context_for(current)
+    assert context == {
+        "plan_id": "context-plan",
+        "goal": "为精英战保留资源",
+        "resource_constraints": {},
+        "context_only": True,
+    }
+    assert owner.tactical_context_for(dict(current, act=2)) is None
+    assert owner.tactical_context_for(dict(current, run_id="run-b")) is None
+
+    # Reusing the same run id after a lifecycle reset must not resurrect context.
+    owner.memory.reset("run-a")
+    assert owner.tactical_context_for(current) is None
 
 
 def test_reward_transition_requires_a_new_scene_plan():

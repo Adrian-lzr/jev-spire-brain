@@ -151,13 +151,15 @@ class SpireBrainAgent:
                  brain_backend: str | None = None,
                  brain_model: str | None = None, brain_endpoint: str | None = None,
                  jev_endpoint: str | None = None,
-                 brain_client=None, async_planning: bool | None = None) -> None:
+                 brain_client=None, async_planning: bool | None = None,
+                 knowledge_enabled: bool | None = None) -> None:
         self._constructor = {"jev_backend": jev_backend, "strategy_path": strategy_path,
                               "log_dir": log_dir, "acceptance": acceptance,
                               "brain_backend": brain_backend, "brain_client": brain_client,
                               "brain_model": brain_model, "brain_endpoint": brain_endpoint,
                               "jev_endpoint": jev_endpoint,
-                              "async_planning": async_planning}
+                              "async_planning": async_planning,
+                              "knowledge_enabled": knowledge_enabled}
         strategy_file = Path(strategy_path) if strategy_path else ROOT / "config" / "strategy.json"
         self.strategy = json.loads(strategy_file.read_text(encoding="utf-8"))
         self.runtime_config = resolve_runtime_config(
@@ -178,25 +180,43 @@ class SpireBrainAgent:
         if jev_backend == "openrouter":
             jev_kwargs.update(total_budget_ms=self.runtime_config.jev_budget_ms,
                               max_retries=self.runtime_config.jev_max_retries,
-                              endpoint=self.runtime_config.jev_endpoint)
+                              endpoint=self.runtime_config.jev_endpoint,
+                              api_key=self.runtime_config.jev_api_key)
         elif jev_backend == "official":
             jev_kwargs.update(total_budget_ms=self.runtime_config.jev_budget_ms,
-                              max_retries=self.runtime_config.jev_max_retries)
+                              max_retries=self.runtime_config.jev_max_retries,
+                              api_key=self.runtime_config.jev_api_key)
+        elif jev_backend == "llm":
+            # The chat baseline uses the same OpenRouter credential but has a
+            # seconds-based timeout rather than the JEV total-budget argument.
+            jev_kwargs.update(
+                timeout=max(0.25, self.runtime_config.jev_budget_ms / 1000.0),
+                max_retries=self.runtime_config.jev_max_retries,
+                api_key=self.runtime_config.jev_api_key,
+            )
         client = get_client(jev_backend, **jev_kwargs)
         self.guide = GuideBook()
         logged_client = LoggingJevClient(
             client, log_dir=log_dir or ROOT / self.strategy.get("jev", {}).get("log_dir", "logs"))
+        self._logged_jev_client = logged_client
         self._guide_client = GuideAwareClient(logged_client)
         self.jev = self._guide_client
         self.guide_result = GuideResult()
         self.hp: HPBudget | None = None
         self.run: RunContext | None = None
         brain_cfg = self.strategy.get("brain", {}) or {}
+        if knowledge_enabled is None:
+            knowledge_enabled = bool(brain_cfg.get("knowledge_enabled", True))
         resolved_log_dir = Path(log_dir) if log_dir else ROOT / brain_cfg.get("log_dir", "logs")
         self.strategic = StrategicOrchestrator(
             backend=brain_backend,
             model=self.runtime_config.openai_model,
             endpoint=self.runtime_config.openai_endpoint,
+            # Resolve the credential once in RuntimeConfig and pass it across
+            # the provider boundary explicitly.  This keeps game-launched
+            # subprocesses independent of their inherited working directory
+            # while the key remains absent from public config and trace data.
+            api_key=self.runtime_config.brain_api_key,
             timeout_ms=self.runtime_config.timeout_ms,
             max_plan_steps=self.runtime_config.max_plan_steps,
             memory_events=self.runtime_config.memory_events,
@@ -204,11 +224,14 @@ class SpireBrainAgent:
             client=brain_client,
             log_dir=resolved_log_dir,
             async_planning=async_planning,
+            knowledge_enabled=knowledge_enabled,
         )
         self.trace = DecisionTrace(resolved_log_dir / "decision_trace.jsonl",
                                    config_id=self.runtime_config.config_id)
         # Provider events share the same decision trace as advice and outcomes.
         logged_client.event_sink = self.trace.record
+        logged_client.context_provider = self._provider_trace_context
+        self.strategic.event_sink = self.trace.record
         try:
             self.strategic.provider.event_sink = self.trace.record
         except AttributeError:
@@ -261,6 +284,7 @@ class SpireBrainAgent:
         # boundary instead of being regenerated after a provider returns.
         self._active_decision_id = ""
         self._active_advice_revision = 0
+        self._active_trigger = ""
         self.combat_engine = CombatTacticalEngine(
             depth=int(brain_cfg.get("combat_search_depth", 3) or 3),
             node_limit=int(brain_cfg.get("combat_search_nodes", 64) or 64),
@@ -270,6 +294,21 @@ class SpireBrainAgent:
         # the brain is thinking. None (the default) changes nothing — the feed
         # is an observability side-channel, never a dependency.
         self.feed = feed
+
+    def _provider_trace_context(self) -> dict:
+        """Return the owner decision identity for provider-attempt events."""
+        snapshot = self.snapshot
+        plan = self._active_plan or getattr(self.strategic, "current_plan", None)
+        return {
+            "run_id": self.run_session.run_id or self.strategic.memory.run_id or None,
+            "run_epoch": self.run_session.run_epoch,
+            "decision_id": self._active_decision_id or None,
+            "state_id": snapshot.state_id if snapshot is not None else None,
+            "plan_id": getattr(plan, "plan_id", None),
+            "config_id": self.runtime_config.config_id,
+            "generation": self._decision_sequence or None,
+            "trigger": self._active_trigger or None,
+        }
 
     def _append_history(self, entry: dict) -> None:
         """Keep in-process replay memory bounded during long game sessions."""
@@ -647,6 +686,7 @@ class SpireBrainAgent:
         run_id = self.run_session.run_id or self.strategic.memory.run_id or "local"
         self._active_decision_id = supplied_decision_id or \
             f"{run_id}:{state_for_decision[:16]}:{self._decision_sequence}"
+        self._active_trigger = "state"
         try:
             self._active_advice_revision = int(_get(game, "advice_revision", default=0) or 0)
         except (TypeError, ValueError):
@@ -699,8 +739,16 @@ class SpireBrainAgent:
             # the transport's stall guard stops the loop instead of retrying.
             return {"command": "proceed", "reason_source": "navigation",
                     "reason": f"non-decision screen {screen!r}: navigation only, no JEV call"}
+        # A map with no reachable nodes is an explicit insufficient-state
+        # response.  Do not start a strategic worker for a screen that cannot
+        # produce a candidate; besides wasting a provider call, a late worker
+        # can write trace blobs after a short-lived offline caller has already
+        # closed its log directory.
+        if screen == MAP_SCREEN and not self._active_candidates:
+            return handler(game)
         try:
             trigger = "combat_start" if screen == COMBAT_SCREEN and self.strategic.last_screen != COMBAT_SCREEN else None
+            self._active_trigger = trigger or "state"
             with use_budget(self._active_budget):
                 self._active_plan, self._active_brain_response = self.strategic.plan_for(
                     game,
@@ -721,6 +769,25 @@ class SpireBrainAgent:
     # -- shared helpers ---------------------------------------------------- #
     def _finalize_and_record(self, decision, command: dict) -> dict:
         detail = dict(decision.detail)
+        request_ids = []
+        existing_request_ids = detail.get("provider_request_ids", [])
+        if isinstance(existing_request_ids, str):
+            existing_request_ids = [existing_request_ids]
+        if isinstance(existing_request_ids, (list, tuple)):
+            request_ids.extend(str(request_id) for request_id in existing_request_ids
+                               if request_id)
+        for client in (self._logged_jev_client,
+                       getattr(self.strategic, "provider", None)):
+            request_id_reader = getattr(client, "request_ids_for_decision", None)
+            if callable(request_id_reader):
+                try:
+                    for request_id in request_id_reader(self._active_decision_id):
+                        request_id = str(request_id or "")
+                        if request_id and request_id not in request_ids:
+                            request_ids.append(request_id)
+                except Exception:
+                    pass
+        detail["provider_request_ids"] = request_ids
         # Confidence is layered evidence, not one made-up probability.  Keep
         # provider confidence, local tactical confidence and the final basis
         # separate all the way to the trace and overlay.
@@ -762,7 +829,11 @@ class SpireBrainAgent:
                 )
                 execution_detail = execution.detail()
                 detail.update(execution_detail)
-                detail.update(self.strategic.current_detail())
+                # Pass the live game so a same-run, same-act strategic context
+                # can remain visible after a provider result expires. The
+                # context is display/JEV guidance only; reconcile() still gets
+                # only the fresh executable plan.
+                detail.update(self.strategic.current_detail(self._active_game))
                 detail["source_type"] = execution.source_type
                 if execution.reason:
                     detail["reason"] = execution.reason
@@ -904,20 +975,27 @@ class SpireBrainAgent:
             "run_id": final.run_id, "run_epoch": final.context.run_epoch,
             "state_id": final.state_id, "decision_id": final.decision_id,
             "request_id": request_id or None, "plan_id": final.plan_id,
+            "provider_request_ids": detail.get("provider_request_ids", []),
             "screen": str(_get(self._active_game, "screen_type", default="")).upper(),
             "act": _as_int(_get(self._active_game, "act", default=0)),
             "floor": _as_int(_get(self._active_game, "floor", "floor_num", default=0)),
             "state_blob": dict(self._active_game or {}),
         })
+
         self.trace.record("decision", {
             "run_id": final.run_id, "state_id": final.state_id,
             "decision_id": final.decision_id, "request_id": request_id or None,
+            "provider_request_ids": detail.get("provider_request_ids", []),
             "plan_id": final.plan_id, "screen": str(_get(self._active_game, "screen_type", default="")).upper(),
             "point": decision.point if decision is not None else final.proposal.point,
             "brain_backend": self.strategic.backend_name,
             "jev_backend": str(getattr(self.jev, "backend_name", "unknown")),
             "source_type": final.source_type, "rule_ids": final.proposal.rule_ids,
             "candidates": [candidate.to_dict() for candidate in self._active_candidates],
+            # Keep the executable candidate snapshot content-addressed so a
+            # decision can be rerun offline without trusting model-facing
+            # candidate summaries that omit command templates.
+            "candidate_blob": [candidate.to_dict() for candidate in self._active_candidates],
             "filtered_candidates": self._candidate_diagnostics,
             "selected_candidate_id": final.candidate.candidate_id if final.candidate else "",
             "candidate_signature": final.candidate.candidate_signature if final.candidate else None,
@@ -1252,22 +1330,36 @@ class SpireBrainAgent:
         answer is deliberately ignored so the local combat policy or GPT's
         explicit preference remains the safe fallback.
         """
-        if self._active_plan is None or not self._active_candidates or self.run is None:
+        if not self._active_candidates or self.run is None:
             return None
-        candidates = [c for c in self._active_candidates
-                      if c.candidate_id not in self._active_plan.avoid_candidates]
-        preferred = set(self._active_plan.preferred_candidates)
-        if preferred:
-            preferred_candidates = [c for c in candidates if c.candidate_id in preferred]
-            others = [c for c in candidates if c.candidate_id not in preferred]
-            candidates = preferred_candidates + others[:2]
+        plan = self._active_plan
+        context = None
+        if plan is None:
+            # A late GPT response may still carry a useful objective. It must
+            # never carry positional preferences across a state boundary, so
+            # only the scoped goal is supplied to JEV and all current legal
+            # candidates remain eligible.
+            context = self.strategic.tactical_context_for(game)
+            if context is None:
+                return None
+        candidates = list(self._active_candidates)
+        if plan is not None:
+            candidates = [c for c in candidates
+                          if c.candidate_id not in plan.avoid_candidates]
+            preferred = set(plan.preferred_candidates)
+            if preferred:
+                preferred_candidates = [c for c in candidates if c.candidate_id in preferred]
+                others = [c for c in candidates if c.candidate_id not in preferred]
+                candidates = preferred_candidates + others[:2]
         candidates = candidates[:6]
         if len(candidates) < 2:
             return None
         criteria = {c.candidate_id: c.label for c in candidates}
         try:
+            tactical_goal = (plan.current_objective if plan is not None
+                             else context["goal"])
             state = self.run.digest({
-                "tactical_goal": self._active_plan.current_objective,
+                "tactical_goal": tactical_goal,
                 "candidates": [c.model_dict() for c in candidates],
                 "screen": "COMBAT",
             })
@@ -1284,7 +1376,11 @@ class SpireBrainAgent:
             if answer is None or float(answer.confidence or 0.0) < NOUL_UNCERTAIN_BAND[1]:
                 return None
             candidate = next((c for c in candidates if c.candidate_id == str(answer.value)), None)
-            return (candidate, float(answer.confidence or 0.0)) if candidate is not None else None
+            return ((candidate, float(answer.confidence or 0.0),
+                     context or {"plan_id": plan.plan_id,
+                                 "goal": plan.current_objective,
+                                 "context_only": False})
+                    if candidate is not None else None)
         except Exception:
             return None
 
@@ -1474,12 +1570,16 @@ class SpireBrainAgent:
                     )
             tactical = self._jev_tactical_pick(game)
             tactical_confidence = 0.0
+            tactical_context = None
             if tactical is not None:
-                tactical_candidate, tactical_confidence = tactical
+                tactical_candidate, tactical_confidence, tactical_context = tactical
                 rebound_facts = self.combat_engine.facts_for_candidate(
                     game, tactical_candidate, prior=suggestion.facts)
                 rebound_facts.update({"decision_basis": "jev_tactical_pick",
-                                      "jev_selected_candidate": tactical_candidate.candidate_id})
+                                      "jev_selected_candidate": tactical_candidate.candidate_id,
+                                      "strategic_context_only": bool(
+                                          tactical_context.get("context_only")
+                                          if tactical_context else False)})
                 suggestion = type(suggestion)(
                     command=dict(tactical_candidate.command),
                     reason=f"JEV 在 GPT 战略目标内选择：{tactical_candidate.label}。",

@@ -599,17 +599,14 @@ def check_brain_config(rep: Report) -> None:
         "moonshot", "kimi", "siliconflow", "doubao", "openai-compatible",
         "openai_compatible", "compatible", "local", "vllm", "ollama",
     }:
-        env_file = ROOT / ".env"
-        has_key = bool(os.environ.get("BRAIN_API_KEY") or os.environ.get("OPENAI_API_KEY"))
-        if not has_key and env_file.exists():
-            has_key = any((line.strip().startswith("OPENAI_API_KEY=")
-                           or line.strip().startswith("BRAIN_API_KEY="))
-                          and line.split("=", 1)[1].strip().strip('"').strip("'")
-                          for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines()
-                          if "=" in line)
+        # Use the same resolver as the game-launched Agent.  The old check
+        # parsed `.env` independently and missed valid `export KEY=...` lines,
+        # which made the doctor claim that a configured strategic provider was
+        # unavailable even though the child process could use it.
+        has_key = bool(runtime.brain_api_key)
         if has_key:
             rep.add(PASS, "Strategic GPT brain",
-                    f"backend={strategic_backend} source={runtime.sources['brain_backend']} "
+                    f"backend={strategic_backend} source={runtime.brain_key_source} "
                     f"config={runtime.config_id}")
         else:
             rep.add(WARN, "Strategic GPT brain", "no strategic brain API key; JEV/rules fallback will be used",

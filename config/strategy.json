@@ -18,6 +18,7 @@
     "max_output_tokens": 2400,
     "max_plan_steps": 5,
     "memory_events": 20,
+    "knowledge_enabled": true,
     "decision_budget_ms": 12000,
     "max_model_calls": 4,
     "fallback": "jev_rules"

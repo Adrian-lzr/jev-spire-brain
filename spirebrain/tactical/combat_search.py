@@ -149,7 +149,7 @@ def rank_cards(combat: Mapping[str, Any]) -> list[tuple[int, CombatFacts]]:
           item[1].scores.get("uncertainty_penalty", 0)), item[0]))
 
 
-def search_sequences(combat: Mapping[str, Any], *, depth: int = 3, node_limit: int = 64, time_limit_ms: float = 8.0) -> dict[str, Any]:
+def search_sequences(combat: Mapping[str, Any], *, depth: int = 3, node_limit: int = 64, time_limit_ms: float = 20.0) -> dict[str, Any]:
     """Search deterministic card/target sequences within a small budget.
 
     The search state is deliberately small and visible: energy, player block,

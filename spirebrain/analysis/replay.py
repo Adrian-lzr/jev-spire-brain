@@ -7,14 +7,18 @@ import io
 import json
 import tempfile
 import copy
+from collections import Counter
 from pathlib import Path
 
 from spirebrain.driver.agent import SpireBrainAgent
 from spirebrain.driver.stdio import StdioTransport
-from spirebrain.brain.protocol import BrainResponse, StrategicPlan
+from spirebrain.brain.protocol import ActionCandidate, BrainResponse, StrategicPlan
 from spirebrain.jev_brain.client import JevResponse
 from spirebrain.driver.legality import check_action
+from spirebrain.brain.action_broker import reconcile
 from spirebrain.brain.gpt_client import MockStrategicClient, UnavailableStrategicClient
+from spirebrain.analysis.event_contract import decision_chain
+from spirebrain.analysis.replay_blob import ReplayBlobStore
 
 
 _TIMING_EVENT_TYPES = {
@@ -32,6 +36,7 @@ class _ControlledReplayProvider:
     def __init__(self, responses=None):
         self.responses = list(responses or [])
         self.calls = []
+        self.error_kinds: list[str] = []
 
     def plan(self, payload: dict) -> BrainResponse:
         self.calls.append(copy.deepcopy(payload))
@@ -43,6 +48,21 @@ class _ControlledReplayProvider:
                                  error="scheduler fixture response invalid",
                                  error_kind="parse_or_validation", fallback=True)
         raw = dict(raw)
+        fault = str(raw.get("fault") or "").lower()
+        if fault:
+            error_kind = {
+                "timeout": "timeout",
+                "401": "auth_error", "403": "auth_error", "auth": "auth_error",
+                "429": "rate_limited", "rate_limit": "rate_limited",
+                "invalid_json": "parse_or_validation",
+                "invalid_plan": "parse_or_validation",
+            }.get(fault, "provider_error")
+            self.error_kinds.append(error_kind)
+            return BrainResponse(
+                backend=self.backend_name, model="scheduler-fixture",
+                error=f"fixture fault: {fault}", error_kind=error_kind,
+                fallback=True, request_id=f"scheduler-request-{len(self.calls)}",
+            )
         raw.setdefault("plan_id", f"scheduler-plan-{len(self.calls)}")
         raw.setdefault("state_id", str(payload.get("state_id") or ""))
         raw.setdefault("run_id", str(payload.get("run_id") or "local"))
@@ -88,6 +108,7 @@ def run_async_scheduler_fixture(path: str | Path) -> dict:
     )
     current_state = None
     committed: list[str] = []
+    committed_decision_ids: list[str] = []
     discarded_before = 0
     for index, event in enumerate(events):
         if not isinstance(event, dict):
@@ -103,15 +124,16 @@ def run_async_scheduler_fixture(path: str | Path) -> dict:
                 # spawning an uncontrolled thread.
                 orchestrator._plan_running = True
             before = orchestrator.expired_plan_results
+            decision_id = str(event.get("decision_id") or f"replay-decision-{index}")
             plan, _ = orchestrator.plan_for(
                 current_state,
                 candidates=build_action_candidates(current_state),
-                decision_id=str(event.get("decision_id") or
-                               f"replay-decision-{index}"),
+                decision_id=decision_id,
             )
             discarded_before += orchestrator.expired_plan_results - before
             if plan is not None:
                 committed.append(plan.plan_id)
+                committed_decision_ids.append(decision_id)
         elif operation == "complete":
             if orchestrator._queued_plan is None:
                 raise ValueError(f"replay_events[{index}] complete has no queued task")
@@ -125,7 +147,12 @@ def run_async_scheduler_fixture(path: str | Path) -> dict:
     report = {
         "fixture": str(path), "fixture_type": "synthetic",
         "event_count": len(events), "provider_calls": len(provider.calls),
+        "provider_error_kinds": list(provider.error_kinds),
+        "provider_error_counts": dict(Counter(provider.error_kinds)),
+        "provider_decision_ids": [str(call.get("decision_id") or "")
+                                   for call in provider.calls],
         "committed_plan_ids": committed,
+        "committed_decision_ids": committed_decision_ids,
         "expired_result_count": orchestrator.expired_plan_results,
         "expired_result_reasons": dict(orchestrator.expired_plan_result_reasons),
         "discarded_during_poll": discarded_before,
@@ -154,6 +181,223 @@ def _read_json_object(path: str | Path) -> dict:
     if not isinstance(value, dict):
         raise ValueError(f"{target}: fixture must be an object")
     return value
+
+
+def replay_decision_chain(trace_path: str | Path, decision_id: str,
+                          *, require_blobs: bool = True) -> dict:
+    """Load one decision chain and verify its content-addressed evidence.
+
+    This is intentionally a read-only offline entry point.  It never invokes a
+    provider: JEV/GPT inputs and responses are returned as verified blobs so a
+    caller can feed them to a fixed replay harness.  Missing or tampered blobs
+    fail loudly when ``require_blobs`` is enabled instead of silently replaying
+    an incomplete decision.
+    """
+    path = Path(trace_path)
+    records = []
+    try:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                records.append(value)
+    except OSError as exc:
+        raise FileNotFoundError(path) from exc
+    chain = decision_chain(records, str(decision_id))
+    if not any(chain.get(bucket) for bucket in (
+            "inputs", "requests", "responses", "decisions", "advice_versions",
+            "outcomes", "results", "expired", "skipped")):
+        raise ValueError(f"decision replay evidence not found: {decision_id}")
+    store = ReplayBlobStore(path.parent / "decision_blobs")
+    blobs: list[dict] = []
+    errors: list[str] = []
+    for bucket in ("inputs", "requests", "responses", "decisions"):
+        for event in chain.get(bucket, []):
+            for field_name in ("state_blob", "candidate_blob", "response_blob"):
+                reference = event.get(field_name)
+                if reference is None:
+                    continue
+                try:
+                    value = store.get(reference)
+                    blobs.append({"bucket": bucket, "event_type": event.get("event_type"),
+                                  "request_id": event.get("request_id"),
+                                  "field": field_name, "value": value})
+                except (FileNotFoundError, OSError, TypeError, ValueError) as exc:
+                    errors.append(f"{field_name}:{type(exc).__name__}")
+    if require_blobs:
+        required = [event for bucket in ("requests", "responses")
+                    for event in chain.get(bucket, [])]
+        missing = [event.get("event_type", "event") for event in required
+                   if not any(item.get("event_type") == event.get("event_type")
+                              and item.get("request_id") == event.get("request_id")
+                              for item in blobs)]
+        for event in chain.get("requests", []):
+            if not event.get("state_blob"):
+                errors.append("missing_provider_request_blob")
+        for event in chain.get("responses", []):
+            if not event.get("response_blob"):
+                errors.append("missing_provider_response_blob")
+        if missing:
+            errors.append("missing_provider_blob")
+    if errors:
+        raise ValueError("decision replay evidence invalid: " + ",".join(errors))
+    return {**chain, "replay_blobs_verified": len(blobs), "replay_blobs": blobs}
+
+
+def _blob_value(chain: dict, field: str):
+    """Return the most complete verified blob of ``field`` from a chain.
+
+    Provider request blobs intentionally contain compact/model-facing data;
+    the owner-loop ``inputs``/``decisions`` blobs contain the executable state
+    and command templates needed for local replay.  Prefer those owner blobs
+    while retaining request blobs as a legacy fallback.
+    """
+    priority = {"inputs": 0, "decisions": 0, "requests": 1, "responses": 2}
+    items = sorted(
+        (item for item in chain.get("replay_blobs", []) if item.get("field") == field),
+        key=lambda item: priority.get(str(item.get("bucket") or ""), 3),
+    )
+    for item in items:
+        value = item.get("value")
+        if field == "candidate_blob" and isinstance(value, list):
+            if any(isinstance(candidate, dict) and candidate.get("command")
+                   for candidate in value):
+                return value
+            continue
+        if value is not None:
+            return value
+    return None
+
+
+def _candidate_from_blob(value: dict) -> ActionCandidate:
+    """Rehydrate only the local candidate shape used by the broker.
+
+    Candidate blobs are produced by the local generator, not by a model.  The
+    replay path therefore preserves the recorded signature and command
+    template, while the final legality check still treats the state as the
+    authority.
+    """
+    if not isinstance(value, dict):
+        raise ValueError("candidate blob item must be an object")
+    return ActionCandidate(
+        candidate_id=str(value.get("candidate_id") or ""),
+        kind=str(value.get("kind") or "unknown"),
+        label=str(value.get("label") or value.get("candidate_id") or "candidate"),
+        command=dict(value.get("command") or value.get("command_template") or {}),
+        legal=bool(value.get("legal", True)),
+        cost=value.get("cost"), target=value.get("target"),
+        goal_tags=list(value.get("goal_tags") or []),
+        risk_tags=list(value.get("risk_tags") or []),
+        uncertainty=str(value.get("uncertainty") or ""),
+        description=str(value.get("description") or ""),
+        command_template=value.get("command_template"),
+        candidate_signature=str(value.get("candidate_signature") or ""),
+        entity_id=str(value.get("entity_id") or ""),
+        upgrade_state=str(value.get("upgrade_state") or ""),
+        validity=dict(value.get("validity") or {}),
+    )
+
+
+def replay_decision(trace_path: str | Path, decision_id: str) -> dict:
+    """Execute one decision chain locally from its stored evidence.
+
+    This is deliberately not a provider replay: it never makes a network call
+    and never accepts a model-authored command.  It rehydrates the recorded
+    candidates and strategic plan, runs the same local reconciliation, and
+    checks both the recorded and replayed commands against the stored state.
+    Missing or tampered evidence fails before any decision is produced.
+    """
+    chain = replay_decision_chain(trace_path, decision_id, require_blobs=True)
+    # ``decision`` is the owner-loop finalization, while ``advice`` records
+    # what was actually published.  A later advice revision may legitimately
+    # replace that decision (for example after a local fast result), so choose
+    # the last command-bearing event across both buckets instead of preferring
+    # one bucket wholesale.  Trace sequence is the strongest ordering signal;
+    # timestamp/index keeps legacy traces deterministic.
+    final_events = [
+        event for event in (list(chain.get("decisions") or []) +
+                            list(chain.get("advice_versions") or []))
+        if isinstance(event.get("command"), dict)
+    ]
+    if not final_events:
+        raise ValueError(f"decision replay evidence missing final decision: {decision_id}")
+    has_sequence = any(isinstance(event.get("trace_sequence"), (int, float))
+                       for event in final_events)
+    if has_sequence:
+        final_events.sort(key=lambda event: (
+            float(event.get("trace_sequence"))
+            if isinstance(event.get("trace_sequence"), (int, float)) else -1.0,
+            float(event.get("timestamp", event.get("ts", 0)) or 0),
+        ))
+    else:
+        final_events.sort(key=lambda event: float(
+            event.get("timestamp", event.get("ts", 0)) or 0))
+    final_event = final_events[-1]
+    state = _blob_value(chain, "state_blob")
+    raw_candidates = _blob_value(chain, "candidate_blob")
+    if not isinstance(state, dict):
+        raise ValueError("decision replay evidence missing state blob")
+    if not isinstance(raw_candidates, list) or not raw_candidates:
+        raise ValueError("decision replay evidence missing candidate blob")
+    candidates = [_candidate_from_blob(item) for item in raw_candidates]
+    candidates = [candidate for candidate in candidates if candidate.candidate_id]
+    if not candidates:
+        raise ValueError("decision replay evidence has no usable candidates")
+
+    # A strategic response blob is a plan object.  JEV answer blobs are kept in
+    # the returned evidence for audit, but they do not author commands here.
+    plan = None
+    for item in chain.get("replay_blobs", []):
+        if item.get("field") != "response_blob" or not isinstance(item.get("value"), dict):
+            continue
+        raw = item["value"]
+        raw_plan = raw.get("plan", raw)
+        if not isinstance(raw_plan, dict) or "preferred_candidates" not in raw_plan:
+            continue
+        try:
+            plan = StrategicPlan.from_dict(
+                raw_plan,
+                state_id=str(final_event.get("state_id") or ""),
+                run_id=str(final_event.get("run_id") or "local"),
+            )
+            plan.bind_candidates(candidates)
+            break
+        except (TypeError, ValueError, KeyError):
+            continue
+
+    replay_command, replay_detail = reconcile(
+        game=state, candidates=candidates,
+        fallback={"command": "state"}, plan=plan,
+        state_id=str(final_event.get("state_id") or ""),
+    )
+    recorded_command = final_event.get("command")
+    if not isinstance(recorded_command, dict):
+        raise ValueError("decision replay evidence missing recorded command")
+    recorded_verb = str(recorded_command.get("command") or "").lower()
+    recorded_legal, recorded_reason = check_action(state, recorded_command)
+    replay_verb = str(replay_command.get("command") or "").lower()
+    replay_legal, replay_reason = check_action(state, replay_command)
+    return {
+        **chain,
+        "replay_execution": {
+            "offline": True,
+            "provider_calls": 0,
+            "candidate_count": len(candidates),
+            "plan_id": getattr(plan, "plan_id", "") if plan else "",
+            "recorded_command": recorded_command,
+            "recorded_command_safe": recorded_verb in {"wait", "state"} or recorded_legal,
+            "recorded_legality": recorded_reason,
+            "replayed_command": replay_command,
+            "replayed_command_safe": replay_verb in {"wait", "state"} or replay_legal,
+            "replayed_legality": replay_reason,
+            "matches_recorded": replay_command == recorded_command,
+            "source_type": replay_detail.source_type,
+            "final_event_type": str(final_event.get("event_type") or ""),
+            "advice_revision": final_event.get("advice_revision"),
+        },
+    }
 
 
 class ReplayStrategicClient:
@@ -235,6 +479,8 @@ def run_timing_fixture(path: str | Path) -> dict:
     if not isinstance(events, list) or not events:
         raise ValueError("events must be an array")
     requests: dict[str, dict] = {}
+    responses: set[str] = set()
+    expired_requests: set[str] = set()
     state_events: list[tuple[int, str]] = []
     expired: list[dict] = []
     for index, event in enumerate(events):
@@ -264,7 +510,15 @@ def run_timing_fixture(path: str | Path) -> dict:
             if not request_id or request_id not in requests:
                 raise ValueError(
                     f"events[{index}]: {event_type} references unknown request_id")
+            if event_type == "provider_response":
+                if request_id in responses:
+                    raise ValueError(
+                        f"events[{index}]: duplicate provider_response for {request_id}")
+                responses.add(request_id)
             if event_type == "expired_result":
+                if request_id in expired_requests:
+                    raise ValueError(
+                        f"events[{index}]: duplicate expired_result for {request_id}")
                 if not str(event.get("fallback_reason") or ""):
                     raise ValueError(f"events[{index}]: expired_result requires fallback_reason")
                 request = requests[request_id]
@@ -286,6 +540,7 @@ def run_timing_fixture(path: str | Path) -> dict:
                 if not changed and result_state == request_state:
                     raise ValueError(
                         f"events[{index}]: expired_result lacks state-change evidence")
+                expired_requests.add(request_id)
                 expired.append(event)
     if not requests:
         raise ValueError("timing fixture must contain a provider_request")
@@ -295,7 +550,8 @@ def run_timing_fixture(path: str | Path) -> dict:
             "state_count": len({state for _, state in state_events}), "passed": True}
 
 
-def run_fixture(path: Path, *, mode: str = "rules") -> dict:
+def run_fixture(path: Path, *, mode: str = "rules",
+                knowledge_enabled: bool = True) -> dict:
     if mode not in {"rules", "jev", "strategic", "full"}:
         raise ValueError(f"unknown replay mode: {mode}")
     payload = _read_json_object(path)
@@ -316,7 +572,8 @@ def run_fixture(path: Path, *, mode: str = "rules") -> dict:
         raise ValueError("messages must contain structured game_state objects")
     with tempfile.TemporaryDirectory(prefix="spirebrain-replay-") as tmp:
         brain_backend = "mock" if mode in {"strategic", "full"} else "none"
-        agent = SpireBrainAgent(jev_backend="mock", brain_backend=brain_backend, log_dir=tmp)
+        agent = SpireBrainAgent(jev_backend="mock", brain_backend=brain_backend,
+                                log_dir=tmp, knowledge_enabled=knowledge_enabled)
         strategic = (MockStrategicClient() if mode in {"strategic", "full"}
                      else UnavailableStrategicClient("disabled for replay"))
         agent.strategic.provider = strategic
@@ -371,6 +628,11 @@ def run_fixture(path: Path, *, mode: str = "rules") -> dict:
                             if r.get("event_type") == "expired_result")
         outcomes = [r for r in trace_records if r.get("event_type") == "outcome"]
         unobserved = sum(1 for r in outcomes if r.get("verdict") == "unobserved")
+        knowledge_citation_count = sum(
+            len((payload.get("knowledge_context") or {}).get("citation_ids") or [])
+            for payload in getattr(strategic, "payloads", [])
+            if isinstance(payload, dict)
+        )
     return {
         "fixture": str(path),
         "fixture_type": payload.get("fixture_type", "synthetic") if isinstance(payload, dict) else "synthetic",
@@ -391,6 +653,8 @@ def run_fixture(path: Path, *, mode: str = "rules") -> dict:
         "expired_result_count": expired_count,
         "unobserved_count": unobserved,
         "outcome_count": len(outcomes),
+        "knowledge_enabled": bool(knowledge_enabled),
+        "knowledge_citation_count": knowledge_citation_count,
         "game_rejections": None,
         "passed": bool(transport.messages) and not invalid and all(legality),
     }
@@ -401,8 +665,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--input", required=True)
     parser.add_argument("--async-scheduler", action="store_true",
                         help="run a synthetic scheduler_scenario through owner boundaries")
+    parser.add_argument("--decision-id",
+                        help="verify and print one decision chain from a decision_trace.jsonl")
+    parser.add_argument("--execute", action="store_true",
+                        help="with --decision-id, re-run local reconciliation offline")
     args = parser.parse_args(argv)
     root = Path(args.input)
+    if args.decision_id:
+        try:
+            result = (replay_decision(root, args.decision_id)
+                      if args.execute else replay_decision_chain(root, args.decision_id))
+        except (OSError, ValueError) as exc:
+            print(json.dumps({"error": "invalid_decision_replay",
+                              "kind": type(exc).__name__, "message": str(exc)},
+                             ensure_ascii=False))
+            return 2
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
     if args.async_scheduler:
         try:
             result = run_async_scheduler_fixture(root)

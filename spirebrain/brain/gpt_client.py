@@ -77,6 +77,50 @@ def _json_text(value: Any) -> str:
     return text
 
 
+def _json_candidates(value: Any) -> list[str]:
+    """Return bounded JSON-looking fragments from a gateway text response.
+
+    Compatible gateways frequently prepend a ``<think>``/Markdown wrapper or
+    append a short sentence around the actual object.  Taking the first ``{``
+    and last ``}`` is unsafe when the wrapper itself contains braces, so scan
+    each opening brace with ``raw_decode`` and retain only complete objects.
+    The result is still parsed and validated by ``StrategicPlan`` below.
+    """
+    text = value if isinstance(value, str) else str(value)
+    text = text.strip()
+    if not text:
+        return []
+    candidates: list[str] = [text]
+    # Remove common hidden-reasoning wrappers before looking for a plan.  We do
+    # not expose the removed text in logs or UI; it is only an input cleanup.
+    for tag in ("think", "analysis", "reasoning"):
+        open_tag, close_tag = f"<{tag}>", f"</{tag}>"
+        while open_tag in text.lower() and close_tag in text.lower():
+            lower = text.lower()
+            start = lower.find(open_tag)
+            end = lower.find(close_tag, start + len(open_tag))
+            if end < 0:
+                break
+            text = (text[:start] + text[end + len(close_tag):]).strip()
+    if text and text not in candidates:
+        candidates.append(text)
+    decoder = json.JSONDecoder()
+    fragments: list[str] = []
+    for source in list(candidates):
+        for index, char in enumerate(source):
+            if char != "{":
+                continue
+            try:
+                _, end = decoder.raw_decode(source[index:])
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue
+            fragment = source[index:index + end]
+            if fragment not in fragments:
+                fragments.append(fragment)
+    # Prefer a complete object first, then the extracted fragments.
+    return candidates + [item for item in fragments if item not in candidates]
+
+
 def _unicode_safe_json(value: Any) -> Any:
     """Normalize gateway JSON without passing legacy-encoded text downstream."""
     if isinstance(value, bytes):
@@ -101,8 +145,18 @@ def _extract_text(body: dict) -> str:
         if not isinstance(item, dict):
             continue
         content = item.get("content") or []
+        if isinstance(content, str) and content.strip():
+            chunks.append(content)
+            continue
+        if isinstance(content, dict):
+            text = content.get("text")
+            if isinstance(text, str) and text.strip():
+                chunks.append(text)
+            continue
         for part in content:
-            if isinstance(part, dict) and isinstance(part.get("text"), str):
+            if isinstance(part, str):
+                chunks.append(part)
+            elif isinstance(part, dict) and isinstance(part.get("text"), str):
                 chunks.append(part["text"])
     if chunks:
         return "".join(chunks)
@@ -110,13 +164,72 @@ def _extract_text(body: dict) -> str:
     if choices and isinstance(choices[0], dict):
         message = choices[0].get("message") or {}
         content = message.get("content", "")
+        if isinstance(content, dict):
+            text = content.get("text")
+            if isinstance(text, str):
+                return text
+            content = content.get("content", "")
         if isinstance(content, list):
-            return "".join(
-                str(part.get("text", "")) for part in content
-                if isinstance(part, dict)
-            )
-        return str(content)
+            parts: list[str] = []
+            for part in content:
+                if isinstance(part, str):
+                    parts.append(part)
+                elif isinstance(part, dict) and isinstance(part.get("text"), str):
+                    parts.append(part["text"])
+            if parts:
+                return "".join(parts)
+        if isinstance(content, str) and content.strip():
+            return content
+        # A few compatible gateways expose the completion under ``text`` or a
+        # tool/function argument instead of message.content.  These are still
+        # provider output, never executable commands.
+        for key in ("text", "reasoning_content"):
+            candidate = message.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate
+        for call in message.get("tool_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            function = call.get("function") or {}
+            arguments = function.get("arguments")
+            if isinstance(arguments, str) and arguments.strip():
+                return arguments
+        function_call = message.get("function_call") or {}
+        arguments = function_call.get("arguments")
+        if isinstance(arguments, str) and arguments.strip():
+            return arguments
+        text = choices[0].get("text")
+        if isinstance(text, str) and text.strip():
+            return text
     raise ValueError("模型响应中没有文本内容")
+
+
+def _extract_texts(body: dict) -> list[str]:
+    """Collect alternate text channels while preserving parser compatibility."""
+    texts: list[str] = []
+    try:
+        first = _extract_text(body)
+    except ValueError:
+        first = ""
+    if first:
+        texts.append(first)
+    choices = body.get("choices") or []
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        message = choice.get("message") or {}
+        if not isinstance(message, dict):
+            continue
+        for key in ("content", "text", "reasoning_content"):
+            value = message.get(key)
+            if isinstance(value, str) and value.strip() and value not in texts:
+                texts.append(value)
+        for call in message.get("tool_calls") or []:
+            if isinstance(call, dict):
+                arguments = (call.get("function") or {}).get("arguments")
+                if isinstance(arguments, str) and arguments.strip() and arguments not in texts:
+                    texts.append(arguments)
+    return texts
 
 
 def _unwrap_plan(data: Any) -> Any:
@@ -322,29 +435,40 @@ class OpenAIStrategicClient:
                                 "rate_limit" if exc.code == 429 else "http"),
                 )
             decoded = _unicode_safe_json(json.loads(raw.decode("utf-8", "replace")))
-            text = _unicode_safe_json(_extract_text(decoded))
-            if len(text.encode("utf-8", "replace")) > 64 * 1024:
-                raise PlanValidationError("模型响应超过 64KB 限制")
-            try:
-                data = _unwrap_plan(json.loads(_json_text(text)))
-            except UnicodeError:
-                # Some compatible gateways build an intermediate latin-1
-                # string around otherwise valid Chinese JSON. Escaping first
-                # preserves the content while avoiding that codec path.
-                escaped = json.dumps(text, ensure_ascii=True)
-                data = _unwrap_plan(json.loads(json.loads(escaped)))
-            data = _coerce_steps_plan(
-                data,
-                state_id=str(payload.get("state_id", "")),
-                run_id=str(payload.get("run_id", "local")),
-                max_steps=int(payload.get("max_plan_steps", 5) or 5),
-            )
-            plan = StrategicPlan.from_dict(
-                data,
-                state_id=str(payload.get("state_id", "")),
-                run_id=str(payload.get("run_id", "local")),
-                max_steps=int(payload.get("max_plan_steps", 5) or 5),
-            )
+            texts = [_unicode_safe_json(item) for item in _extract_texts(decoded)]
+            if not texts:
+                raise ValueError("模型响应中没有可解析文本")
+            parse_error: Exception | None = None
+            plan = None
+            for text in texts:
+                if not isinstance(text, str):
+                    continue
+                if len(text.encode("utf-8", "replace")) > 64 * 1024:
+                    parse_error = PlanValidationError("模型响应超过 64KB 限制")
+                    continue
+                for fragment in _json_candidates(text):
+                    try:
+                        data = _unwrap_plan(json.loads(fragment))
+                        data = _coerce_steps_plan(
+                            data,
+                            state_id=str(payload.get("state_id", "")),
+                            run_id=str(payload.get("run_id", "local")),
+                            max_steps=int(payload.get("max_plan_steps", 5) or 5),
+                        )
+                        plan = StrategicPlan.from_dict(
+                            data,
+                            state_id=str(payload.get("state_id", "")),
+                            run_id=str(payload.get("run_id", "local")),
+                            max_steps=int(payload.get("max_plan_steps", 5) or 5),
+                        )
+                        break
+                    except (UnicodeError, ValueError, KeyError, TypeError,
+                            json.JSONDecodeError, PlanValidationError) as exc:
+                        parse_error = exc
+                if plan is not None:
+                    break
+            if plan is None:
+                raise parse_error or ValueError("模型响应中没有有效战略计划")
             usage = decoded.get("usage") if isinstance(decoded, dict) else {}
             return BrainResponse(
                 plan=plan,
@@ -435,21 +559,46 @@ class LoggingStrategicClient:
         )
         self.path = Path(path)
         self.event_sink = event_sink
+        self._decision_request_ids: dict[str, list[str]] = {}
+        self._request_ids_lock = threading.Lock()
+
+    def request_ids_for_decision(self, decision_id: str) -> list[str]:
+        with self._request_ids_lock:
+            return list(self._decision_request_ids.get(str(decision_id or ""), ()))
+
+    def _remember_request(self, decision_id: str, request_id: str) -> None:
+        if not decision_id:
+            return
+        with self._request_ids_lock:
+            values = self._decision_request_ids.setdefault(decision_id, [])
+            if request_id not in values:
+                values.append(request_id)
+            if len(values) > 32:
+                del values[:-32]
+            while len(self._decision_request_ids) > 128:
+                self._decision_request_ids.pop(next(iter(self._decision_request_ids)))
 
     def plan(self, payload: dict) -> BrainResponse:
         started = time.monotonic()
         request_id = str(payload.get("request_id") or uuid.uuid4())
         identity = {key: payload.get(key) for key in
-                    ("run_id", "run_epoch", "decision_id", "state_id", "plan_id", "config_id")}
+                    ("run_id", "run_epoch", "decision_id", "state_id", "plan_id",
+                     "config_id", "generation", "trigger")}
         identity["request_id"] = request_id
         identity["logical_request_id"] = str(payload.get("logical_request_id") or request_id)
         identity["attempt_id"] = str(payload.get("attempt_id") or f"{request_id}:1")
+        knowledge = payload.get("knowledge_context")
+        if isinstance(knowledge, dict):
+            identity["knowledge_citation_ids"] = [str(value) for value in
+                                                   (knowledge.get("citation_ids") or [])][:8]
+        self._remember_request(str(identity.get("decision_id") or ""), request_id)
         if self.event_sink is not None:
             try:
                 self.event_sink("provider_request", {**identity, "provider": self.backend_name,
                     "model": getattr(self.inner, "model", ""),
                     "state_blob": payload.get("state"),
-                    "candidate_blob": payload.get("candidates")})
+                    "candidate_blob": payload.get("candidates"),
+                    "knowledge_citation_ids": identity.get("knowledge_citation_ids", [])})
             except Exception:
                 pass
         try:
@@ -476,6 +625,7 @@ class LoggingStrategicClient:
             "run_id": payload.get("run_id", ""),
             "trigger": payload.get("trigger", ""),
             "plan": plan,
+            "knowledge_citation_ids": identity.get("knowledge_citation_ids", []),
         })
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -491,7 +641,8 @@ class LoggingStrategicClient:
                     "model": result.model, "latency_ms": record["latency_ms"],
                     "usage": result.usage, "error": result.error, "error_kind": result.error_kind,
                     "fallback": bool(result.fallback),
-                    "response_blob": plan})
+                    "response_blob": plan,
+                    "knowledge_citation_ids": identity.get("knowledge_citation_ids", [])})
             except Exception:
                 pass
         return result

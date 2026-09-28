@@ -31,7 +31,7 @@ class CombatTacticalEngine:
     """Choose one current-step combat candidate with a bounded search."""
 
     def __init__(self, *, depth: int = 3, node_limit: int = 64,
-                 time_limit_ms: float = 8.0) -> None:
+                 time_limit_ms: float = 20.0) -> None:
         self.depth = max(1, min(3, int(depth)))
         self.node_limit = max(1, int(node_limit))
         self.time_limit_ms = max(0.0, float(time_limit_ms))

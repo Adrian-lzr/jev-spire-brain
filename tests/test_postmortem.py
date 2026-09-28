@@ -25,3 +25,19 @@ def test_release_report_keeps_real_result_unknown():
     assert report["source"]["sample_count"] == 5
     assert report["environment"]["commit"] == "abc"
     assert report["real_game_results"] == "unknown"
+
+
+def test_release_report_exposes_trace_completion_and_rag_evidence():
+    records = [
+        {"event_type": "provider_request", "decision_id": "d1",
+         "request_id": "q1", "knowledge_citation_ids": ["source-a"]},
+        {"event_type": "provider_response", "decision_id": "d1",
+         "request_id": "q1"},
+    ]
+
+    report = release_report(records)
+
+    assert report["validation"]["trace_request_completion_rate"] == 1.0
+    assert report["strategy_retrieval"] == {
+        "citation_ids": ["source-a"], "citation_count": 1, "quality": "unknown",
+    }

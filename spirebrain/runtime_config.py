@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
 
@@ -59,6 +59,14 @@ class RuntimeConfig:
     brain_backend: str
     openai_model: str
     openai_endpoint: str
+    # Secret provider material is resolved once at the process boundary and
+    # passed explicitly to the provider.  It is intentionally excluded from
+    # ``public_dict`` and from ``config_id``; only availability/source are
+    # exposed for diagnostics.
+    brain_api_key: str = field(repr=False)
+    brain_key_source: str
+    jev_api_key: str = field(repr=False)
+    jev_key_source: str
     jev_endpoint: str
     timeout_ms: int
     max_output_tokens: int
@@ -79,6 +87,10 @@ class RuntimeConfig:
             "brain_backend": self.brain_backend,
             "openai_model": self.openai_model,
             "openai_endpoint": self.openai_endpoint,
+            "brain_key_available": bool(self.brain_api_key),
+            "brain_key_source": self.brain_key_source,
+            "jev_key_available": bool(self.jev_api_key),
+            "jev_key_source": self.jev_key_source,
             "jev_endpoint": self.jev_endpoint,
             "timeout_ms": self.timeout_ms,
             "max_output_tokens": self.max_output_tokens,
@@ -161,6 +173,26 @@ def resolve_runtime_config(root: str | Path, *, cli: Mapping[str, str | None] | 
             jev_endpoint = "https://openrouter.ai/api/v1/systemone"
         elif base.endswith("/api/v1"):
             jev_endpoint = base + "/systemone"
+    # JEV credentials are selected for the resolved backend.  Keep the source
+    # metadata public, but never expose the key itself through RuntimeConfig's
+    # public representation or its fingerprint.
+    jev_key_aliases = {
+        "openrouter": ("OPENROUTER_API_KEY",),
+        "llm": ("OPENROUTER_API_KEY",),
+        "official": ("TYPESAFE_API_KEY",),
+        "cloudflare": ("CLOUDFLARE_API_TOKEN",),
+    }.get(jev_backend, ())
+    jev_api_key = ""
+    jev_key_source = "default"
+    for source, values in (("process_environment", env), ("dotenv", dot)):
+        for key_name in jev_key_aliases:
+            value = values.get(key_name)
+            if value is not None and str(value).strip():
+                jev_api_key = str(value).strip()
+                jev_key_source = source
+                break
+        if jev_api_key:
+            break
     brain_backend = pick("brain_backend", "BRAIN_BACKEND", brain.get("backend"), "openai",
                          cli_name="brain_backend").lower()
     preset_model, preset_endpoint = BRAIN_PROVIDER_PRESETS.get(
@@ -173,6 +205,21 @@ def resolve_runtime_config(root: str | Path, *, cli: Mapping[str, str | None] | 
         brain.get("endpoint"),
         preset_endpoint,
     )
+    # Resolve secrets with the same source precedence as public settings, but
+    # keep them out of all public snapshots, logs and configuration hashes.
+    # Alias ordering only applies within a source: a process environment value
+    # must beat a dotenv value even when the latter uses the canonical alias.
+    brain_api_key = ""
+    brain_key_source = "default"
+    for source, values in (("process_environment", env), ("dotenv", dot)):
+        for key_name in ("BRAIN_API_KEY", "OPENAI_API_KEY"):
+            value = values.get(key_name)
+            if value is not None and str(value).strip():
+                brain_api_key = str(value).strip()
+                brain_key_source = source
+                break
+        if brain_api_key:
+            break
     # Explicit CLI aliases are applied after the environment aliases so a
     # launcher can defeat stale inherited process variables without exposing a
     # secret in the command line.
@@ -229,6 +276,10 @@ def resolve_runtime_config(root: str | Path, *, cli: Mapping[str, str | None] | 
         "brain_backend": brain_backend,
         "openai_model": openai_model,
         "openai_endpoint": openai_endpoint,
+        "brain_api_key": brain_api_key,
+        "brain_key_source": brain_key_source,
+        "jev_api_key": jev_api_key,
+        "jev_key_source": jev_key_source,
         "jev_endpoint": jev_endpoint,
         "timeout_ms": timeout_ms,
         "max_output_tokens": max_output_tokens,
@@ -241,8 +292,12 @@ def resolve_runtime_config(root: str | Path, *, cli: Mapping[str, str | None] | 
         "jev_budget_ms": jev_budget_ms,
         "jev_max_retries": jev_max_retries,
     }
+    # Never hash the secret itself: besides being unnecessary, doing so would
+    # make a supposedly public config fingerprint depend on credential bytes.
+    config_identity = {key: value for key, value in public_values.items()
+                       if key not in {"brain_api_key", "jev_api_key"}}
     config_id = hashlib.sha256(json.dumps(
-        {"values": public_values, "sources": sources}, sort_keys=True,
+        {"values": config_identity, "sources": sources}, sort_keys=True,
         separators=(",", ":")
     ).encode("utf-8")).hexdigest()[:16]
     return RuntimeConfig(**public_values, sources=sources, config_id=config_id)

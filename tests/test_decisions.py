@@ -54,6 +54,23 @@ def test_event_chooser_returns_valid_option():
     assert d.value in ("opt_a", "opt_b")
 
 
+def test_event_chooser_exposes_typed_provider_fallback_reason():
+    from spirebrain.jev_brain.client import JevResponse
+
+    class OfflineJev:
+        backend_name = "openrouter-jev"
+
+        def ask(self, state, questions):
+            return JevResponse(backend=self.backend_name, fallback=True,
+                               error="network failure", error_kind="network_error")
+
+    decision = EventChooser(OfflineJev()).decide(
+        "shrine", {"opt_a": "safe", "opt_b": "risky"})
+
+    assert decision.used_fallback is True
+    assert decision.detail["reason"] == "jev error: network_error"
+
+
 def test_logging_client_writes_jsonl(tmp_path=None):
     import tempfile
     with tempfile.TemporaryDirectory() as td:

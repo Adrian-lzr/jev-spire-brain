@@ -289,8 +289,175 @@ invalid diagnostics carry bounded `contract_errors` instead of interrupting the
 game loop. This preserves the logging failure isolation rule while making
 contract drift observable.
 
+## Continuation update — 2026-09-28: provider-attempt and expiry evidence
+
+S3 trace auditing continued without a real provider or game session. Strategic
+provider wrappers now retain a bounded `decision_id -> request_id` index, and
+final decisions merge the actual JEV and strategic request identities instead
+of inferring a request from a reused legacy `brain_request_id`. Advisor expiry
+events therefore reference only causal provider requests; when no causal ID is
+available they record `request_id=null` rather than attributing an older plan.
+
+Offline timing replay now rejects duplicate responses for one request. Metrics
+deduplicate provider-attempt log lines by run, decision, request and attempt
+identity and expose `provider_duplicate_event_count`, preventing duplicate log
+delivery from inflating call counts. Strategic expiry events use the same
+`provider_request_ids` field as JEV and advisor expiry events.
+
+Validation on Windows / Python 3.12.10:
+
+| Command | Result |
+|---|---|
+| `python -m pytest -q` | 487 passed in 7.79s |
+| `python -m compileall -q spirebrain start.py run_agent.py` | passed |
+| `python tools/check_contracts.py` | passed; Java build not attempted |
+| `python tools/verify_offline.py` | tests, compile, contracts, metrics, evaluation, replay, async replay and launcher smoke passed |
+
+The remaining release limitations are unchanged: no clean Linux runtime,
+real provider, real game session, portable Java game-JAR build, fixed-model
+quality labels or win-rate experiment has been performed. Synthetic replay and
+offline metrics are evidence of protocol/lifecycle behavior only.
+
+The trace consumer now also emits a `request_lifecycle` summary for each
+decision. It distinguishes open requests from expired requests and reports
+orphan responses, duplicate request/response identities and mismatches in
+decision/state/run/attempt fields. This makes an incomplete chain auditable
+without treating a missing response as a successful or failed model call.
+The latest offline validation after this addition is `488 passed`; compile,
+contract and offline verification remain green.
+
+## Continuation update — 2026-09-28: typed advice-worker proposal
+
+The advice worker now returns an immutable `AdviceWorkerResult` containing a
+detached `DecisionRequest`, command, history entry and optional strategic-plan
+proposal. The owner session still accepts the legacy tuple envelope for
+compatibility, but commits only after checking run ID, run epoch, generation,
+state fingerprint and worker entry identity. A deliberately mismatched typed
+context is recorded as `worker_identity_mismatch` and cannot publish advice or
+modify owner memory. This closes the remaining S4 owner-only plan-commit gap
+without introducing a queue or framework dependency.
+
+Validation after this change: `489 passed`, compile and cross-language contract
+checks passed, and `tools/verify_offline.py` passed all eight offline checks.
+
 The launcher audit also found and removed the last live `.setup-done` branch:
 ordinary startup now relies only on read-only CommunicationMod config validity,
 while `--setup` remains the sole write path. The marker is ignored and retained
 only as a deprecated compatibility function that always returns false. The
 setup/startup regression slice now passes 24 tests.
+
+## Continuation update — 2026-09-28: source-cited strategy retrieval
+
+The strategic planning payload now includes a bounded offline
+`knowledge_context` for Ironclad only. It is backed by paraphrased,
+source-cited claims collected from public Ironclad guides (Forgotten Arbiter,
+Panacea, FantasyWarden and dood), with source URL, game version, trust label
+and capture date. A local deterministic lexical index retrieves a few relevant
+claims; runtime never fetches the Internet. Claims are soft evidence only:
+local card data, hard guide rules, candidate generation and `check_action()`
+remain authoritative.
+
+The RAG CLI returns UTF-8 JSON and rejects unsupported characters without
+applying Ironclad claims. `tests/test_strategy_rag.py` covers citations,
+character isolation and planner payload bounds. Full offline validation after
+the integration: `497 passed`, compile/contracts passed, and
+`tools/verify_offline.py` passed all checks. This is not win-rate evidence; it
+still needs fixed-seed comparative evaluation after the plan is complete.
+
+The `brain.knowledge_enabled` switch is explicit in `config/strategy.json` so
+the same replay can form a no-RAG control arm without changing rules, JEV,
+candidate legality or model budgets.
+
+The offline evaluator now exposes `--knowledge both`; on the committed
+synthetic advisor fixture the enabled arm records source citations and the
+disabled arm records zero citations with the same wire-safety checks. This is
+an input-path control, not a strategy-quality or win-rate result.
+
+`release_report()` now includes trace request completion rate and the bounded
+set of RAG citation IDs used by recorded provider events. Missing real labels
+remain `unknown`; no metric is promoted to a win-rate claim.
+
+The local Java overlay was also built with the current executable command
+`python java/build.py` (the script does not expose the historical `--verify`
+flag). It compiled two sources with `javac --release 8`, produced a verified
+34-entry `SpireBrainOverlay.jar`, and did not install it into the game.
+
+## Continuation update — trace audit and provider failure evidence
+
+The S3 trace audit found and fixed four metrics/replay issues. Metrics now
+combines advice and decision events in source order, keeps the final event per
+decision, counts canonical provider response latency once, accepts
+`result_record`, and excludes provider failure rows from the final advice
+fallback denominator. Structured outcome evidence is never treated as a
+win/loss label. Timing replay rejects duplicate `expired_result` terminal
+records for one request.
+
+JEV provider errors now carry a typed `error_kind` from the HTTP client through
+the logging wrapper. Live smoke evidence that previously appeared as a generic
+provider error is now classifiable as network, timeout, auth, rate limit, or
+parse/validation failure. Decision handlers also stop reporting a misleading
+`KeyError('choice')` when a provider returns a typed fallback.
+
+JEV request inputs (state plus question schema) and structured responses are
+stored as bounded, sanitized content-addressed blobs in the decision trace.
+`replay_decision_chain(trace, decision_id)` verifies their SHA-256 references
+offline and fails on missing or tampered provider evidence. The real-game smoke
+runner now restores the exact pre-run file presence, including removing
+configuration files created only by a first smoke run.
+
+Validation on Windows / Python 3.12.10:
+
+| Command | Result |
+|---|---|
+| `python -m pytest -q` | 511 passed in 8.07s |
+| `python -m compileall -q spirebrain start.py run_agent.py` | passed |
+| `python tools/check_contracts.py` | passed; static contract only |
+| `python tools/verify_offline.py` | tests, compile, contracts, metrics, evaluation, replay, async replay, strategy RAG and launcher smoke passed |
+
+The real-game smoke result remains degraded evidence rather than a quality or
+win-rate claim: one strategic response completed after its state was obsolete,
+while JEV requests failed at the network layer. No new live request was made
+for this continuation.
+
+## Continuation update — release gate, live-copy fixture and search stability
+
+The real-game smoke report now separates `pipeline_passed` from
+`provider_health_passed` and `release_passed`. An opted-in smoke exits non-zero
+when JEV or the strategic provider is unavailable, degraded, unknown, or when
+the only strategic result is later expired. This prevents a rules-only run from
+being mistaken for a healthy model integration while retaining diagnostic
+evidence.
+
+The offline verifier now executes the local strategy-RAG CLI as an independent
+check and validates UTF-8 JSON, Ironclad character isolation, HTTPS provenance,
+matching citation IDs and the absence of command-like fields. The fixed RAG
+audit reports 9/9 expected source hits and citation provenance 1.0; strategy
+quality and win rate remain `unknown`.
+
+`spirebrain.sim.ironclad` now provides a deterministic, bounded Ironclad
+simulator and an `extract_minimal_game_snapshot()` helper. The latter reads
+only selected localization entries from a read-only copy of the installed
+`desktop-1.0.jar`, records its SHA-256 and explicitly excludes saves,
+preferences, mods, logs and secrets. Synthetic and live-copy fixtures remain
+distinct; the complete game JAR is never placed in the repository.
+
+The combat search default budget was raised from 8ms to 20ms after reproducing
+Windows scheduler jitter that occasionally stopped before a complete first
+layer of candidates. Explicit zero/short budgets still produce the documented
+greedy fallback. The target-threat regression is now stable across repeated
+runs.
+
+Latest Windows / CPython 3.12.10 evidence:
+
+| Command | Result |
+|---|---|
+| `python -m pytest -q` | **530 passed** |
+| `python -m compileall -q spirebrain start.py run_agent.py tools` | passed |
+| `python tools/check_contracts.py` | passed; Java build not attempted |
+| `python tools/verify_offline.py` | 9/9 independent checks passed |
+| `python -m spirebrain.analysis.rag_eval` | 9/9 expected hits; quality/win rate unknown |
+| real smoke, 30s | pipeline passed; provider health degraded; release failed honestly |
+
+The real smoke observed one strategic response discarded as stale and one JEV
+network failure. It is integration evidence only, not a gameplay-quality or
+win-rate result.

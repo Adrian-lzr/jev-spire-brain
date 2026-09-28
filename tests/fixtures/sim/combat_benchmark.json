@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "fixture_type": "synthetic",
+  "kind": "combat_benchmark",
+  "description": "Synthetic Ironclad tactical contracts; not real game outcomes.",
+  "cases": [
+    {
+      "id": "lethal_over_block",
+      "objective": "lethal",
+      "state": {
+        "character": "IRONCLAD",
+        "screen_type": "COMBAT",
+        "available_commands": ["play", "end"],
+        "combat": {
+          "player": {"energy": 1, "current_hp": 30, "block": 0},
+          "hand": [
+            {"id": "Strike_R", "type": "ATTACK", "cost": 1, "damage": 20, "is_playable": true},
+            {"id": "Defend_R", "type": "SKILL", "cost": 1, "block": 15, "is_playable": true}
+          ],
+          "monsters": [{"id": "cultist-a", "current_hp": 18, "intent": "ATTACK", "damage": 15}]
+        }
+      }
+    },
+    {
+      "id": "cover_without_lethal",
+      "objective": "cover",
+      "state": {
+        "character": "IRONCLAD",
+        "screen_type": "COMBAT",
+        "available_commands": ["play", "end"],
+        "combat": {
+          "player": {"energy": 1, "current_hp": 30, "block": 0},
+          "hand": [
+            {"id": "Strike_R", "type": "ATTACK", "cost": 1, "damage": 6, "is_playable": true},
+            {"id": "Defend_R", "type": "SKILL", "cost": 1, "block": 15, "is_playable": true}
+          ],
+          "monsters": [{"id": "cultist-a", "current_hp": 40, "intent": "ATTACK", "damage": 15}]
+        }
+      }
+    },
+    {
+      "id": "highest_threat_target",
+      "objective": "target",
+      "expected": {"target_id": "strong-attacker"},
+      "state": {
+        "character": "IRONCLAD",
+        "screen_type": "COMBAT",
+        "available_commands": ["play", "end"],
+        "combat": {
+          "player": {"energy": 1, "current_hp": 30, "block": 0},
+          "hand": [{"id": "Strike_R", "type": "ATTACK", "cost": 1, "damage": 6, "is_playable": true, "has_target": true}],
+          "monsters": [
+            {"id": "weak-attacker", "current_hp": 5, "intent": "ATTACK", "damage": 6},
+            {"id": "strong-attacker", "current_hp": 6, "intent": "ATTACK", "damage": 20}
+          ]
+        }
+      }
+    },
+    {
+      "id": "unknown_effect_degrades",
+      "objective": "uncertain",
+      "state": {
+        "character": "IRONCLAD",
+        "screen_type": "COMBAT",
+        "available_commands": ["play", "end"],
+        "combat": {
+          "player": {"energy": 1, "current_hp": 30, "block": 0},
+          "hand": [{"id": "UnknownCard", "type": "SKILL", "cost": 1, "draw": 2, "is_playable": true}],
+          "monsters": [{"id": "cultist-a", "current_hp": 40, "intent": "ATTACK", "damage": 15}]
+        }
+      }
+    }
+  ]
+}

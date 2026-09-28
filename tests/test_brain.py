@@ -16,6 +16,7 @@ from spirebrain.brain.planner import StrategicPlanner
 from spirebrain.brain.protocol import BrainResponse, PlanValidationError, StrategicPlan
 from spirebrain.driver.agent import SpireBrainAgent
 from spirebrain.driver.legality import check_action
+from spirebrain.jev_brain.client import JevAnswer, JevResponse
 
 
 def _combat(**changes):
@@ -200,6 +201,83 @@ def test_strategic_context_is_visible_when_local_executor_picks_legal_move(tmp_p
     assert detail["reason"] != "战略上下文"
 
 
+def test_stale_strategic_goal_guides_jev_without_reusing_candidate_ids(tmp_path):
+    goal = "为精英战保留能量"
+    agent = SpireBrainAgent(jev_backend="mock", brain_backend="mock",
+                            brain_client=MockStrategicClient(), log_dir=tmp_path)
+    game = _combat(run_id="run-context")
+    agent.observe(game)
+    agent.strategic._retain_context_plan(StrategicPlan(
+        plan_id="late-context", state_id="old-state",
+        run_id=agent.strategic.memory.run_id,
+        current_objective=goal,
+        preferred_candidates=["combat:play:0:0"],
+        avoid_candidates=["combat:end"],
+    ), game, "superseded_request")
+    agent._active_candidates = build_action_candidates(game)
+    agent._active_plan = None
+
+    class CapturingJev:
+        request_state = None
+        criteria = None
+
+        def ask(self, state, questions):
+            self.request_state = state
+            self.criteria = questions["tactical"].criteria
+            candidate_id = next(iter(self.criteria))
+            return JevResponse(answers={
+                "tactical": JevAnswer(value=candidate_id, confidence=0.9)
+            })
+
+    jev = CapturingJev()
+    agent.jev = jev
+    picked = agent._jev_tactical_pick(game)
+
+    assert picked is not None
+    candidate, _, guidance = picked
+    assert jev.request_state["tactical_goal"] == goal
+    assert guidance == {
+        "plan_id": "late-context",
+        "goal": goal,
+        "resource_constraints": {},
+        "context_only": True,
+    }
+    assert candidate.candidate_id in jev.criteria
+    assert check_action(game, candidate.command)[0]
+    # The stale positional preference and avoidance are not model input and
+    # cannot filter or identify a current candidate.
+    assert "preferred_candidates" not in jev.request_state
+    assert "avoid_candidates" not in jev.request_state
+
+
+def test_retained_strategic_context_is_visible_on_current_legal_choice(tmp_path):
+    agent = SpireBrainAgent(jev_backend="mock", brain_backend="mock",
+                            brain_client=MockStrategicClient(), log_dir=tmp_path)
+    game = _combat(run_id="run-context")
+    agent.observe(game)
+    stale = StrategicPlan(
+        plan_id="late-context", state_id="old-state",
+        run_id=agent.strategic.memory.run_id,
+        current_objective="为精英战保留能量",
+        preferred_candidates=["combat:play:0:0"],
+        avoid_candidates=["combat:end"],
+    )
+    agent.strategic._retain_context_plan(stale, game, "superseded_request")
+    candidates = build_action_candidates(game)
+    command, decision = agent.strategic.choose(
+        game, {"command": "end"}, candidates=candidates,
+    )
+
+    assert check_action(game, command)[0]
+    assert decision.source_type == "gpt_context"
+    assert decision.selection_basis == "strategic_context_local_choice"
+    assert decision.strategic_goal == "为精英战保留能量"
+    assert decision.plan_id == "late-context"
+    # The stale preferred/avoid IDs were stripped before this choice; the
+    # current legal fallback is never silently replaced by an old slot.
+    assert command == {"command": "end"}
+
+
 def test_shop_filters_unaffordable_items_and_replans_after_gold_change(tmp_path):
     client = MockStrategicClient()
     agent = SpireBrainAgent(jev_backend="mock", brain_backend="mock",
@@ -262,6 +340,35 @@ def test_kimi_style_unicode_json_response_is_accepted():
     ).plan({"state_id": "s", "run_id": "r"})
     assert result.fallback is False
     assert result.plan.current_objective == "防御：中文"
+
+
+@pytest.mark.parametrize("content", [
+    [{"type": "text", "text": '{"plan_id":"p","state_id":"s","run_id":"r",'
+      '"current_objective":"列表响应","long_term_goal":"生存",'
+      '"priority":[],"preferred_candidates":[],"avoid_candidates":[],'
+      '"resource_constraints":{},"next_steps":[],"replan_triggers":[],'
+      '"reason":"ok","uncertainty":"","expires_after":1}'}],
+    {"type": "text", "text": '{"plan_id":"p","state_id":"s","run_id":"r",'
+      '"current_objective":"对象响应","long_term_goal":"生存",'
+      '"priority":[],"preferred_candidates":[],"avoid_candidates":[],'
+      '"resource_constraints":{},"next_steps":[],"replan_triggers":[],'
+      '"reason":"ok","uncertainty":"","expires_after":1}'},
+])
+def test_openai_client_accepts_text_block_content_shapes(content):
+    payload = {"choices": [{"message": {"content": content}}]}
+
+    class Response:
+        def read(self):
+            return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+
+    result = OpenAIStrategicClient(
+        api_key="test", endpoint="https://example.test/v1/chat/completions",
+        opener=lambda request, timeout: Response(),
+    ).plan({"state_id": "s", "run_id": "r"})
+    assert result.fallback is False
+    assert result.plan.current_objective in {"列表响应", "对象响应"}
 
 
 def test_openai_compatible_endpoint_can_opt_into_structured_output():
@@ -334,6 +441,61 @@ def test_openai_client_normalizes_compact_steps_response():
     assert result.plan.preferred_candidates == ["combat:end"]
 
 
+@pytest.mark.parametrize("message", [
+    {"content": "<think>{not the plan}</think>\n```json\n"
+     '{"plan_id":"p","state_id":"s","run_id":"r",'
+     '"current_objective":"思考标签","long_term_goal":"生存",'
+     '"priority":[],"preferred_candidates":[],"avoid_candidates":[],'
+     '"resource_constraints":{},"next_steps":[],"replan_triggers":[],'
+     '"reason":"ok","uncertainty":"","expires_after":1}\n```'},
+    {"content": None, "tool_calls": [{"function": {"arguments":
+     '{"plan_id":"p","state_id":"s","run_id":"r",'
+     '"current_objective":"工具参数","long_term_goal":"生存",'
+     '"priority":[],"preferred_candidates":[],"avoid_candidates":[],'
+     '"resource_constraints":{},"next_steps":[],"replan_triggers":[],'
+     '"reason":"ok","uncertainty":"","expires_after":1}'}}]},
+    {"content": None, "reasoning_content":
+     '{"plan_id":"p","state_id":"s","run_id":"r",'
+     '"current_objective":"空内容备用通道","long_term_goal":"生存",'
+     '"priority":[],"preferred_candidates":[],"avoid_candidates":[],'
+     '"resource_constraints":{},"next_steps":[],"replan_triggers":[],'
+     '"reason":"ok","uncertainty":"","expires_after":1}'},
+])
+def test_openai_client_recovers_common_gateway_plan_channels(message):
+    payload = {"choices": [{"message": message}]}
+
+    class Response:
+        def read(self):
+            return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+
+    result = OpenAIStrategicClient(
+        api_key="test", endpoint="https://example.test/v1/chat/completions",
+        opener=lambda request, timeout: Response(),
+    ).plan({"state_id": "s", "run_id": "r"})
+    assert result.fallback is False
+    assert result.plan is not None
+    assert result.plan.state_id == "s"
+
+
+def test_openai_client_reports_empty_gateway_response_as_parse_failure():
+    payload = {"choices": [{"message": {"content": None}}]}
+
+    class Response:
+        def read(self): return json.dumps(payload).encode("utf-8")
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+
+    result = OpenAIStrategicClient(
+        api_key="test", endpoint="https://example.test/v1/chat/completions",
+        opener=lambda request, timeout: Response(),
+    ).plan({"state_id": "s", "run_id": "r"})
+    assert result.fallback is True
+    assert result.error_kind == "parse_or_validation"
+    assert "Authorization" not in result.error
+
+
 def test_planner_rejects_unknown_candidate_reference():
     class InvalidProvider:
         backend_name = "mock"
@@ -388,6 +550,17 @@ def test_combat_reuses_strategy_between_ordinary_card_steps(tmp_path):
     state["combat"]["player"]["energy"] = 0
     agent.choose_action(state)
     assert client.calls == 1
+
+
+def test_provider_trace_context_carries_decision_generation_and_trigger(tmp_path):
+    agent = SpireBrainAgent(jev_backend="mock", brain_backend="mock",
+                            async_planning=False, log_dir=tmp_path)
+    agent.choose_action(_combat())
+
+    context = agent._provider_trace_context()
+
+    assert context["generation"] == agent._decision_sequence
+    assert context["trigger"] == "combat_start"
 
 
 def test_network_strategic_planning_is_non_blocking_and_state_bound():

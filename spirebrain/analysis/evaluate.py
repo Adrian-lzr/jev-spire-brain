@@ -14,13 +14,14 @@ from .replay import run_fixture, _fixture_kind
 MODES = ("rules", "jev", "strategic", "full")
 
 
-def evaluate_fixture(path: str | Path, modes=MODES) -> dict:
+def evaluate_fixture(path: str | Path, modes=MODES,
+                     *, knowledge_enabled: bool = True) -> dict:
     path = Path(path)
     result = {}
     if not modes:
         raise ValueError("at least one evaluation mode is required")
     for mode in modes:
-        base = run_fixture(path, mode=mode)
+        base = run_fixture(path, mode=mode, knowledge_enabled=knowledge_enabled)
         result[mode] = {
             "mode": mode,
             "fixture": str(path),
@@ -51,6 +52,8 @@ def evaluate_fixture(path: str | Path, modes=MODES) -> dict:
             "decision_quality": "unknown",
             "evaluation_basis": "synthetic_protocol_replay",
             "passed": bool(base.get("passed")),
+            "knowledge_enabled": bool(base.get("knowledge_enabled", knowledge_enabled)),
+            "knowledge_citation_count": base.get("knowledge_citation_count", 0),
         }
     return {"fixture": str(path), "fixture_type": base.get("fixture_type", "synthetic"),
             "modes": result,
@@ -62,6 +65,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--input", required=True)
     parser.add_argument("--mode", choices=("all", *MODES), default="all")
     parser.add_argument("--output")
+    parser.add_argument("--knowledge", choices=("on", "off", "both"), default="on",
+                        help="run the optional strategic knowledge control arm")
     args = parser.parse_args(argv)
     target = Path(args.input)
     files = sorted(target.glob("*.json")) if target.is_dir() else [target]
@@ -74,17 +79,31 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"error": "state_sequence_fixture_missing"}, ensure_ascii=False))
         return 2
     try:
-        reports = [evaluate_fixture(f, modes) for f in state_files]
+        if args.knowledge == "both":
+            reports = [{"knowledge_enabled": enabled,
+                        "report": evaluate_fixture(f, modes,
+                                                    knowledge_enabled=enabled)}
+                       for f in state_files for enabled in (True, False)]
+        else:
+            enabled = args.knowledge == "on"
+            reports = [evaluate_fixture(f, modes, knowledge_enabled=enabled)
+                       for f in state_files]
     except (ValueError, OSError) as exc:
         print(json.dumps({"error": "invalid_fixture", "kind": type(exc).__name__}))
         return 2
-    output = {"fixture_count": len(reports), "modes": modes, "reports": reports,
+    output = {"fixture_count": len(reports), "modes": modes, "knowledge": args.knowledge,
+              "reports": reports,
               "real_outcomes": "unknown"}
     rendered = json.dumps(output, ensure_ascii=False, indent=2)
     if args.output:
         Path(args.output).write_text(rendered + "\n", encoding="utf-8")
     print(rendered)
-    return 0 if all(all(m["passed"] for m in r["modes"].values()) for r in reports) else 1
+    def report_passed(item: dict) -> bool:
+        nested = item.get("report") if isinstance(item.get("report"), dict) else item
+        return all(bool(mode.get("passed"))
+                   for mode in (nested.get("modes") or {}).values())
+
+    return 0 if all(report_passed(item) for item in reports) else 1
 
 
 if __name__ == "__main__":

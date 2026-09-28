@@ -1,0 +1,18 @@
+{
+  "fixture_type": "synthetic",
+  "kind": "scheduler_scenario",
+  "responses": [
+    {"fault": "timeout"}
+  ],
+  "replay_events": [
+    {"op": "queue", "decision_id": "decision-timeout", "state": {
+      "run_id": "fault-run", "screen_type": "EVENT", "act": 1, "floor": 1,
+      "screen_state": {"options": ["a", "b"]}
+    }},
+    {"op": "complete"},
+    {"op": "poll", "decision_id": "decision-timeout", "state": {
+      "run_id": "fault-run", "screen_type": "EVENT", "act": 1, "floor": 1,
+      "screen_state": {"options": ["a", "b"]}
+    }}
+  ]
+}

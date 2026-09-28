@@ -73,7 +73,18 @@ TRANSIENT_STATUS = {429, 500, 502, 503, 504}
 
 
 class JevApiError(RuntimeError):
-    """Raised when the API rejects a request we cannot retry out of."""
+    """Raised when a JEV request cannot produce an answer.
+
+    ``error_kind`` is deliberately machine-readable so the logging decorator
+    can preserve the distinction between a network outage, timeout, auth
+    failure and response validation failure without exposing provider details.
+    """
+
+    def __init__(self, message: str, *, error_kind: str = "provider_error",
+                 http_status: int | None = None) -> None:
+        super().__init__(message)
+        self.error_kind = str(error_kind or "provider_error")
+        self.http_status = http_status
 
 
 # --------------------------------------------------------------------------- #
@@ -111,7 +122,8 @@ def parse_answers(answers_obj: dict, questions: dict[str, QuestionSpec]) -> dict
             # No separate confidence field: the probability IS the belief.
             parsed[name] = JevAnswer(value=p, confidence=p, raw=raw)
         else:
-            raise JevApiError(f"unknown answer type {qtype!r} for question {name!r}")
+            raise JevApiError(f"unknown answer type {qtype!r} for question {name!r}",
+                              error_kind="parse_or_validation")
     return parsed
 
 
@@ -180,7 +192,8 @@ class OfficialJevClient(JevClient):
         if not self.api_key:
             raise JevApiError(
                 f"no API key: set {self.key_env} or pass api_key=. "
-                "Use JEV_BACKEND=mock to develop offline."
+                "Use JEV_BACKEND=mock to develop offline.",
+                error_kind="missing_key",
             )
         self.model = model
         self.endpoint = endpoint
@@ -216,6 +229,18 @@ class OfficialJevClient(JevClient):
         """-> (answers_obj, usage, model). Overridden by the Cloudflare subclass."""
         return body.get("answers", {}), body.get("usage", {}), body.get("model", self.model)
 
+    @staticmethod
+    def _provider_request_id(body: dict) -> str:
+        current = body
+        for _ in range(3):
+            if not isinstance(current, dict):
+                break
+            request_id = current.get("id") or current.get("request_id")
+            if request_id:
+                return str(request_id)
+            current = current.get("result")
+        return ""
+
     # -- public API -------------------------------------------------------- #
     def ask(self, state: str | dict | list, questions: dict[str, QuestionSpec]) -> JevResponse:
         payload = self._build_payload(state, questions)
@@ -227,7 +252,8 @@ class OfficialJevClient(JevClient):
             raise JevApiError(
                 f"request is {size} bytes, over the {MAX_REQUEST_BYTES}-byte limit; "
                 "refusing to call — shrink the state (deck digest cap, fewer questions) "
-                "instead of letting it be silently truncated"
+                "instead of letting it be silently truncated",
+                error_kind="request_validation",
             )
         last_err: Exception | None = None
         deadline = (time.monotonic() + self.total_budget_ms / 1000.0
@@ -238,11 +264,12 @@ class OfficialJevClient(JevClient):
                            if budget else max(1, int(self.timeout * 1000)))
             if not reserved_ms:
                 self.metrics["budget_exhausted"] += 1
-                raise JevApiError("JEV call skipped: decision budget exhausted")
+                raise JevApiError("JEV call skipped: decision budget exhausted",
+                                  error_kind="budget_exhausted")
             self.metrics["attempts"] += 1
             if deadline is not None and time.monotonic() >= deadline:
                 self.metrics["timeouts"] += 1
-                raise JevApiError("JEV request budget exceeded")
+                raise JevApiError("JEV request budget exceeded", error_kind="timeout")
             t0 = time.perf_counter()
             try:
                 old_timeout = self.timeout
@@ -259,7 +286,8 @@ class OfficialJevClient(JevClient):
                 detail = ""
                 if err.code in {401, 403, 402}:
                     self.metrics["auth_errors"] += 1
-                    raise JevApiError(redact_text(f"HTTP {err.code}: {detail}")) from err
+                    raise JevApiError(redact_text(f"HTTP {err.code}: {detail}"),
+                                      error_kind="auth_error", http_status=err.code) from err
                 if err.code == 429:
                     self.metrics["rate_limits"] += 1
                 self.metrics["http_errors"] += 1
@@ -270,7 +298,11 @@ class OfficialJevClient(JevClient):
                         delay = min(delay, max(0.0, deadline - time.monotonic()))
                     time.sleep(delay)
                     continue
-                raise JevApiError(redact_text(f"HTTP {err.code}: {detail}")) from err
+                raise JevApiError(
+                    redact_text(f"HTTP {err.code}: {detail}"),
+                    error_kind=("rate_limited" if err.code == 429 else "http_error"),
+                    http_status=err.code,
+                ) from err
             except (urllib.error.URLError, TimeoutError, OSError) as err:
                 self.timeout = old_timeout
                 self.metrics["network_errors"] += 1
@@ -283,7 +315,10 @@ class OfficialJevClient(JevClient):
                         delay = min(delay, max(0.0, deadline - time.monotonic()))
                     time.sleep(delay)
                     continue
-                raise JevApiError(f"network failure: {type(err).__name__}") from err
+                raise JevApiError(
+                    f"network failure: {type(err).__name__}",
+                    error_kind="timeout" if isinstance(err, TimeoutError) else "network_error",
+                ) from err
 
             latency_ms = int((time.perf_counter() - t0) * 1000)
             try:
@@ -291,7 +326,10 @@ class OfficialJevClient(JevClient):
                 answers = parse_answers(answers_obj, questions)
             except (TypeError, ValueError, KeyError, json.JSONDecodeError, JevApiError) as err:
                 self.metrics["invalid_json"] += 1
-                raise JevApiError(redact_text(f"invalid JEV response: {type(err).__name__}")) from err
+                raise JevApiError(
+                    redact_text(f"invalid JEV response: {type(err).__name__}"),
+                    error_kind="parse_or_validation",
+                ) from err
             usage = normalize_usage(usage)
             self.calls += 1
             cost, cost_source = resolve_cost(usage, model)
@@ -303,8 +341,10 @@ class OfficialJevClient(JevClient):
                 cost_usd=cost,
                 model=model,
                 usage={**usage, "cost_source": cost_source},
+                provider_request_id=self._provider_request_id(body),
             )
-        raise JevApiError(redact_text(f"exhausted retries: {last_err}"))
+        raise JevApiError(redact_text(f"exhausted retries: {last_err}"),
+                          error_kind="network_error")
 
 
 class CloudflareJevClient(OfficialJevClient):
@@ -320,7 +360,8 @@ class CloudflareJevClient(OfficialJevClient):
         account_id = account_id or os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
         api_key = api_key or os.environ.get("CLOUDFLARE_API_TOKEN", "")
         if not account_id:
-            raise JevApiError("set CLOUDFLARE_ACCOUNT_ID (or pass account_id=)")
+            raise JevApiError("set CLOUDFLARE_ACCOUNT_ID (or pass account_id=)",
+                              error_kind="missing_config")
         kw.pop("model", None)
         super().__init__(api_key=api_key, model="typesafe/jev",
                          endpoint=CLOUDFLARE_ENDPOINT.format(account_id=account_id), **kw)
@@ -336,7 +377,8 @@ class CloudflareJevClient(OfficialJevClient):
         if "result" in inner and isinstance(inner["result"], dict):
             inner = inner["result"]
         if not inner.get("success", True) and "answers" not in inner:
-            raise JevApiError(redact_text(f"cloudflare error: {json.dumps(body)[:300]}"))
+            raise JevApiError(redact_text(f"cloudflare error: {json.dumps(body)[:300]}"),
+                              error_kind="provider_error")
         return inner.get("answers", {}), inner.get("usage", {}), inner.get("model", self.model)
 
 

@@ -372,6 +372,7 @@ class LlmStructuredClient(JevClient):
                 cost_usd=cost,
                 model=body.get("model", self.model),
                 usage={**usage, "price_known": known},
+                provider_request_id=str(body.get("id") or body.get("request_id") or ""),
             )
         raise OpenRouterError(f"exhausted retries: {last_err}")
 

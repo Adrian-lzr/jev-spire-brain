@@ -9,6 +9,7 @@ from typing import Any
 from .memory import RunMemory, RunMemorySnapshot
 from .protocol import BrainResponse, ActionCandidate, StrategicPlan
 from spirebrain.strategy import strategy_context
+from spirebrain.knowledge.rag import retrieve_strategy_context
 from spirebrain.driver.decision_state import state_id as semantic_state_id
 from spirebrain.runtime_budget import DecisionBudget, use_budget
 
@@ -51,10 +52,11 @@ class StrategicPlanner:
     """Build one bounded provider request and validate its response."""
 
     def __init__(self, provider, *, max_plan_steps: int = 5,
-                 memory_events: int = 20) -> None:
+                 memory_events: int = 20, knowledge_enabled: bool = True) -> None:
         self.provider = provider
         self.max_plan_steps = max(2, min(5, int(max_plan_steps)))
         self.memory_events = max(1, int(memory_events))
+        self.knowledge_enabled = bool(knowledge_enabled)
 
     def plan(self, game: dict, candidates: list[ActionCandidate], *,
               guide_rules: list[dict] | None = None, trigger: str = "state",
@@ -69,6 +71,17 @@ class StrategicPlanner:
         # may receive either the live object on a synchronous call or the
         # immutable snapshot used by a worker, but it must never mutate either
         # while building a provider request.
+        selected_strategy = strategy_context(game)
+        knowledge_game = dict(game) if isinstance(game, dict) else {}
+        knowledge_game["strategy_context"] = selected_strategy
+        knowledge_context = (
+            retrieve_strategy_context(knowledge_game)
+            if self.knowledge_enabled else {
+                "status": "disabled", "character": "IRONCLAD", "items": [],
+                "citation_ids": [],
+                "usage": "strategy knowledge retrieval disabled by configuration",
+            }
+        )
         payload = {
             "state_id": state_id,
             "run_id": run_id,
@@ -82,7 +95,10 @@ class StrategicPlanner:
             "trigger": trigger,
             "max_plan_steps": self.max_plan_steps,
             "state": compact_state(game),
-            "strategy_context": strategy_context(game),
+            "strategy_context": selected_strategy,
+            # Retrieved claims are bounded, source-cited soft evidence.  They
+            # cannot author commands, candidate IDs or card facts.
+            "knowledge_context": knowledge_context,
             "memory": (memory.digest(self.memory_events)
                        if memory and hasattr(memory, "digest")
                        else (dict(memory) if isinstance(memory, dict) else {})),

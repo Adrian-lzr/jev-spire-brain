@@ -76,6 +76,7 @@ class DecisionContext:
     config_id: str = ""
     budget_ms: int | None = None
     generation: int = 0
+    trigger: str = ""
     advice_revision: int = 0
     created_at: float = field(default_factory=time.monotonic)
     state: dict = field(default_factory=dict, repr=False)
@@ -148,6 +149,31 @@ class DecisionResult:
     response: Any = None
     error: str = ""
     expired: bool = False
+
+
+@dataclass(frozen=True)
+class AdviceWorkerResult:
+    """Immutable proposal returned by an advice worker to the owner loop.
+
+    The worker may use a private Agent clone while computing, but the owner
+    receives only this detached snapshot.  A plan in this object is a proposal
+    and has no authority until the owner validates and commits it.
+    """
+
+    request: DecisionRequest
+    command: dict | None = None
+    history_entry: dict | None = None
+    plan: "StrategicPlan | None" = None
+    error: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "command",
+                           copy.deepcopy(self.command) if self.command is not None else None)
+        object.__setattr__(self, "history_entry",
+                           copy.deepcopy(self.history_entry)
+                           if self.history_entry is not None else None)
+        object.__setattr__(self, "plan",
+                           copy.deepcopy(self.plan) if self.plan is not None else None)
 
 
 @dataclass

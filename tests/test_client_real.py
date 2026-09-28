@@ -147,6 +147,14 @@ def test_round_trip_with_fake_transport():
     assert abs(client.total_cost_usd - resp.cost_usd) < 1e-12
 
 
+def test_provider_native_request_id_is_preserved_from_response_body():
+    client = _FakeClient([dict(OFFICIAL_FIXTURE, id="native-jev-request")])
+
+    response = client.ask({"state": "help"}, SPECS)
+
+    assert response.provider_request_id == "native-jev-request"
+
+
 def test_retries_transient_429_then_succeeds():
     client = _FakeClient([_http_error(429), _http_error(503), OFFICIAL_FIXTURE])
     resp = client.ask("s", SPECS)
@@ -171,6 +179,8 @@ def test_402_is_not_retried():
         client.ask("s", {"q": NoulSpec(instructions="?")})
     except JevApiError as e:
         assert "402" in str(e)
+        assert e.error_kind == "auth_error"
+        assert e.http_status == 402
     else:
         raise AssertionError("expected JevApiError")
     assert client.attempts == 1  # no retry burned
@@ -206,12 +216,13 @@ def test_cloudflare_envelope_is_unwrapped():
 
     client = CloudflareJevClient(account_id="acct", api_key="tok", backoff=0.0)
     client._post = lambda payload: {  # type: ignore[method-assign]
-        "result": {"result": dict(OFFICIAL_FIXTURE), "success": True},
+        "result": {"result": dict(OFFICIAL_FIXTURE, id="cloudflare-native-id"), "success": True},
         "success": True,
     }
     resp = client.ask("s", SPECS)
     assert resp.backend == "cloudflare"
     assert resp.answers["department"].value == "billing"
+    assert resp.provider_request_id == "cloudflare-native-id"
 
 
 def test_oversized_request_is_refused_before_calling():

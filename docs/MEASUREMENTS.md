@@ -370,3 +370,24 @@ not counted as an execution `result`; only a `result_record` can contribute a
 real game outcome.
 
 Phase-5 comparison: `python -m spirebrain.analysis.evaluate --input tests/fixtures/replay/advisor_states.json` reports rules, JEV, strategic and full modes with separate correctness, experience, efficiency and decision-quality fields. Synthetic fixtures leave adoption and real outcomes unknown; they are not win-rate evidence.
+
+## Strategy RAG evidence
+
+`python -m spirebrain.knowledge.rag --query "Ironclad Act 1 HP elite block"`
+checks the local source-cited retrieval index. Retrieval status, citation IDs,
+source URLs and trust labels are diagnostic evidence only. The current index
+contains paraphrased community claims from public Ironclad guides, not measured
+win-rate labels or a complete card database. A hit, score, or citation count
+must not be interpreted as a quality or win-rate metric.
+
+The strategic payload records bounded `knowledge_context` when a strategic
+request is made. Future comparisons must report the same-seed rules/JEV/
+strategic/full stacks with and without retrieval, and must keep real outcomes
+and expert labels separate from retrieval coverage. No RAG-enabled win-rate
+claim is valid until the real-game paired-seed experiment is completed.
+
+The reproducible control command is:
+
+```text
+python -m spirebrain.analysis.evaluate --input tests/fixtures/replay/advisor_states.json --knowledge both
+```

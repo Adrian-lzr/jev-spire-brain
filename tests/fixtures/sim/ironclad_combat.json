@@ -1,0 +1,21 @@
+{
+  "fixture_type": "synthetic",
+  "kind": "state_sequence",
+  "description": "Minimal deterministic Ironclad combat; no real player data.",
+  "states": [
+    {
+      "character": "IRONCLAD",
+      "screen_type": "COMBAT",
+      "combat": {
+        "player": {"energy": 3, "current_hp": 40, "block": 0},
+        "hand": [
+          {"id": "Bash", "cost": 2, "damage": 8, "applies_vulnerable": 2, "is_playable": true},
+          {"id": "Strike_R", "cost": 1, "damage": 6, "is_playable": true},
+          {"id": "Defend_R", "cost": 1, "block": 5, "is_playable": true}
+        ],
+        "monsters": [{"id": "cultist-instance-1", "current_hp": 20,
+                      "intent": "ATTACK", "damage": 6, "vulnerable": 0}]
+      }
+    }
+  ]
+}

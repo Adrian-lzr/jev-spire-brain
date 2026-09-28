@@ -30,7 +30,9 @@ import copy
 from pathlib import Path
 from typing import Any, Callable
 
-from spirebrain.brain.protocol import RunSessionSnapshot
+from spirebrain.brain.protocol import (
+    AdviceWorkerResult, DecisionContext, DecisionRequest, RunSessionSnapshot,
+)
 from spirebrain.brain.action_broker import build_action_candidates
 from spirebrain.driver.modes import ADVISE_POLL_VERBS
 from spirebrain.driver.legality import check_action
@@ -103,6 +105,7 @@ class AdviseSession:
         self._generation = 0
         self._decision_sequence = 0
         self._advice_revisions: dict[str, int] = {}
+        self._last_published_advice: Advice | None = None
         self._state_started_at: dict[str, float] = {}
         self._first_advice_latency: dict[str, int] = {}
         self._work_lock = threading.Lock()
@@ -118,8 +121,11 @@ class AdviseSession:
         with self._work_lock:
             self._closed = True
             self._generation += 1
+            queued = self._queued_work
             self._queued_work = None
             thread = self._worker_thread
+        if queued is not None:
+            self._record_skipped_work(queued, "session_closed_before_start")
         if thread is None or thread is threading.current_thread():
             return True
         thread.join(max(0, min(250, int(timeout_ms))) / 1000.0)
@@ -134,6 +140,7 @@ class AdviseSession:
         measured across runs.
         """
         self.tracker.pending = None
+        self._last_published_advice = None
         self.tracker.remember_state(None)
         self.advised_fp = None
         self._issued_state_ids.clear()
@@ -143,7 +150,10 @@ class AdviseSession:
         self._first_advice_latency.clear()
         self._generation += 1
         with self._work_lock:
+            queued = self._queued_work
             self._queued_work = None
+        if queued is not None:
+            self._record_skipped_work(queued, "run_changed_before_start")
 
     def advise(self, game: dict, available: Any, modeled: bool) -> str | None:
         """Recommend, never act. Returns the poll command to send.
@@ -220,7 +230,10 @@ class AdviseSession:
         # published after this feedback has invalidated the current state.
         with self._work_lock:
             self._generation += 1
+            queued = self._queued_work
             self._queued_work = None
+        if queued is not None:
+            self._record_skipped_work(queued, "player_feedback_before_start")
         self.advised_fp = None
 
     def _publish_status(self, state_id: str, status: str, label: str,
@@ -282,9 +295,11 @@ class AdviseSession:
                                  quick.get("reason", ""), "pending",
                                  quick.get("guide_rules", []),
                                  point=SCREEN_POINT.get(screen_of(game), "navigation"))
+        replaced = None
         with self._work_lock:
             if self._closed:
                 return
+            replaced = self._queued_work
             self._queued_work = (fp, payload, self._generation, run_snapshot,
                                  memory_snapshot, owner_plan)
             if not self._work_running:
@@ -292,6 +307,23 @@ class AdviseSession:
                 self._worker_thread = threading.Thread(
                     target=self._work_loop, daemon=True, name="SpireBrainAdvice")
                 self._worker_thread.start()
+        if replaced is not None:
+            self._record_skipped_work(replaced, "superseded_before_start")
+
+    def _record_skipped_work(self, work: tuple, reason: str) -> None:
+        try:
+            _fp, payload, generation, run_snapshot, *_rest = work
+        except (TypeError, ValueError):
+            return
+        self._trace("decision_skipped", {
+            "run_id": str(getattr(run_snapshot, "run_id", "") or
+                           payload.get("run_id") or payload.get("runId") or ""),
+            "run_epoch": int(getattr(run_snapshot, "run_epoch", 0) or 0),
+            "decision_id": str(payload.get("decision_id") or "") or None,
+            "state_id": semantic_state_id(payload),
+            "reason": reason,
+            "generation": generation,
+        })
 
     def _work_loop(self) -> None:
         while True:
@@ -306,6 +338,18 @@ class AdviseSession:
                 fp, payload, generation, run_snapshot, memory_snapshot, owner_plan = job
             run_id = str(getattr(run_snapshot, "run_id", "") or "")
             run_epoch = int(getattr(run_snapshot, "run_epoch", 0) or 0)
+            request = DecisionRequest(
+                context=DecisionContext(
+                    run=run_snapshot,
+                    state_id=semantic_state_id(payload),
+                    decision_id=str(payload.get("decision_id") or ""),
+                    generation=generation,
+                    state=payload,
+                ),
+                state=payload,
+                memory=memory_snapshot,
+                plan=owner_plan,
+            )
             try:
                 adopt = getattr(self._worker_agent, "adopt_run_snapshot", None)
                 if adopt is not None:
@@ -316,11 +360,17 @@ class AdviseSession:
                 strategic = getattr(self._worker_agent, "strategic", None)
                 if strategic is not None and getattr(strategic, "plan_valid", False):
                     worker_plan = copy.deepcopy(getattr(strategic, "current_plan", None))
+                proposal = AdviceWorkerResult(
+                    request=request, command=command,
+                    history_entry=entry, plan=worker_plan,
+                )
                 self._enqueue_completed((fp, generation, run_id, run_epoch,
-                                         payload, command, entry, None, worker_plan))
+                                         payload, command, entry, None, proposal))
             except Exception as exc:  # noqa: BLE001 - failure becomes a panel status
+                proposal = AdviceWorkerResult(
+                    request=request, error=f"{type(exc).__name__}: {exc}")
                 self._enqueue_completed((fp, generation, run_id, run_epoch,
-                                         payload, None, None, exc, None))
+                                         payload, None, None, exc, proposal))
 
     def _enqueue_completed(self, result: tuple) -> None:
         """Keep only the newest worker completion if the poll loop falls behind."""
@@ -330,14 +380,53 @@ class AdviseSession:
         except queue.Full:
             pass
         try:
-            self._completed.get_nowait()
+            displaced = self._completed.get_nowait()
             self.dropped_completions += 1
+            self._record_expired_completion(displaced, "completion_queue_replaced")
         except queue.Empty:
             pass
         try:
             self._completed.put_nowait(result)
         except queue.Full:
             self.dropped_completions += 1
+
+    def _record_expired_completion(self, completed: tuple, reason: str) -> None:
+        try:
+            fp, generation, run_id, run_epoch, payload, command, entry, error = completed[:8]
+        except (TypeError, ValueError):
+            return
+        typed_result = completed[8] if len(completed) >= 9 else None
+        if isinstance(typed_result, AdviceWorkerResult):
+            context = typed_result.request.context
+            payload = dict(typed_result.request.state)
+            entry = copy.deepcopy(typed_result.history_entry)
+            run_id = context.run_id
+            run_epoch = context.run_epoch
+            generation = context.generation
+        payload = payload if isinstance(payload, dict) else {}
+        entry = entry if isinstance(entry, dict) else {}
+        detail = entry.get("detail") or {}
+        provider_request_ids = detail.get("provider_request_ids") or []
+        if isinstance(provider_request_ids, str):
+            provider_request_ids = [provider_request_ids]
+        elif not isinstance(provider_request_ids, (list, tuple)):
+            provider_request_ids = []
+        provider_request_ids = [str(value) for value in provider_request_ids if value]
+        # `brain_request_id` is a legacy last-response field and may belong to
+        # a strategic plan reused from an earlier decision. Only explicit
+        # provider request associations are causal for this result.
+        for request_id in provider_request_ids or [None]:
+            self._trace("expired_result", {
+                "decision_id": entry.get("decision_id") or payload.get("decision_id") or None,
+                "state_id": entry.get("state_id") or semantic_state_id(payload),
+                "run_id": run_id or entry.get("run_id") or None,
+                "run_epoch": run_epoch,
+                "request_id": request_id,
+                "provider_request_ids": provider_request_ids,
+                "expired_result": True,
+                "fallback_reason": reason,
+                "generation": generation,
+            })
 
     def _begin_decision(self, fp: str, state_id: str, game: dict | None = None) -> None:
         self._decision_sequence += 1
@@ -368,6 +457,24 @@ class AdviseSession:
                 (fp, generation, run_id, run_epoch, payload,
                  command, entry, error) = completed
                 worker_plan = None
+            typed_context_mismatch = False
+            if isinstance(worker_plan, AdviceWorkerResult):
+                proposal = worker_plan
+                context = proposal.request.context
+                # The tuple fields remain a compatibility envelope for older
+                # callers, while new workers derive all commit data from the
+                # detached typed result.
+                payload = dict(proposal.request.state)
+                command = proposal.command
+                entry = copy.deepcopy(proposal.history_entry)
+                worker_plan = proposal.plan
+                if proposal.error and error is None:
+                    error = RuntimeError(proposal.error)
+                typed_context_mismatch = (
+                    context.run_id != run_id
+                    or context.run_epoch != run_epoch
+                    or context.generation != generation
+                )
             current_epoch = int(getattr(getattr(self.agent, "run_session", None),
                                        "run_epoch", 0) or 0)
             current_run_id = str(getattr(getattr(self.agent, "run_session", None),
@@ -381,19 +488,17 @@ class AdviseSession:
             worker_identity_mismatch = bool(
                 entry and ((run_id and entry_run_id and entry_run_id != run_id)
                            or entry_run_epoch != run_epoch))
+            worker_identity_mismatch = worker_identity_mismatch or typed_context_mismatch
             if (generation != self._generation or fp != self._latest_fp
                     or run_epoch != current_epoch or run_changed
                     or worker_identity_mismatch):
-                self._trace("expired_result", {
-                    "decision_id": (entry or {}).get("decision_id") if entry else self._current_decision_id,
-                    "state_id": semantic_state_id(payload), "run_id": run_id or entry_run_id,
-                    "run_epoch": run_epoch, "request_id": (entry or {}).get("request_id", ""),
-                    "expired_result": True,
-                    "fallback_reason": ("generation_mismatch" if generation != self._generation
-                                         else "state_changed" if fp != self._latest_fp
-                                         else "worker_identity_mismatch" if worker_identity_mismatch
-                                         else "run_changed"),
-                })
+                self._record_expired_completion(
+                    completed,
+                    "generation_mismatch" if generation != self._generation
+                    else "state_changed" if fp != self._latest_fp
+                    else "worker_identity_mismatch" if worker_identity_mismatch
+                    else "run_changed",
+                )
                 continue  # the player already changed the game state
             if error is not None or command is None:
                 # An immediate hard-rule recommendation remains visible on API
@@ -614,8 +719,9 @@ class AdviseSession:
         # This is the main-loop commit point for advice history. The worker may
         # have produced the proposal, but only the owning session records that
         # it was shown to the player.
-        previous = self.tracker.pending
-        if previous is not None and previous.decision_id == advice.decision_id:
+        previous = self._last_published_advice
+        if (previous is not None and previous.decision_id == advice.decision_id
+                and advice.advice_revision > previous.advice_revision):
             self._trace("advice_replaced", {
                 "run_id": advice.run_id, "run_epoch": advice.run_epoch,
                 "decision_id": advice.decision_id, "state_id": advice.state_id,
@@ -701,6 +807,7 @@ class AdviseSession:
             "fallback": advice.fallback, "uncertain": advice.uncertain,
             "act": advice.act, "floor": advice.floor,
         })
+        self._last_published_advice = advice
 
     def _publish_outcome(self, outcome, *, observed_state: dict | None = None) -> None:
         advice = outcome.advice

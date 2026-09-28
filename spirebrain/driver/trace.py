@@ -29,7 +29,10 @@ _FIELDS = {
     "fallback_reason", "legal", "legality_reason", "uncertain", "player_action", "verdict",
     "result", "evidence", "record_kind", "act", "floor", "cost_usd", "timeout", "http_status", "expired_result",
     "expired_result_count", "fixture_type", "code_version", "previous_advice_revision", "replacement_reason", "usage", "provider_request_id",
-    "state_blob", "candidate_blob", "response_blob",
+    "provider_request_ids", "generation",
+    "trigger", "context_only", "pending_state_id", "pending_generation",
+    "pending_run_id", "in_flight", "lifecycle_reason",
+    "state_blob", "candidate_blob", "response_blob", "knowledge_citation_ids",
     "contract_errors",
 }
 

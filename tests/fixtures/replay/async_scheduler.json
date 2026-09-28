@@ -30,10 +30,10 @@
     }
   ],
   "replay_events": [
-    {"op": "queue", "state": {"run_id": "async-run", "screen_type": "EVENT", "act": 1, "floor": 1, "screen_state": {"options": ["a", "b"]}}},
+    {"op": "queue", "decision_id": "decision-a", "state": {"run_id": "async-run", "screen_type": "EVENT", "act": 1, "floor": 1, "screen_state": {"options": ["a", "b"]}}},
     {"op": "complete"},
-    {"op": "queue", "state": {"run_id": "async-run", "screen_type": "EVENT", "act": 1, "floor": 2, "screen_state": {"options": ["c", "d"]}}},
+    {"op": "queue", "decision_id": "decision-b", "state": {"run_id": "async-run", "screen_type": "EVENT", "act": 1, "floor": 2, "screen_state": {"options": ["c", "d"]}}},
     {"op": "complete"},
-    {"op": "poll", "state": {"run_id": "async-run", "screen_type": "EVENT", "act": 1, "floor": 2, "screen_state": {"options": ["c", "d"]}}}
+    {"op": "poll", "decision_id": "decision-b", "state": {"run_id": "async-run", "screen_type": "EVENT", "act": 1, "floor": 2, "screen_state": {"options": ["c", "d"]}}}
   ]
 }

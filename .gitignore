@@ -8,7 +8,12 @@ venv/
 # Logs & run artifacts
 logs/
 runs/
+tmp-log/
+sendToDevs/
+.playwright-cli/
+steam_appid.txt
 *.jsonl
+!spirebrain/data/strategy_knowledge.jsonl
 
 # Env & secrets
 .env

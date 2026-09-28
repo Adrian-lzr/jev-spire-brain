@@ -17,6 +17,10 @@ from typing import Any, Iterable
 _IGNORED_KEYS = {
     "timestamp", "time", "created_at", "updated_at", "received_at",
     "uuid", "request_id", "message_id", "event_id", "random_uuid",
+    # Run/decision identity belongs in the event envelope, not the semantic
+    # state hash. Injecting decision_id before planning must not change state_id.
+    "run_id", "runid", "run_epoch", "seed", "decision_id",
+    "advice_revision", "generation", "config_id",
     "animation", "animation_id", "animation_counter", "frame", "frames",
     "poll_id", "transport", "transport_state", "log", "logs", "debug",
     "trace", "trace_id", "ready_for_command", "raw_message",

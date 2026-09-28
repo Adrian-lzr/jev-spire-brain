@@ -267,6 +267,23 @@ def _probe_details(resp: JevResponse) -> dict:
     return {k: {"value": a.value, "confidence": a.confidence} for k, a in resp.answers.items()}
 
 
+def _answer(resp: JevResponse, name: str):
+    """Return a named answer or raise an actionable provider error.
+
+    Real providers can return a typed fallback response with no answers.  A
+    direct dictionary lookup used to turn that into the misleading ``'choice'``
+    KeyError, hiding whether JEV was offline or merely returned an invalid
+    schema.  Decision fallbacks should retain the provider's error category.
+    """
+    if getattr(resp, "fallback", False):
+        raise RuntimeError(str(getattr(resp, "error_kind", "provider_error")
+                               or getattr(resp, "error", "provider_error")))
+    answer = resp.answers.get(name)
+    if answer is None:
+        raise RuntimeError(f"missing_answer:{name}")
+    return answer
+
+
 def _state_from(run: RunContext | None, extra: dict, thin: dict) -> dict:
     """Full run digest when a RunContext is available, else the legacy thin state.
 
@@ -318,7 +335,7 @@ class MapRouter:
                 )
             resp = self.jev.ask(self._state(reachable, path_probes), questions)
 
-            route = resp.answers["route"]
+            route = _answer(resp, "route")
             probe_key = f"over_budget_{route.value}"
             probe = resp.answers.get(probe_key)
             if probe is not None and noul_verdict(probe.confidence) is True:
@@ -591,7 +608,7 @@ class EventChooser:
                     ),
                     criteria=options)},
             )
-            ans = resp.answers["choice"]
+            ans = _answer(resp, "choice")
             if not accept_choice(ans):
                 return self._fallback(
                     options, f"not clearly ahead (confidence {ans.confidence:.2f})")
@@ -646,11 +663,12 @@ class RestSiteDecider:
                 ),
             }
             resp = self.jev.ask(self._state(hp_ratio, upgradable), questions)
-            heal = noul_verdict(resp.answers["need_heal"].confidence)
-            up = resp.answers["upgrade"]
+            need_heal = _answer(resp, "need_heal")
+            heal = noul_verdict(need_heal.confidence)
+            up = _answer(resp, "upgrade")
 
             if heal is True:
-                return Decision("rest", "rest", resp.answers["need_heal"].confidence, False,
+                return Decision("rest", "rest", need_heal.confidence, False,
                                 {"reason": "judged to need healing"})
             if heal is None or not accept_choice(up):
                 return self._fallback(upgradable, hp_ratio, "uncertain")
@@ -841,7 +859,7 @@ class CombatRiskGate:
                         "reserve for the act. Is that cost more than this fight is worth?"
                     ))},
             )
-            ans = resp.answers["exceeds"]
+            ans = _answer(resp, "exceeds")
             verdict = noul_verdict(ans.confidence)
             if verdict is None:
                 return Decision("combat_risk", True, ans.confidence, True,

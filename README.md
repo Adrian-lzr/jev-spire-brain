@@ -323,6 +323,7 @@ python tests\test_stdio.py               # prove the pipe logic offline
 
 ```bash
 python -m spirebrain.analysis.replay --input tests/fixtures/replay
+python -m spirebrain.analysis.replay --input logs/decision_trace.jsonl --decision-id <id> --execute  # fixed, offline decision replay
 python -m spirebrain.analysis.metrics --input tests/fixtures/metrics/decision_trace.jsonl
 python tools/verify_offline.py           # tests + compile + contracts + metrics + replay
 python tools/auto_smoke.py                # bounded launcher + dashboard smoke (mock, no game/API)
@@ -331,6 +332,10 @@ python tools/real_game_smoke.py --allow-real-game --duration 30  # opt-in game s
 
 指标输入缺失时命令会以非零状态退出；合成 fixture 只用于验证管道和字段契约，
 不代表真实游戏胜率。
+
+指定决策的 `--execute` 只使用轨迹中的脱敏状态、候选和固定模型响应，重新运行本地
+仲裁与合法性检查，不访问 GPT/JEV，也不会发送游戏命令。它验证决策链是否可重建，
+不能替代真实对局或胜率实验。
 
 `tools/verify_offline.py` 会逐项执行离线检查并在某项失败后继续输出其余结果，
 适合作为干净检出和 CI 的单一入口。当前执行起点、配置摘要、已知限制和未验证的

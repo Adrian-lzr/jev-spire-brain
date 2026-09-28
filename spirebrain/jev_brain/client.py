@@ -161,6 +161,11 @@ class JevResponse:
     cost_usd: float = 0.0
     model: str = ""
     usage: dict = field(default_factory=dict)
+    error: str = ""
+    error_kind: str = ""
+    fallback: bool = False
+    request_id: str = ""
+    provider_request_id: str = ""
 
 
 class JevClient:

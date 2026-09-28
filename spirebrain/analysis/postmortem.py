@@ -32,6 +32,10 @@ def review_decision(records: Iterable[dict], decision_id: str) -> dict:
         "advice_versions": advice,
         "observations": outcomes,
         "expired": chain.get("expired", []),
+        "skipped": chain.get("skipped", []),
+        "unattributed_legacy_events": chain.get("unattributed", []),
+        "unattributed_legacy_event_count": chain.get("unattributed_total", 0),
+        "unattributed_legacy_events_truncated": chain.get("unattributed_truncated", False),
         "review": {
             "plan_applicable": None,
             "rules_used": sorted({str(x) for event in decisions for x in (event.get("rule_ids") or [])}),
@@ -51,6 +55,19 @@ def release_report(records: Iterable[dict], *, commit: str = "unknown",
                      for r in rows if r.get("event_type") in {"advice", "decision"})
     outcomes = [r for r in rows if r.get("event_type") == "outcome"]
     real = [r for r in outcomes if r.get("result") in {"win", "loss", "death", "victory"}]
+    decision_ids = {str(r.get("decision_id")) for r in rows if r.get("decision_id")}
+    chains = [decision_chain(rows, decision_id) for decision_id in decision_ids]
+    request_lifecycle = [chain.get("request_lifecycle", {}) for chain in chains]
+    request_count = sum(int(item.get("request_count", 0) or 0)
+                       for item in request_lifecycle)
+    ended_count = sum(
+        int(item.get("closed_request_count", 0) or 0)
+        + len(item.get("expired_request_ids", []) or [])
+        for item in request_lifecycle
+    )
+    citation_ids = sorted({str(value) for row in rows
+                           for value in (row.get("knowledge_citation_ids") or [])
+                           if value})
     return {
         "schema_version": 1,
         "source": {"fixture_type": "synthetic_or_recorded", "sample_count": len(rows),
@@ -64,6 +81,13 @@ def release_report(records: Iterable[dict], *, commit: str = "unknown",
             "expired_submissions": sum(1 for r in rows if r.get("event_type") == "expired_result"),
             "cross_run_contamination": None,
             "unexecuted_memory_writes": None,
+            "trace_request_completion_rate": (ended_count / request_count
+                                                if request_count else None),
+        },
+        "strategy_retrieval": {
+            "citation_ids": citation_ids,
+            "citation_count": len(citation_ids),
+            "quality": "unknown",
         },
         "real_game_results": "unknown" if not real else dict(Counter(str(r.get("result")) for r in real)),
         "limitations": ["人工标注、真实游戏结果和跨局污染需由回放或真机证据确认"],
