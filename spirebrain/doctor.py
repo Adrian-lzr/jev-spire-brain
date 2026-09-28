@@ -7,6 +7,7 @@ fine; doing it after every attempt is how people give up. This does all of it.
 
     python -m spirebrain.doctor                # offline checks
     python -m spirebrain.doctor --live         # + one real JEV call
+    python -m spirebrain.doctor --live-strategic # + one strategic plan probe
 
 Exit code is 1 if anything is FAIL, so it can gate a script. Stdlib only.
 
@@ -617,6 +618,62 @@ def check_brain_config(rep: Report) -> None:
                 f"config={runtime.config_id}")
 
 
+def probe_strategic_provider(runtime, provider_factory=None) -> dict:
+    """Make one bounded structured planning request without writing logs.
+
+    This is an explicit diagnostic path, not part of normal startup. The
+    returned object contains only provider identity, timing and a stable error
+    category; it never includes credentials, request bodies or response text.
+    """
+    if provider_factory is None:
+        from spirebrain.brain.gpt_client import get_strategic_brain
+
+        provider_factory = get_strategic_brain
+    backend = str(runtime.brain_backend)
+    client = provider_factory(
+        backend,
+        api_key=runtime.brain_api_key,
+        model=runtime.openai_model,
+        endpoint=runtime.openai_endpoint,
+        timeout_ms=runtime.timeout_ms,
+        max_output_tokens=runtime.max_output_tokens,
+        max_calls=1,
+    )
+    payload = {
+        "run_id": "diagnostic-run",
+        "run_epoch": 0,
+        "decision_id": "diagnostic-decision",
+        "state_id": "diagnostic-state",
+        "trigger": "provider_probe",
+        "max_plan_steps": 2,
+        "state": {
+            "screen_type": "MAP",
+            "character": "IRONCLAD",
+            "act": 1,
+            "floor": 1,
+            "current_hp": 50,
+            "max_hp": 80,
+            "gold": 99,
+        },
+        "candidates": [{
+            "candidate_id": "map:0",
+            "candidate_signature": "diagnostic-node-0",
+            "kind": "map_node",
+            "label": "Proceed to the next map node",
+            "command": {"command": "choose", "choice": 0},
+            "legal": True,
+        }],
+    }
+    response = client.plan(payload)
+    return {
+        "ok": bool(response.plan is not None and not response.fallback),
+        "backend": str(response.backend or backend),
+        "model": str(response.model or runtime.openai_model),
+        "latency_ms": response.latency_ms,
+        "error_kind": str(response.error_kind or "") if response.fallback else "",
+    }
+
+
 def check_backend(rep: Report, live: bool) -> None:
     from spirebrain.runtime_config import load_dotenv, resolve_runtime_config
 
@@ -663,9 +720,11 @@ def main(argv: list[str]) -> int:
             stream.reconfigure(encoding="utf-8", errors="replace")
 
     live = "--live" in argv
+    live_strategic = "--live-strategic" in argv
     environment = host_environment()
     print(f"Jev Spire Brain — environment check (repo: {ROOT})")
     print(f"live JEV probe: {'on' if live else 'off (pass --live to include)'}\n")
+    print(f"live strategic probe: {'on' if live_strategic else 'off (pass --live-strategic to include)'}\n")
 
     rep = Report()
     check_python(rep)
@@ -682,6 +741,30 @@ def main(argv: list[str]) -> int:
     check_gamedata(rep, environment)
     check_brain_config(rep)
     check_backend(rep, live)
+    if live_strategic:
+        from spirebrain.runtime_config import resolve_runtime_config
+
+        runtime = resolve_runtime_config(ROOT)
+        if not runtime.brain_api_key:
+            rep.add(FAIL, "Live strategic probe", "skipped — selected provider key is missing",
+                    "configure the selected strategic provider key, then restart the agent")
+        else:
+            try:
+                result = probe_strategic_provider(runtime)
+                if result["ok"]:
+                    rep.add(PASS, "Live strategic probe",
+                            f"backend={result['backend']} model={result['model']} "
+                            f"latency={result['latency_ms']} ms; structured plan received")
+                else:
+                    rep.add(FAIL, "Live strategic probe",
+                            f"backend={result['backend']} model={result['model']} "
+                            f"latency={result['latency_ms']} ms error_kind="
+                            f"{result['error_kind'] or 'unknown'}",
+                            "check effective endpoint, model access, quota and provider status")
+            except Exception as exc:  # noqa: BLE001 - diagnostics must not leak details
+                rep.add(FAIL, "Live strategic probe",
+                        f"probe raised {type(exc).__name__}",
+                        "check provider configuration and network connectivity")
 
     print()
     if rep.failed:

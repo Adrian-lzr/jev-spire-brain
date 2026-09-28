@@ -21,7 +21,7 @@ def game(**changes):
 
 
 def test_hard_rest_rule_overrides_model_and_preserves_index(tmp_path):
-    agent = SpireBrainAgent(jev_backend="mock", log_dir=tmp_path)
+    agent = SpireBrainAgent(jev_backend="mock", brain_backend="none", log_dir=tmp_path)
     state = game()
     assert agent.choose_action(state) == {"command": "choose", "choice": 1}
     assert agent.jev.calls == 0
@@ -32,14 +32,14 @@ def test_hard_rest_rule_overrides_model_and_preserves_index(tmp_path):
 def test_other_characters_do_not_inherit_ironclad_policy(tmp_path):
     state = game(character="THE_SILENT")
     assert GuideBook().evaluate(state, 0).matches == []
-    agent = SpireBrainAgent(jev_backend="mock", log_dir=tmp_path)
+    agent = SpireBrainAgent(jev_backend="mock", brain_backend="none", log_dir=tmp_path)
     assert agent.quick_advice(state)["status"] == "unsupported"
 
 
 def test_all_lethal_event_options_do_not_fall_back_to_first(tmp_path):
     state = game(screen_type="EVENT", screen_state={"options": [
         {"label": "Lose health", "hp_cost": 20}, {"label": "Locked", "disabled": True}]})
-    agent = SpireBrainAgent(jev_backend="mock", log_dir=tmp_path)
+    agent = SpireBrainAgent(jev_backend="mock", brain_backend="none", log_dir=tmp_path)
     command = agent.choose_action(state)
     assert command["command"] == "state"
     assert not check_action(state, command)[0]

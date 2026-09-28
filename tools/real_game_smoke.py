@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shutil
+import statistics
 import subprocess
 import sys
 import time
@@ -101,6 +103,22 @@ def _request_lifecycle(trace: list[dict]) -> dict:
     }
 
 
+def _latency_summary(events: list[dict]) -> dict:
+    values = [float(event["latency_ms"]) for event in events
+              if isinstance(event.get("latency_ms"), (int, float))
+              and not isinstance(event.get("latency_ms"), bool)
+              and event["latency_ms"] >= 0]
+    if not values:
+        return {"sample_count": 0, "p50_ms": None, "p95_ms": None}
+    ordered = sorted(values)
+    p95_index = max(0, math.ceil(0.95 * len(ordered)) - 1)
+    return {
+        "sample_count": len(ordered),
+        "p50_ms": round(statistics.median(ordered), 1),
+        "p95_ms": round(ordered[p95_index], 1),
+    }
+
+
 def _build_report(brain: list[dict], jev: list[dict], trace: list[dict],
                   backup: str = "") -> dict:
     decisions = [event for event in trace if event.get("event_type") == "decision"]
@@ -128,6 +146,17 @@ def _build_report(brain: list[dict], jev: list[dict], trace: list[dict],
     jev_health = _provider_health(jev)
     strategic_health = _provider_health(brain)
     lifecycle = _request_lifecycle(trace)
+    strategic_usable_successes = max(0, len(strategic_successes) - expired_strategic)
+    if not brain:
+        strategic_status = "not_observed"
+    elif strategic_usable_successes:
+        strategic_status = "fresh_plan_received"
+    elif strategic_successes:
+        strategic_status = "connected_but_stale"
+    elif strategic_failures:
+        strategic_status = "provider_failed"
+    else:
+        strategic_status = "unknown"
     # A real-game smoke is a release check, so provider access and result
     # freshness are part of success.  Keep ``pipeline_passed`` separately for
     # diagnosing a run that reached the game while a provider was degraded.
@@ -143,6 +172,15 @@ def _build_report(brain: list[dict], jev: list[dict], trace: list[dict],
         "pipeline_passed": pipeline_passed,
         "provider_health_passed": provider_health_passed,
         "provider_health": {"jev": jev_health, "strategic": strategic_health},
+        "strategic_status": strategic_status,
+        "strategic_backend": next((str(event.get("backend")) for event in brain
+                                    if event.get("backend")), None),
+        "strategic_model": next((str(event.get("model")) for event in brain
+                                  if event.get("model")), None),
+        "strategic_error_kinds": sorted({str(event.get("error_kind") or "unknown")
+                                          for event in strategic_failures}),
+        "strategic_latency": _latency_summary(brain),
+        "jev_latency": _latency_summary(jev),
         "skipped": False,
         "synthetic": False,
         "backup": backup,
@@ -152,7 +190,7 @@ def _build_report(brain: list[dict], jev: list[dict], trace: list[dict],
         "strategic_successes": len(strategic_successes),
         "strategic_fallbacks": len(strategic_failures),
         "strategic_unknown_events": len(strategic_unknown),
-        "strategic_usable_successes": max(0, len(strategic_successes) - expired_strategic),
+        "strategic_usable_successes": strategic_usable_successes,
         # A retained context proves the strategic provider returned useful
         # objective/resource information, while remaining separate from a
         # fresh executable action. It must not make a degraded release pass.

@@ -216,7 +216,7 @@ class _NoopStream:
 # Guard 3: navigation without the model (agent side)
 # --------------------------------------------------------------------------- #
 def _agent(tmp: str) -> SpireBrainAgent:
-    return SpireBrainAgent(jev_backend="mock", log_dir=tmp)
+    return SpireBrainAgent(jev_backend="mock", brain_backend="none", log_dir=tmp)
 
 
 def _shop(floor: int) -> dict:

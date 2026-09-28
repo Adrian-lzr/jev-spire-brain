@@ -21,6 +21,7 @@ from spirebrain.jev_brain.client import (
 )
 from spirebrain.jev_brain.client_real import JevApiError
 from spirebrain.redaction import redact_text
+from spirebrain.logging_utils import append_bounded
 
 
 class LoggingJevClient(JevClient):
@@ -43,6 +44,7 @@ class LoggingJevClient(JevClient):
         self.context_provider = None
         self._decision_request_ids: dict[str, list[str]] = {}
         self._request_ids_lock = threading.Lock()
+        self._log_lock = threading.Lock()
 
     def request_ids_for_decision(self, decision_id: str) -> list[str]:
         with self._request_ids_lock:
@@ -179,9 +181,7 @@ class LoggingJevClient(JevClient):
             "request_id": request_id,
             "provider_request_id": resp.provider_request_id or None,
         }
-        try:
-            with open(self.log_path / "jev_calls.jsonl", "a", encoding="utf-8") as f:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        except (OSError, UnicodeError, TypeError, ValueError):
-            pass
+        append_bounded(self.log_path / "jev_calls.jsonl",
+                       json.dumps(record, ensure_ascii=False) + "\n",
+                       lock=self._log_lock)
         return resp

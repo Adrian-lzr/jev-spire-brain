@@ -382,7 +382,7 @@ def test_grid_confirm_phase_survives_the_transport_end_to_end():
     """
     from spirebrain.driver.agent import SpireBrainAgent
     with tempfile.TemporaryDirectory() as tmp:
-        agent = SpireBrainAgent(jev_backend="mock", log_dir=tmp)
+        agent = SpireBrainAgent(jev_backend="mock", brain_backend="none", log_dir=tmp)
         transport = _play(agent, log_path=None)
         deck = [{"cost": 1, "name": "Strike", "id": "Strike_R", "type": "ATTACK"},
                 {"cost": 1, "name": "Defend", "id": "Defend_R", "type": "SKILL"},

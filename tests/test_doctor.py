@@ -208,6 +208,65 @@ def test_doctor_judges_the_ticked_mods_and_calls_out_an_unticked_overlay():
     assert any(st == FAIL and what == "CommunicationMod ticked" for st, what, _ in lines)
 
 
+def test_strategic_probe_makes_one_request_and_returns_only_safe_diagnostics():
+    from types import SimpleNamespace
+
+    from spirebrain.doctor import probe_strategic_provider
+
+    secret = "probe-secret-must-not-escape"
+    captured = {}
+
+    class Client:
+        def plan(self, payload):
+            captured["payload"] = payload
+            return SimpleNamespace(plan=object(), fallback=False, backend="deepseek",
+                                   model="deepseek-flash", latency_ms=1234,
+                                   error_kind="", error=secret)
+
+    def factory(backend, **kwargs):
+        captured["backend"] = backend
+        captured["kwargs"] = kwargs
+        return Client()
+
+    runtime = SimpleNamespace(brain_backend="deepseek", brain_api_key=secret,
+                              openai_model="deepseek-flash",
+                              openai_endpoint="https://provider.invalid/v1/chat/completions",
+                              timeout_ms=12000, max_output_tokens=900)
+    result = probe_strategic_provider(runtime, provider_factory=factory)
+
+    assert result == {"ok": True, "backend": "deepseek", "model": "deepseek-flash",
+                      "latency_ms": 1234, "error_kind": ""}
+    assert captured["backend"] == "deepseek"
+    assert captured["kwargs"]["api_key"] == secret
+    assert captured["kwargs"]["max_calls"] == 1
+    assert captured["payload"]["trigger"] == "provider_probe"
+    assert secret not in repr(result)
+
+
+def test_strategic_probe_failure_exposes_category_not_provider_error_text():
+    from types import SimpleNamespace
+
+    from spirebrain.doctor import probe_strategic_provider
+
+    secret = "probe-secret-must-not-escape"
+
+    class Client:
+        def plan(self, payload):
+            return SimpleNamespace(plan=None, fallback=True, backend="deepseek",
+                                   model="deepseek-flash", latency_ms=50,
+                                   error_kind="auth", error=f"bad auth {secret}")
+
+    runtime = SimpleNamespace(brain_backend="deepseek", brain_api_key=secret,
+                              openai_model="deepseek-flash",
+                              openai_endpoint="https://provider.invalid/v1/chat/completions",
+                              timeout_ms=12000, max_output_tokens=900)
+    result = probe_strategic_provider(runtime, provider_factory=lambda *a, **k: Client())
+
+    assert result["ok"] is False
+    assert result["error_kind"] == "auth"
+    assert secret not in repr(result)
+
+
 if __name__ == "__main__":
     import traceback
 

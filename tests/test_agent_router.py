@@ -26,6 +26,9 @@ DECK_10 = [{"name": "Strike", "type": "Attack", "cost": 1}] * 5 + \
 
 
 def _agent(tmp: str, **kw) -> SpireBrainAgent:
+    # Keep router tests hermetic even when a developer .env selects a live
+    # strategic provider. Strategic behavior has dedicated mock-provider tests.
+    kw.setdefault("brain_backend", "none")
     return SpireBrainAgent(jev_backend="mock", log_dir=tmp, **kw)
 
 

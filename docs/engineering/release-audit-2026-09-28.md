@@ -103,7 +103,7 @@ The current working tree was rechecked with CPython 3.12.10 on Windows:
 
 | Check | Result | Scope |
 | --- | ---: | --- |
-| `python -m pytest -q` | 565 passed | Offline unit, replay, provider, simulator and smoke tests |
+| `python -m pytest -q` | 570 passed | Offline unit, replay, provider, simulator and smoke tests |
 | `python -m compileall -q spirebrain start.py run_agent.py tools` | passed | Python syntax/bytecode |
 | `python tools/check_contracts.py` | passed | Python/dashboard/Java field and default contract |
 | `python tools/verify_offline.py` | 10/10 passed | Tests, compile, contracts, metrics, evaluation, replay, async replay, RAG, combat benchmark and launcher smoke |
@@ -128,4 +128,18 @@ The trace audit also now validates pending state, generation and run identity
 types on `expired_result` events. This prevents malformed asynchronous
 lifecycle data from being accepted by replay. The focused trace/replay/smoke
 suite passed 60 tests. Historical test counts above remain for traceability;
-the current count is 565 passed and real outcomes remain `unknown`.
+the current count is 570 passed and real outcomes remain `unknown`.
+
+The live provider diagnostic was subsequently run with the resolved runtime
+configuration. The strategic provider returned a structured plan successfully
+(`deepseek`/`deepseek-flash`, about 4.4 seconds). This proves connectivity and
+schema parsing for one request, but not player-visible latency or gameplay
+quality. Smoke and provider logs are now bounded JSONL files (32 MiB active file
+and two backups by default) so repeated real-game polling cannot grow the
+working directory without limit.
+
+The offline test helpers now explicitly inject `brain_backend="none"` unless a
+test is exercising a strategic mock. This prevents a developer `.env` from
+starting a live strategic worker during a temporary-directory test and removes
+the intermittent Windows `WinError 145` cleanup race. After this isolation,
+the full suite and the independent offline verifier both pass serially.

@@ -95,7 +95,7 @@ def test_decision_event_flattens_and_rounds():
 
 def test_run_state_event_reads_agent_defensively():
     with tempfile.TemporaryDirectory() as tmp:
-        agent = SpireBrainAgent(jev_backend="mock", log_dir=tmp)
+        agent = SpireBrainAgent(jev_backend="mock", brain_backend="none", log_dir=tmp)
         ev = run_state_event(agent)  # nothing observed yet: still publishable
         assert isinstance(ev, dict)
 
@@ -112,7 +112,7 @@ def _base(**over) -> dict:
 def test_agent_without_feed_behaves_exactly_as_before():
     """The feed is optional; None must mean zero behavioural change."""
     with tempfile.TemporaryDirectory() as tmp:
-        agent = SpireBrainAgent(jev_backend="mock", log_dir=tmp)
+        agent = SpireBrainAgent(jev_backend="mock", brain_backend="none", log_dir=tmp)
         cmd = agent.choose_action(_base(screen_type="MAP", map={"next_nodes": [
             {"x": 0, "y": 4, "symbol": "M"}]}))
         assert cmd["command"] == "choose"
@@ -124,7 +124,7 @@ def test_agent_publishes_state_and_decisions_to_feed():
         feed = DecisionFeed()
         sink = Sink()
         feed.subscribe(sink)
-        agent = SpireBrainAgent(jev_backend="mock", log_dir=tmp, feed=feed)
+        agent = SpireBrainAgent(jev_backend="mock", brain_backend="none", log_dir=tmp, feed=feed)
         agent.choose_action(_base(screen_type="CARD_REWARD", screen_state={
             "cards": [{"name": "Inflame", "description": "gain strength"}]}))
         kinds = []
@@ -147,7 +147,7 @@ def test_agent_survives_a_hostile_feed():
             raise RuntimeError("no")
 
     with tempfile.TemporaryDirectory() as tmp:
-        agent = SpireBrainAgent(jev_backend="mock", log_dir=tmp, feed=Hostile())
+        agent = SpireBrainAgent(jev_backend="mock", brain_backend="none", log_dir=tmp, feed=Hostile())
         cmd = agent.choose_action(_base(screen_type="MAP", map={"next_nodes": [
             {"x": 0, "y": 4, "symbol": "M"}]}))
         assert cmd["command"] == "choose"  # the run carried on

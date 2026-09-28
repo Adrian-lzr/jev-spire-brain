@@ -93,6 +93,8 @@ def test_smoke_report_passes_only_with_healthy_fresh_provider_results():
     assert report["passed"] is True
     assert report["degraded"] is False
     assert report["run_ended_with_pending_request"] is False
+    assert report["strategic_status"] == "fresh_plan_received"
+    assert report["strategic_latency"] == {"sample_count": 0, "p50_ms": None, "p95_ms": None}
 
 
 def test_smoke_report_marks_request_left_open_at_shutdown():
@@ -146,7 +148,27 @@ def test_smoke_reports_retained_strategy_context_separately_from_fresh_plans():
 
     assert report["strategic_context_successes"] == 1
     assert report["strategic_usable_successes"] == 0
+    assert report["strategic_status"] == "connected_but_stale"
     assert report["release_passed"] is False
+
+
+def test_smoke_report_classifies_provider_failure_and_latency_percentiles():
+    from tools.real_game_smoke import _build_report
+
+    report = _build_report(
+        brain=[
+            {"request_id": "brain-1", "fallback": True, "error_kind": "timeout",
+             "latency_ms": 20},
+            {"request_id": "brain-2", "fallback": True, "error_kind": "auth",
+             "latency_ms": 80},
+        ],
+        jev=[],
+        trace=[{"event_type": "decision", "source_type": "rule_fallback"}],
+    )
+
+    assert report["strategic_status"] == "provider_failed"
+    assert report["strategic_error_kinds"] == ["auth", "timeout"]
+    assert report["strategic_latency"] == {"sample_count": 2, "p50_ms": 50.0, "p95_ms": 80.0}
 
 
 def test_real_game_smoke_cli_fails_for_degraded_opted_in_report(monkeypatch, capsys):

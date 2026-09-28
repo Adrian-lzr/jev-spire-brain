@@ -10,6 +10,7 @@ from pathlib import Path
 from spirebrain.redaction import redact_text
 from spirebrain.analysis.event_contract import make_event, decision_chain, validate_event
 from spirebrain.analysis.replay_blob import ReplayBlobStore
+from spirebrain.logging_utils import append_bounded
 
 
 _LOCK = threading.Lock()
@@ -117,14 +118,11 @@ class DecisionTrace:
             contract_errors = validate_event(record, strict=True)
             if contract_errors:
                 record["contract_errors"] = contract_errors
-            try:
-                line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
-                self.path.parent.mkdir(parents=True, exist_ok=True)
-                with self.path.open("a", encoding="utf-8") as stream:
-                    stream.write(line)
-                return True
-            except (OSError, UnicodeError, TypeError, ValueError):
-                return False
+            line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+            # ``record`` already holds the process-wide trace lock. Passing it
+            # into the helper again would deadlock because ``threading.Lock``
+            # is not re-entrant.
+            return append_bounded(self.path, line)
 
     def find_decision(self, decision_id: str) -> dict:
         records = []

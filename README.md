@@ -224,6 +224,7 @@ Everything start.py does, done manually:
 
 ```bash
 python -m spirebrain.doctor                              # what is missing, and how to fix it
+python -m spirebrain.doctor --live-strategic              # one bounded strategic provider probe
 python run_dashboard.py --demo        # simulated run, mock JEV, no key needed
 python run_dashboard.py --advise-demo # the advisor panel: scripted player, real chain
 python run_dashboard.py --demo --optimistic          # JEV steers the run
@@ -340,6 +341,10 @@ python tools/real_game_smoke.py --allow-real-game --duration 30  # opt-in game s
 `tools/verify_offline.py` 会逐项执行离线检查并在某项失败后继续输出其余结果，
 适合作为干净检出和 CI 的单一入口。当前执行起点、配置摘要、已知限制和未验证的
 真实游戏行为记录在 [`docs/BASELINE_2026-09-24.md`](docs/BASELINE_2026-09-24.md)。
+
+运行日志采用有界 JSONL 轮转（默认当前文件 32 MiB、保留 2 个备份），日志写入失败
+不会阻塞建议链路。可通过 `SPIREBRAIN_LOG_MAX_BYTES` 和 `SPIREBRAIN_LOG_BACKUPS`
+调整保留策略；这些变量不包含密钥，也不会出现在决策轨迹中。
 
 `doctor` exists because "is the mod installed?" turned out to need six manual
 checks, and one of them is genuinely non-obvious: a Steam Workshop **subscription**

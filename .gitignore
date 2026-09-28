@@ -13,6 +13,7 @@ sendToDevs/
 .playwright-cli/
 steam_appid.txt
 *.jsonl
+*.jsonl.*
 !spirebrain/data/strategy_knowledge.jsonl
 
 # Env & secrets
