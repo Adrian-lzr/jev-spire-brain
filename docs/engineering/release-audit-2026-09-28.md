@@ -103,7 +103,7 @@ The current working tree was rechecked with CPython 3.12.10 on Windows:
 
 | Check | Result | Scope |
 | --- | ---: | --- |
-| `python -m pytest -q` | 571 passed | Offline unit, replay, provider, simulator and smoke tests |
+| `python -m pytest -q` | 572 passed | Offline unit, replay, provider, simulator and smoke tests |
 | `python -m compileall -q spirebrain start.py run_agent.py tools` | passed | Python syntax/bytecode |
 | `python tools/check_contracts.py` | passed | Python/dashboard/Java field and default contract |
 | `python tools/verify_offline.py` | 10/10 passed | Tests, compile, contracts, metrics, evaluation, replay, async replay, RAG, combat benchmark and launcher smoke |
@@ -128,7 +128,7 @@ The trace audit also now validates pending state, generation and run identity
 types on `expired_result` events. This prevents malformed asynchronous
 lifecycle data from being accepted by replay. The focused trace/replay/smoke
 suite passed 60 tests. Historical test counts above remain for traceability;
-the current count is 571 passed and real outcomes remain `unknown`.
+the current count is 572 passed and real outcomes remain `unknown`.
 
 The live provider diagnostic was subsequently run with the resolved runtime
 configuration. The strategic provider returned a structured plan successfully

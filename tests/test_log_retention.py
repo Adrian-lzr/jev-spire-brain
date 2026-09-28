@@ -61,3 +61,27 @@ def test_logging_clients_use_bounded_files_and_keep_provider_available(tmp_path)
     # a tiny explicit limit above rather than changing process-wide settings.
     assert json.loads((tmp_path / "jev_calls.jsonl").read_text(encoding="utf-8"))
     assert json.loads((tmp_path / "decision_trace.jsonl").read_text(encoding="utf-8"))
+
+
+def test_strategic_provider_log_uses_the_same_bounded_rotation(tmp_path, monkeypatch):
+    from spirebrain.brain.gpt_client import LoggingStrategicClient
+    from spirebrain.brain.protocol import BrainResponse
+
+    class Provider:
+        backend_name = "fixture"
+
+        def plan(self, payload):
+            return BrainResponse(backend=self.backend_name, request_id=payload.get("request_id", ""))
+
+    monkeypatch.setenv("SPIREBRAIN_LOG_MAX_BYTES", "180")
+    monkeypatch.setenv("SPIREBRAIN_LOG_BACKUPS", "2")
+    path = tmp_path / "brain_calls.jsonl"
+    client = LoggingStrategicClient(Provider(), path)
+    for index in range(4):
+        client.plan({"run_id": "run", "state_id": f"state-{index}",
+                     "decision_id": f"decision-{index}"})
+
+    assert path.exists()
+    assert path.with_name("brain_calls.jsonl.1").exists()
+    assert path.with_name("brain_calls.jsonl.2").exists()
+    assert not path.with_name("brain_calls.jsonl.3").exists()
