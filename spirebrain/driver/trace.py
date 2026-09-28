@@ -10,7 +10,7 @@ from pathlib import Path
 from spirebrain.redaction import redact_text
 from spirebrain.analysis.event_contract import make_event, decision_chain, validate_event
 from spirebrain.analysis.replay_blob import ReplayBlobStore
-from spirebrain.logging_utils import append_bounded
+from spirebrain.logging_utils import append_bounded, rotated_log_paths
 
 
 _LOCK = threading.Lock()
@@ -68,16 +68,20 @@ class DecisionTrace:
 
     def _read_last_sequence(self) -> int:
         sequence = 0
-        try:
-            with self.path.open("r", encoding="utf-8") as stream:
+        for source in rotated_log_paths(self.path):
+            try:
+                stream = source.open("r", encoding="utf-8")
+            except OSError:
+                continue
+            try:
                 for line in stream:
                     try:
                         value = json.loads(line)
                         sequence = max(sequence, int(value.get("trace_sequence", 0)))
                     except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
                         continue
-        except OSError:
-            pass
+            finally:
+                stream.close()
         return sequence
 
     def record(self, event_type: str, fields: dict) -> bool:
@@ -126,15 +130,25 @@ class DecisionTrace:
 
     def find_decision(self, decision_id: str) -> dict:
         records = []
-        try:
-            with self.path.open("r", encoding="utf-8") as stream:
+        by_sequence = {}
+        for source in rotated_log_paths(self.path):
+            try:
+                stream = source.open("r", encoding="utf-8")
+            except OSError:
+                continue
+            try:
                 for line in stream:
                     try:
                         value = json.loads(line)
                     except json.JSONDecodeError:
                         continue
                     if isinstance(value, dict):
-                        records.append(value)
-        except OSError:
-            pass
+                        sequence = value.get("trace_sequence")
+                        if isinstance(sequence, (int, float)):
+                            by_sequence[sequence] = value
+                        else:
+                            records.append(value)
+            finally:
+                stream.close()
+        records.extend(by_sequence[key] for key in sorted(by_sequence))
         return decision_chain(records, decision_id)

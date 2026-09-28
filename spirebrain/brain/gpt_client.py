@@ -20,6 +20,7 @@ from typing import Any
 
 from .protocol import BrainResponse, PlanValidationError, StrategicPlan
 from spirebrain.redaction import redact_text, redact_value
+from spirebrain.logging_utils import append_bounded
 from spirebrain.runtime_budget import DecisionBudget, current_budget
 
 
@@ -629,9 +630,10 @@ class LoggingStrategicClient:
         })
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self._lock, self.path.open("a", encoding="utf-8") as stream:
-                stream.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
-        except OSError:
+            append_bounded(self.path,
+                           json.dumps(record, ensure_ascii=False, default=str) + "\n",
+                           lock=self._lock)
+        except (OSError, TypeError, ValueError):
             pass
         if self.event_sink is not None:
             try:

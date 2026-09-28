@@ -18,6 +18,31 @@ def test_append_bounded_rotates_jsonl_without_truncating_records(tmp_path):
     assert current == [{"seq": 3}]
     assert json.loads(path.with_name("events.jsonl.1").read_text(encoding="utf-8")) == {"seq": 2}
     assert json.loads(path.with_name("events.jsonl.2").read_text(encoding="utf-8")) == {"seq": 1}
+    assert not path.with_name("events.jsonl.3").exists()
+
+
+def test_trace_replay_reads_rotated_decisions_and_continues_sequence(tmp_path, monkeypatch):
+    from spirebrain.driver.trace import DecisionTrace
+    from spirebrain.analysis.replay import replay_decision_chain
+
+    monkeypatch.setenv("SPIREBRAIN_LOG_MAX_BYTES", "250")
+    monkeypatch.setenv("SPIREBRAIN_LOG_BACKUPS", "2")
+    path = tmp_path / "decision_trace.jsonl"
+    trace = DecisionTrace(path, config_id="cfg")
+    for index in range(1, 4):
+        assert trace.record("decision", {
+            "decision_id": f"d{index}", "state_id": f"s{index}",
+            "command": {"command": "state"}, "source_type": "rule",
+        })
+    assert trace.find_decision("d1")["decisions"]
+    assert replay_decision_chain(path, "d1", require_blobs=False)["decisions"]
+    restarted = DecisionTrace(path, config_id="cfg")
+    assert restarted.record("decision", {
+        "decision_id": "d4", "state_id": "s4",
+        "command": {"command": "state"}, "source_type": "rule",
+    })
+    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert max(record["trace_sequence"] for record in records) == 4
 
 
 def test_logging_clients_use_bounded_files_and_keep_provider_available(tmp_path):

@@ -19,6 +19,7 @@ from spirebrain.brain.action_broker import reconcile
 from spirebrain.brain.gpt_client import MockStrategicClient, UnavailableStrategicClient
 from spirebrain.analysis.event_contract import decision_chain
 from spirebrain.analysis.replay_blob import ReplayBlobStore
+from spirebrain.logging_utils import rotated_log_paths
 
 
 _TIMING_EVENT_TYPES = {
@@ -195,16 +196,31 @@ def replay_decision_chain(trace_path: str | Path, decision_id: str,
     """
     path = Path(trace_path)
     records = []
-    try:
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            try:
-                value = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(value, dict):
-                records.append(value)
-    except OSError as exc:
-        raise FileNotFoundError(path) from exc
+    found_file = False
+    by_sequence = {}
+    for source in rotated_log_paths(path):
+        try:
+            stream = source.open("r", encoding="utf-8", errors="replace")
+            found_file = True
+        except OSError:
+            continue
+        try:
+            for line in stream:
+                try:
+                    value = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(value, dict):
+                    sequence = value.get("trace_sequence")
+                    if isinstance(sequence, (int, float)):
+                        by_sequence[sequence] = value
+                    else:
+                        records.append(value)
+        finally:
+            stream.close()
+    if not found_file:
+        raise FileNotFoundError(path)
+    records.extend(by_sequence[key] for key in sorted(by_sequence))
     chain = decision_chain(records, str(decision_id))
     if not any(chain.get(bucket) for bucket in (
             "inputs", "requests", "responses", "decisions", "advice_versions",

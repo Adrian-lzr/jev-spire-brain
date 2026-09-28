@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import threading
 from pathlib import Path
+import re
 
 
 def _int_env(name: str, default: int, *, minimum: int = 0) -> int:
@@ -22,6 +23,21 @@ def log_max_bytes() -> int:
 
 def log_backup_count() -> int:
     return _int_env("SPIREBRAIN_LOG_BACKUPS", 2, minimum=0)
+
+
+def rotated_log_paths(path: str | Path) -> list[Path]:
+    """Return retained JSONL files oldest-first, then the active file."""
+    target = Path(path)
+    backups = []
+    pattern = re.compile(re.escape(target.name) + r"\.(\d+)$")
+    try:
+        for candidate in target.parent.glob(target.name + ".*"):
+            match = pattern.fullmatch(candidate.name)
+            if match:
+                backups.append((int(match.group(1)), candidate))
+    except OSError:
+        pass
+    return [candidate for _, candidate in sorted(backups, reverse=True)] + [target]
 
 
 def append_bounded(path: str | Path, text: str, *, max_bytes: int | None = None,
@@ -47,11 +63,12 @@ def append_bounded(path: str | Path, text: str, *, max_bytes: int | None = None,
                 except OSError:
                     current_size = 0
                 if current_size and current_size + len(encoded) > limit:
-                    for index in range(backups, 0, -1):
+                    overflow = target.with_name(target.name + f".{backups + 1}")
+                    if overflow.exists():
+                        overflow.unlink()
+                    for index in range(backups - 1, 0, -1):
                         source = target.with_name(target.name + f".{index}")
                         destination = target.with_name(target.name + f".{index + 1}")
-                        if index == backups and destination.exists():
-                            destination.unlink()
                         if source.exists():
                             source.replace(destination)
                     if backups:
