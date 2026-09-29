@@ -12,17 +12,38 @@ and `cost: -2` marks an unplayable card. The bugs these tests pin were all real:
 
 from __future__ import annotations
 
+import json
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from spirebrain import gamedata
 from spirebrain.jev_brain.state import (
     card_line,
     card_values,
     english_name,
     lookup_keys,
 )
+
+FIXTURE = Path(__file__).parent / "fixtures" / "gamedata" / "localization.json"
+
+
+@contextmanager
+def _using_localization_fixture():
+    original_get = gamedata.get
+    data = gamedata.GameData(
+        tables=json.loads(FIXTURE.read_text(encoding="utf-8")),
+        loaded=True,
+        source="synthetic-fixture",
+    )
+    gamedata.get = lambda *args, **kwargs: data
+    try:
+        yield
+    finally:
+        gamedata.get = original_get
+
 
 # --------------------------------------------------------------------------- #
 # lookup_keys: id must win over a localised name
@@ -45,20 +66,24 @@ def test_empty_strings_are_not_candidates():
 # english_name / effect resolution through the game's own data
 # --------------------------------------------------------------------------- #
 def test_english_name_resolves_through_a_chinese_display_name():
-    assert english_name(["Strike_R", "打击"], "cards", "IRONCLAD") == "Strike"
+    with _using_localization_fixture():
+        assert english_name(["Strike_R", "打击"], "cards", "IRONCLAD") == "Strike"
 
 
 def test_camel_case_ids_match_space_preserving_keys():
     # CommunicationMod sends "PommelStrike"; the localization key is "Pommel Strike".
-    assert english_name(["PommelStrike"], "cards") == "Pommel Strike"
+    with _using_localization_fixture():
+        assert english_name(["PommelStrike"], "cards") == "Pommel Strike"
 
 
 def test_unknown_ids_return_none_without_raising():
-    assert english_name(["NotARealCard", "不存在"], "cards") is None
+    with _using_localization_fixture():
+        assert english_name(["NotARealCard", "不存在"], "cards") is None
 
 
 def test_relics_resolve_by_id_too():
-    assert english_name(["BurningBlood"], "relics") == "Burning Blood"
+    with _using_localization_fixture():
+        assert english_name(["BurningBlood"], "relics") == "Burning Blood"
 
 
 # --------------------------------------------------------------------------- #
@@ -67,7 +92,8 @@ def test_relics_resolve_by_id_too():
 def test_chinese_card_renders_as_english_name_plus_real_text():
     card = {"id": "Strike_R", "name": "打击", "cost": 1, "type": "ATTACK",
             "upgrades": 0, "damage": 6}
-    line = card_line(card, character="IRONCLAD")
+    with _using_localization_fixture():
+        line = card_line(card, character="IRONCLAD")
     assert line.startswith("Strike (1E)")
     assert "Deal 6 damage." in line
     assert "打击" not in line  # the question language is English throughout
@@ -76,26 +102,30 @@ def test_chinese_card_renders_as_english_name_plus_real_text():
 def test_camel_id_card_gets_effect_text_and_runtime_numbers():
     card = {"id": "PommelStrike", "name": "连枷打击", "cost": 1,
             "damage": 9, "magic_number": 1}
-    line = card_line(card, character="IRONCLAD")
+    with _using_localization_fixture():
+        line = card_line(card, character="IRONCLAD")
     assert line.startswith("Pommel Strike (1E)")
     assert "Deal 9 damage. Draw 1 card." in line
 
 
 def test_unplayable_cost_renders_as_minus_two():
     card = {"id": "AscendersBane", "name": "飞升祸害", "cost": -2}
-    line = card_line(card, character="IRONCLAD")
+    with _using_localization_fixture():
+        line = card_line(card, character="IRONCLAD")
     assert line.startswith("Ascender's Bane (-2E)")
 
 
 def test_a_total_unknown_stays_honest():
     card = {"id": "NotARealCard", "name": "不存在", "cost": 1}
-    line = card_line(card)
+    with _using_localization_fixture():
+        line = card_line(card)
     assert line == "不存在 (1E)"  # no invented text, localised name kept
 
 
 def test_the_simulators_english_decks_are_unchanged():
     card = {"name": "Pommel Strike", "cost": 1, "type": "Attack"}
-    line = card_line(card, character="IRONCLAD")
+    with _using_localization_fixture():
+        line = card_line(card, character="IRONCLAD")
     assert line.startswith("Pommel Strike (1E) - Attack - ")
 
 

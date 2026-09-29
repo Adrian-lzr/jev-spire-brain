@@ -3,7 +3,7 @@
 ## Baseline and scope
 
 - Baseline commit: `e0ff85bf86d8fee4e634f0940504397847f824d9`.
-- Python: 3.12, invoked with `C:\Users\Lenovo\AppData\Local\Programs\Python\Python312\python.exe`.
+- Python: CPython 3.12.
 - Existing user changes in `tests/test_runtime_optimization.py` and `.playwright-cli/` were preserved and are not part of this change.
 - No API key, paid provider, game process, or CommunicationMod configuration was used.
 

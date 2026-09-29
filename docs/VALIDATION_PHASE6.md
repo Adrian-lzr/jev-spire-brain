@@ -6,10 +6,9 @@ fixtures do not establish win rate or model quality.
 ## Offline
 
 ```powershell
-$py = 'C:\Users\Lenovo\AppData\Local\Programs\Python\Python312\python.exe'
-& $py -m pytest -q
-& $py tools/verify_offline.py
-& $py -m spirebrain.analysis.evaluate --input tests/fixtures/replay/advisor_states.json
+python -m pytest -q
+python tools/verify_offline.py
+python -m spirebrain.analysis.evaluate --input tests/fixtures/replay/advisor_states.json
 ```
 
 Check that `display_status`, `mode`, `config_id`, and model connection fields

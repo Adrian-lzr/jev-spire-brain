@@ -1,6 +1,11 @@
 # Jev Spire Brain
 
+[![Python CI](https://github.com/Adrian-lzr/jev-spire-brain/actions/workflows/python.yml/badge.svg)](https://github.com/Adrian-lzr/jev-spire-brain/actions/workflows/python.yml)
+[![MIT License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
 > A GPT + JEV external coach for [Slay the Spire](https://store.steampowered.com/app/646570/Slay_the_Spire/) — GPT owns the run strategy, JEV ranks local choices, and deterministic code handles legality and execution.
+
+**Start here:** [Run the demo](#quick-start) · [Set up the game](docs/SETUP.md) · [Browse documentation](docs/README.md) · [Contribute](CONTRIBUTING.md)
 
 GPT is the strategic brain, JEV is the tactical layer, and CommunicationMod is only reached through the local legal-action broker. Without an OpenAI key the existing JEV + guide-rule path remains available.
 
@@ -151,7 +156,7 @@ two real protocol verbs our alias table was silently rewriting to `proceed` and
 screen that had already been answered. Both nights' failures are pinned in
 `tests/test_guards.py` and `tests/test_stdio.py`.
 
-## Quick start — one command
+## Quick start
 
 ```bash
 python start.py --demo      # no game, no API key: watch a simulated run right now

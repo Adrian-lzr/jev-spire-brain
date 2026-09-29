@@ -3,7 +3,7 @@
 This is an engineering and replay audit, not a gameplay-quality or win-rate
 claim. The audit was run from commit `2df3c82a36af4dc8a78cbca9b601fa722fb50ea0`
 with uncommitted working-tree changes present. Runtime: Windows,
-CPython 3.12.10 (`C:\Users\Lenovo\AppData\Local\Programs\Python\Python312\python.exe`).
+CPython 3.12.10 on Windows.
 
 ## Offline Evidence
 

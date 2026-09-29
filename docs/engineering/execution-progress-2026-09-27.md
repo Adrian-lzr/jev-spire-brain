@@ -7,7 +7,7 @@ Working branch: `plan/closed-loop-20260927`
 
 ## S0 — completed
 
-Environment: Windows, Python 3.12.10 (`C:\Users\Lenovo\AppData\Local\Programs\Python\Python312\python.exe`).
+Environment: Windows, CPython 3.12.10.
 
 Baseline commands and results:
 

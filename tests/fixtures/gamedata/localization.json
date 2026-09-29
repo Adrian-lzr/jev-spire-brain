@@ -2,7 +2,9 @@
   "cards": {
     "Strike_R": {"NAME": "Strike", "DESCRIPTION": "Deal !D! damage."},
     "Defend_R": {"NAME": "Defend", "DESCRIPTION": "Gain !B! Block."},
-    "Bash": {"NAME": "Bash", "DESCRIPTION": "Deal !D! damage. Apply !M! Vulnerable."}
+    "Bash": {"NAME": "Bash", "DESCRIPTION": "Deal !D! damage. Apply !M! Vulnerable."},
+    "Pommel Strike": {"NAME": "Pommel Strike", "DESCRIPTION": "Deal !D! damage. Draw !M! card."},
+    "AscendersBane": {"NAME": "Ascender's Bane"}
   },
   "relics": {
     "Burning Blood": {"NAME": "Burning Blood", "DESCRIPTIONS": ["At the end of combat, heal 6 HP."]}

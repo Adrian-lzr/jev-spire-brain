@@ -28,9 +28,9 @@ from spirebrain.install_mod_config import (
     parse_config,
 )
 
-# The actual repo path on this machine: Chinese characters in two directory names.
-CN_PATH = "D:\\ai生成视频\\jev模型\\jev-spire-brain\\run_agent.py"
-PY = "C:\\Users\\Lenovo\\.workbuddy\\binaries\\python\\versions\\3.13.12\\python.exe"
+# Representative Windows paths, including non-ASCII characters.
+CN_PATH = "D:\\Projects\\生成视频\\jev-spire-brain\\run_agent.py"
+PY = "C:\\Python312\\python.exe"
 
 
 # --------------------------------------------------------------------------- #
@@ -88,8 +88,8 @@ def test_no_character_above_ascii_survives_escaping():
 # the argv the mod will actually build
 # --------------------------------------------------------------------------- #
 def test_argv_matches_the_mods_whitespace_split():
-    check = check_argv(f"{PY} {CN_PATH} --backend openrouter")
-    assert check["argv"] == [PY, CN_PATH, "--backend", "openrouter"]
+    check = check_argv("python run_agent.py --backend openrouter")
+    assert check["argv"] == ["python", "run_agent.py", "--backend", "openrouter"]
     assert check["argv_count"] == 4
     assert check["problems"] == []
 
@@ -146,11 +146,9 @@ def test_parse_ignores_comments_and_blank_lines():
 
 
 def test_config_path_follows_modthespires_layout():
-    path = config_path()
-    assert path.name == "config.properties"
-    assert path.parent.name == "CommunicationMod"
-    assert path.parent.parent.name == "ModTheSpire"
-    assert "AppData" in str(path) or "Local" in str(path)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = config_path({"LOCALAPPDATA": tmp})
+        assert path == Path(tmp) / "ModTheSpire" / "CommunicationMod" / "config.properties"
 
 
 def test_default_command_carries_the_mode():
@@ -187,9 +185,11 @@ def test_cli_flags_build_the_command_it_documents():
     import io
 
     buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        code = main(["--mode", "play", "--auto-start", "--class", "SILENT",
-                     "--ascension", "3"])
+    with tempfile.TemporaryDirectory() as tmp:
+        with _isolated_localappdata(tmp):
+            with contextlib.redirect_stdout(buf):
+                code = main(["--mode", "play", "--auto-start", "--class", "SILENT",
+                             "--ascension", "3"])
     out = buf.getvalue()
     assert code == 0, out
     assert "--mode play" in out
