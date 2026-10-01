@@ -379,11 +379,18 @@ class RunMemory:
         )
 
     def record_observed_result(self, result: Any, *, state_id: str = "",
-                               decision_id: str = "", evidence: dict | None = None) -> dict:
+                               decision_id: str = "", evidence: dict | None = None,
+                               run_id: str | None = None,
+                               run_epoch: int | None = None) -> dict:
         """Commit a game/result observation; unlike a reason it has a result key."""
+        identity = {}
+        if run_id is not None:
+            identity["run_id"] = str(run_id)
+        if run_epoch is not None:
+            identity["run_epoch"] = int(run_epoch)
         return self.append_event(RESULT_RECORD, state_id=state_id,
                                  decision_id=decision_id, result=copy.deepcopy(result),
-                                 evidence=copy.deepcopy(evidence or {}))
+                                 evidence=copy.deepcopy(evidence or {}), **identity)
 
     def record_action(self, action: dict, *, state_id: str = "", result: str = "") -> dict:
         """Legacy alias for execution attempts.

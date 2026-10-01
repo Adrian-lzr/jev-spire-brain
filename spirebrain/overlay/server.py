@@ -313,8 +313,12 @@ def _make_handler(feed: DecisionFeed, page_path: Path, env_path: Path):
                     self._send_json(200, {"ok": True, "config": save_config(env_path, body)})
                     return
                 if path == "/api/config/test-brain":
-                    key = str(body.get("api_key") or get_secret(env_path, "brain_api_key"))
-                    result = test_brain_connection(body.get("settings") or {}, key)
+                    settings = body.get("settings") or {}
+                    key = str(body.get("api_key") or get_secret(
+                        env_path, "brain_api_key",
+                        endpoint=str(settings.get("openai_endpoint") or ""),
+                    ))
+                    result = test_brain_connection(settings, key)
                     self._send_json(200, result)
                     return
                 if path == "/api/config/test-jev":
@@ -350,13 +354,17 @@ def _make_handler(feed: DecisionFeed, page_path: Path, env_path: Path):
                         body.get("brain_endpoint") or body.get("openai_endpoint")
                         or saved_runtime.openai_endpoint
                     )
+                    brain_reasoning_effort = str(
+                        body.get("brain_reasoning_effort")
+                        or saved_runtime.brain_reasoning_effort
+                    )
                     jev_endpoint = str(
                         body.get("jev_endpoint") or saved_runtime.jev_endpoint
                     )
                     mode = str(body.get("mode") or "advise")
                     if backend not in {"mock", "openrouter", "official", "llm", "cloudflare"}:
                         raise ValueError("JEV 后端无效")
-                    if brain_backend not in {"openai", "gpt", "deepseek", "qwen", "tongyi", "zhipu", "glm", "moonshot", "kimi", "siliconflow", "doubao", "openai-compatible", "jev", "mock", "disabled"}:
+                    if brain_backend not in {"openai", "gpt", "deepseek", "qwen", "tongyi", "zhipu", "glm", "moonshot", "kimi", "siliconflow", "doubao", "openai-compatible", "hiyo-codex", "jev", "mock", "disabled"}:
                         raise ValueError("战略大脑后端无效")
                     if mode not in {"advise", "play"}:
                         raise ValueError("运行模式无效")
@@ -365,6 +373,7 @@ def _make_handler(feed: DecisionFeed, page_path: Path, env_path: Path):
                         brain_backend=brain_backend,
                         brain_model=brain_model,
                         brain_endpoint=brain_endpoint,
+                        brain_reasoning_effort=brain_reasoning_effort,
                         jev_endpoint=jev_endpoint,
                         dashboard_url=f"http://127.0.0.1:{self.server.server_port}/publish",
                         open_dashboard=True,

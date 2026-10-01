@@ -8,12 +8,14 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
+from urllib.parse import urlsplit, urlunsplit
 
 
 # Common mainland providers expose an OpenAI-compatible chat endpoint.  These
 # defaults are only used when the user selects a backend and leaves model or
 # endpoint blank; explicit BRAIN_* / OPENAI_* values always win.
 BRAIN_PROVIDER_PRESETS = {
+    "hiyo-codex": ("gpt-6-sol", "https://codex.hiyo.top/v1/responses"),
     "deepseek": ("deepseek-chat", "https://api.deepseek.com/v1/chat/completions"),
     "qwen": ("qwen-plus", "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"),
     "tongyi": ("qwen-plus", "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"),
@@ -59,6 +61,7 @@ class RuntimeConfig:
     brain_backend: str
     openai_model: str
     openai_endpoint: str
+    brain_reasoning_effort: str
     # Secret provider material is resolved once at the process boundary and
     # passed explicitly to the provider.  It is intentionally excluded from
     # ``public_dict`` and from ``config_id``; only availability/source are
@@ -87,6 +90,7 @@ class RuntimeConfig:
             "brain_backend": self.brain_backend,
             "openai_model": self.openai_model,
             "openai_endpoint": self.openai_endpoint,
+            "brain_reasoning_effort": self.brain_reasoning_effort,
             "brain_key_available": bool(self.brain_api_key),
             "brain_key_source": self.brain_key_source,
             "jev_key_available": bool(self.jev_api_key),
@@ -205,21 +209,6 @@ def resolve_runtime_config(root: str | Path, *, cli: Mapping[str, str | None] | 
         brain.get("endpoint"),
         preset_endpoint,
     )
-    # Resolve secrets with the same source precedence as public settings, but
-    # keep them out of all public snapshots, logs and configuration hashes.
-    # Alias ordering only applies within a source: a process environment value
-    # must beat a dotenv value even when the latter uses the canonical alias.
-    brain_api_key = ""
-    brain_key_source = "default"
-    for source, values in (("process_environment", env), ("dotenv", dot)):
-        for key_name in ("BRAIN_API_KEY", "OPENAI_API_KEY"):
-            value = values.get(key_name)
-            if value is not None and str(value).strip():
-                brain_api_key = str(value).strip()
-                brain_key_source = source
-                break
-        if brain_api_key:
-            break
     # Explicit CLI aliases are applied after the environment aliases so a
     # launcher can defeat stale inherited process variables without exposing a
     # secret in the command line.
@@ -231,12 +220,47 @@ def resolve_runtime_config(root: str | Path, *, cli: Mapping[str, str | None] | 
             elif key == "openai_endpoint": openai_endpoint = str(value).strip()
             else: jev_endpoint = str(value).strip()
             sources[key] = "command_line"
-    # Most OpenAI-compatible gateways publish a base /v1 URL in their setup
-    # instructions. The client needs the concrete chat route; keep the
-    # official Responses endpoint unchanged.
-    if (openai_endpoint.rstrip("/").endswith("/v1")
-            and "api.openai.com" not in openai_endpoint):
-        openai_endpoint = openai_endpoint.rstrip("/") + "/chat/completions"
+    # A base /v1 URL is ambiguous. Preserve the official Responses API route;
+    # compatible gateways use Chat Completions unless an explicit route was
+    # configured. The provider adapter builds the matching wire shape.
+    parsed_endpoint = urlsplit(openai_endpoint)
+    if parsed_endpoint.path.rstrip("/").lower().endswith("/v1"):
+        route = ("/responses" if parsed_endpoint.hostname == "api.openai.com"
+                 else "/chat/completions")
+        openai_endpoint = urlunsplit((
+            parsed_endpoint.scheme, parsed_endpoint.netloc,
+            parsed_endpoint.path.rstrip("/") + route,
+            parsed_endpoint.query, parsed_endpoint.fragment,
+        ))
+
+    reasoning_effort = pick_alias(
+        "brain_reasoning_effort", ("BRAIN_REASONING_EFFORT",),
+        brain.get("reasoning_effort"), "",
+    ).lower()
+    if cli.get("brain_reasoning_effort") is not None and str(cli["brain_reasoning_effort"]).strip():
+        reasoning_effort = str(cli["brain_reasoning_effort"]).strip().lower()
+        sources["brain_reasoning_effort"] = "command_line"
+    if reasoning_effort not in {"", "none", "minimal", "low", "medium", "high", "xhigh", "max"}:
+        reasoning_effort = ""
+        sources["brain_reasoning_effort"] = "default"
+
+    # The Codex gateway must not receive a generic BRAIN_API_KEY that may be
+    # scoped to another provider. It uses its own credential alias instead.
+    host = (urlsplit(openai_endpoint).hostname or "").lower()
+    brain_key_aliases = (("CODEX_API_KEY", "OPENAI_API_KEY")
+                         if host == "codex.hiyo.top" or host.endswith(".codex.hiyo.top")
+                         else ("BRAIN_API_KEY", "OPENAI_API_KEY"))
+    brain_api_key = ""
+    brain_key_source = "default"
+    for source, values in (("process_environment", env), ("dotenv", dot)):
+        for key_name in brain_key_aliases:
+            value = values.get(key_name)
+            if value is not None and str(value).strip():
+                brain_api_key = str(value).strip()
+                brain_key_source = source
+                break
+        if brain_api_key:
+            break
 
     def number(name: str, env_name: str, file_value, default: int,
                minimum: int, maximum: int) -> int:
@@ -276,6 +300,7 @@ def resolve_runtime_config(root: str | Path, *, cli: Mapping[str, str | None] | 
         "brain_backend": brain_backend,
         "openai_model": openai_model,
         "openai_endpoint": openai_endpoint,
+        "brain_reasoning_effort": reasoning_effort,
         "brain_api_key": brain_api_key,
         "brain_key_source": brain_key_source,
         "jev_api_key": jev_api_key,

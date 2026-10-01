@@ -277,6 +277,64 @@ def test_strategic_http_error_does_not_expose_key():
     assert result.error == "HTTP 401 from strategic provider"
 
 
+def test_strategic_http_error_keeps_only_safe_code_and_param():
+    from spirebrain.brain.gpt_client import OpenAIStrategicClient
+
+    def opener(request, timeout):
+        body = json.dumps({
+            "error": {
+                "code": "invalid_request_error",
+                "param": "input",
+                "message": "Authorization: Bearer secret-token",
+            }
+        }).encode("utf-8")
+        raise urllib.error.HTTPError(request.full_url, 400, "bad request", {}, io.BytesIO(body))
+
+    result = OpenAIStrategicClient(api_key="not-for-log", opener=opener).plan(
+        {"state_id": "s", "run_id": "r"})
+    assert result.fallback
+    assert result.http_status == 400
+    assert result.http_error_code == "invalid_request_error"
+    assert result.http_error_param == "input"
+    assert "invalid_request_error" in result.error
+    assert "secret-token" not in result.error
+    assert "Authorization" not in result.error
+
+
+def test_strategic_http_error_rejects_unbounded_or_injection_like_details():
+    from spirebrain.brain.gpt_client import OpenAIStrategicClient
+
+    def opener(request, timeout):
+        body = json.dumps({
+            "error": {
+                "code": "bad code; Authorization: Bearer secret-token",
+                "param": "x" * 129,
+            }
+        }).encode("utf-8")
+        raise urllib.error.HTTPError(request.full_url, 400, "bad request", {}, io.BytesIO(body))
+
+    result = OpenAIStrategicClient(api_key="not-for-log", opener=opener).plan(
+        {"state_id": "s", "run_id": "r"})
+    assert result.http_error_code is None
+    assert result.http_error_param is None
+    assert result.error == "HTTP 400 from strategic provider"
+
+
+def test_http_error_details_are_accepted_by_provider_event_contract():
+    from spirebrain.analysis.event_contract import make_event, validate_event
+
+    event = make_event("provider_response", fields={
+        "run_id": "run", "run_epoch": 1, "decision_id": "decision",
+        "state_id": "state", "request_id": "request",
+        "logical_request_id": "logical", "attempt_id": "attempt",
+        "provider": "hiyo-codex", "latency_ms": 12,
+        "error_kind": "http", "fallback": True,
+        "http_status": 400, "http_error_code": "invalid_request_error",
+        "http_error_param": "input",
+    })
+    assert validate_event(event, strict=True) == []
+
+
 def test_jev_auth_failure_is_fast_and_does_not_retry():
     class Fake(OfficialJevClient):
         def __init__(self):

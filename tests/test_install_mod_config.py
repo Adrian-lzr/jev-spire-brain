@@ -198,6 +198,19 @@ def test_cli_flags_build_the_command_it_documents():
     assert "--ascension 3" in out
 
 
+def test_brain_reasoning_effort_is_written_to_launch_command():
+    command = default_command(
+        "mock", mode="advise", brain_backend="hiyo-codex",
+        brain_model="gpt-6-sol",
+        brain_endpoint="https://codex.hiyo.top/v1/responses",
+        brain_reasoning_effort="max",
+    )
+    assert "--brain-backend hiyo-codex" in command
+    assert "--brain-model gpt-6-sol" in command
+    assert "--brain-endpoint https://codex.hiyo.top/v1/responses" in command
+    assert "--brain-reasoning-effort max" in command
+
+
 def _isolated_localappdata(tmp: str):
     """Context manager: point LOCALAPPDATA at a temp dir, restore it after.
 

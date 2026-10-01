@@ -118,6 +118,41 @@ def test_agent_resolves_dotenv_key_before_constructing_strategic_client(
     assert captured["api_key"] == key
 
 
+def test_agent_passes_reasoning_effort_to_strategic_provider(tmp_path: Path, monkeypatch):
+    from spirebrain.driver import agent as agent_module
+
+    (tmp_path / ".env").write_text(
+        "BRAIN_REASONING_EFFORT=max\n", encoding="utf-8")
+    strategy_path = tmp_path / "strategy.json"
+    strategy_path.write_text(json.dumps({
+        "brain": {"backend": "openai", "model": "gpt-6-sol"},
+        "jev": {"backend": "mock"},
+    }), encoding="utf-8")
+    captured = {}
+
+    class Provider:
+        backend_name = "openai"
+        async_required = False
+        event_sink = None
+
+        def plan(self, payload):
+            raise AssertionError("provider should not be called during construction")
+
+    def fake_factory(backend, **kwargs):
+        captured.update(backend=backend, **kwargs)
+        return Provider()
+
+    monkeypatch.setattr(agent_module, "ROOT", tmp_path)
+    monkeypatch.setattr("spirebrain.brain.orchestrator.get_strategic_brain", fake_factory)
+    agent_module.SpireBrainAgent(
+        strategy_path=strategy_path,
+        jev_backend="mock",
+        brain_backend="openai",
+        log_dir=tmp_path / "logs",
+    )
+    assert captured["reasoning_effort"] == "max"
+
+
 def test_dotenv_brain_key_reaches_fake_http_provider_without_real_network(tmp_path: Path):
     """The resolved credential is usable by the actual OpenAI-compatible client."""
     from spirebrain.brain.gpt_client import get_strategic_brain
@@ -133,8 +168,9 @@ def test_dotenv_brain_key_reaches_fake_http_provider_without_real_network(tmp_pa
     seen = {}
 
     class Response:
-        def read(self):
-            return json.dumps(_brain_response()).encode("utf-8")
+        def read(self, size=-1):
+            data = json.dumps(_brain_response()).encode("utf-8")
+            return data if size < 0 else data[:size]
 
         def __enter__(self):
             return self

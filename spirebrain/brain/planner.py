@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from typing import Any
@@ -64,7 +65,8 @@ class StrategicPlanner:
               previous: StrategicPlan | None = None,
               generation: int = 0,
               budget: DecisionBudget | None = None,
-              decision_id: str = "") -> BrainResponse:
+              decision_id: str = "",
+              internal_timing: dict | None = None) -> BrainResponse:
         state_id = stable_state_id(game)
         run_id = memory.run_id if memory else "local"
         # Memory is observed and committed by the owning game loop.  A planner
@@ -72,6 +74,16 @@ class StrategicPlanner:
         # immutable snapshot used by a worker, but it must never mutate either
         # while building a provider request.
         selected_strategy = strategy_context(game)
+        strategy_fingerprint = hashlib.sha256(json.dumps(
+            selected_strategy, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"), default=str).encode("utf-8")).hexdigest()[:16]
+        scope_value = "|".join((
+            str(game.get("character", game.get("character_class", "")) or ""),
+            str(int(game.get("act", 0) or 0)),
+            str(int(game.get("floor", game.get("floor_num", 0)) or 0)),
+            str(game.get("screen_type", "") or "").upper(),
+        ))
+        strategic_scope_id = hashlib.sha256(scope_value.encode("utf-8")).hexdigest()[:16]
         knowledge_game = dict(game) if isinstance(game, dict) else {}
         knowledge_game["strategy_context"] = selected_strategy
         knowledge_context = (
@@ -106,6 +118,8 @@ class StrategicPlanner:
             "candidates": [candidate.model_dict() for candidate in candidates if candidate.legal],
             "previous_plan": previous.model_dict() if previous else None,
             "generated_at": time.time(),
+            "strategy_fingerprint": strategy_fingerprint,
+            "strategic_scope_id": strategic_scope_id,
         }
         # Enforce the shared decision budget at the planner boundary as well
         # as inside HTTP adapters.  Scripted and local providers may not call
@@ -127,20 +141,29 @@ class StrategicPlanner:
                     fallback=True,
                 )
         try:
+            timing = dict(internal_timing or {})
+            worker_started = timing.get("worker_started_monotonic")
+            if isinstance(worker_started, (int, float)):
+                timing["pre_provider_ms"] = max(
+                    0, int((time.monotonic() - float(worker_started)) * 1000))
+            payload["_internal_timing"] = timing
             with use_budget(budget):
                 result = self.provider.plan(payload)
         except Exception as exc:  # provider failures are a side-channel fallback
             return BrainResponse(backend=getattr(self.provider, "backend_name", "unknown"),
-                                 error=f"战略大脑异常：{type(exc).__name__}: {exc}", fallback=True)
+                                 error=f"战略大脑异常：{type(exc).__name__}: {exc}",
+                                 error_kind="provider_exception", fallback=True)
         if not isinstance(result, BrainResponse):
             return BrainResponse(backend=getattr(self.provider, "backend_name", "unknown"),
-                                 error="战略大脑返回了无效响应", fallback=True)
+                                 error="战略大脑返回了无效响应",
+                                 error_kind="parse_or_validation", fallback=True)
         if result.plan is not None:
             if result.plan.state_id != state_id or result.plan.run_id != run_id:
                 return BrainResponse(
                     backend=result.backend, model=result.model,
                     latency_ms=result.latency_ms, request_id=result.request_id,
-                    usage=result.usage, error="战略计划与当前状态不匹配", fallback=True,
+                    usage=result.usage, error="战略计划与当前状态不匹配",
+                    error_kind="plan_validation", fallback=True,
                 )
             legal_ids = {candidate.candidate_id for candidate in candidates if candidate.legal}
             referenced = (set(result.plan.preferred_candidates)
@@ -152,7 +175,7 @@ class StrategicPlanner:
                     latency_ms=result.latency_ms, request_id=result.request_id,
                     usage=result.usage,
                     error=f"战略计划引用了当前不存在的候选：{', '.join(unknown[:5])}",
-                    fallback=True,
+                    error_kind="plan_validation", fallback=True,
                 )
             result.plan.bind_candidates(candidates)
         return result

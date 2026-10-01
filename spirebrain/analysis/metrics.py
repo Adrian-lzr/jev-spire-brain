@@ -35,6 +35,121 @@ def _provider_attempt_key(record: dict, index: int) -> tuple:
     )
 
 
+def _review_request_key(record: dict, index: int) -> tuple:
+    """Identify one post-run review without merging run epochs."""
+    request_id = str(record.get("request_id") or "")
+    if not request_id:
+        return ("anonymous", index)
+    return (
+        str(record.get("run_id") or ""),
+        str(record.get("run_epoch") or ""),
+        request_id,
+    )
+
+
+def _review_metrics(records: list[dict]) -> dict:
+    """Summarize bounded post-run review evidence.
+
+    Review start/completion rows are one logical request.  Grouping by the
+    correlation identity prevents duplicate trace rows from inflating request,
+    attempt or latency counts.  Missing completion and latency evidence stays
+    visible as ``incomplete``/``None`` instead of being inferred as success.
+    """
+    review_events = [record for record in records
+                     if record.get("event_type") in
+                     {"review_started", "review_completed"}]
+    groups: dict[tuple, list[dict]] = {}
+    for index, record in enumerate(review_events):
+        groups.setdefault(_review_request_key(record, index), []).append(record)
+
+    identified = {key for key in groups if key[0] != "anonymous" and key[-1]}
+    anonymous_count = sum(1 for key in groups if key[0] == "anonymous")
+    completed_count = 0
+    failed_count = 0
+    incomplete_count = 0
+    attempt_values: list[int] = []
+    latencies: list[float] = []
+    failure_reasons: Counter[str] = Counter()
+
+    for key, rows in groups.items():
+        completions = [row for row in rows
+                       if row.get("event_type") == "review_completed"]
+        canonical = completions[-1] if completions else rows[-1]
+        if not completions:
+            incomplete_count += 1
+
+        valid_attempts = [int(row.get("attempt_count")) for row in rows
+                          if isinstance(row.get("attempt_count"), int)
+                          and not isinstance(row.get("attempt_count"), bool)
+                          and row.get("attempt_count") >= 0]
+        if valid_attempts:
+            attempt_values.append(max(valid_attempts))
+
+        latency = canonical.get("latency_ms")
+        if (canonical.get("event_type") == "review_completed"
+                and isinstance(latency, (int, float))
+                and not isinstance(latency, bool) and latency >= 0):
+            latencies.append(float(latency))
+
+        status = str(canonical.get("status") or "").strip().lower()
+        if status == "completed":
+            completed_count += 1
+        elif status == "failed":
+            failed_count += 1
+            failure_reasons[redact_text(canonical.get("error_kind") or "unknown")] += 1
+
+    observed_count = len(groups)
+    return {
+        "request_count": len(identified),
+        "unique_request_count": len(identified),
+        "completed_count": completed_count,
+        "failed_count": failed_count,
+        "incomplete_count": incomplete_count,
+        "unattributed_event_count": anonymous_count,
+        "attempt_count": sum(attempt_values) if attempt_values else None,
+        "attempt_samples": len(attempt_values),
+        "failure_reasons": dict(failure_reasons),
+        "latency_ms": {
+            "p50": _percentile(latencies, 0.50),
+            "p95": _percentile(latencies, 0.95),
+            "samples": len(latencies),
+        },
+        "sample_count": observed_count,
+        "status": "unknown" if not review_events else (
+            "complete" if not incomplete_count else "incomplete"),
+    }
+
+
+def _stage_latencies(records: list[dict]) -> dict[str, list[float]]:
+    owners = {
+        "queue_wait": ("provider_request", "queue_wait_ms"),
+        "pre_provider": ("provider_request", "pre_provider_ms"),
+        "http": ("provider_response", "http_latency_ms"),
+        "parse": ("provider_response", "parse_latency_ms"),
+        "worker": ("provider_response", "worker_elapsed_ms"),
+        "commit": ("strategic_plan_commit", "commit_latency_ms"),
+    }
+    collected: dict[str, list[float]] = {}
+    for metric, (event_type, field) in owners.items():
+        unique: dict[tuple, float] = {}
+        for index, record in enumerate(records):
+            if record.get("event_type") != event_type:
+                continue
+            value = record.get(field)
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
+                continue
+            if event_type.startswith("provider_"):
+                key = _provider_attempt_key(record, index)
+            else:
+                key = (str(record.get("run_id") or ""),
+                       str(record.get("decision_id") or ""),
+                       str(record.get("request_id") or ""),
+                       str(record.get("result_disposition") or ""))
+            unique[key] = float(value)
+        collected[metric] = list(unique.values())
+    return collected
+
+
 def load_records(path: str | Path) -> list[dict]:
     records = []
     target = Path(path)
@@ -157,14 +272,27 @@ def summarize(records: list[dict], *, source: str = "") -> dict:
     expired_events = [r for r in records if r.get("event_type") == "expired_result"]
     skipped_events = [r for r in records if r.get("event_type") == "decision_skipped"]
     unattributed_events = [r for r in records
-                           if r.get("event_type") in {
-                               "state_observed", "provider_request", "provider_response",
-                               "decision", "advice", "outcome", "expired_result",
-                               "decision_skipped",
-                           } and not r.get("decision_id")]
+                           if (
+                               r.get("event_type") in {
+                                   "state_observed", "provider_request", "provider_response",
+                                   "decision", "advice", "outcome", "expired_result",
+                                   "decision_skipped",
+                               } and not r.get("decision_id")
+                           ) or (
+                               r.get("event_type") in {"review_started", "review_completed"}
+                               and not r.get("request_id")
+                           )]
     chains = {str(r.get("decision_id")): decision_chain(records, str(r.get("decision_id")))
               for r in records if r.get("decision_id")}
     expired_decisions = sum(1 for chain in chains.values() if chain["expired"])
+    stage_latencies = _stage_latencies(records)
+    postmortem = _review_metrics(records)
+    dispositions = Counter(
+        redact_text(str(record.get("result_disposition")))
+        for record in records
+        if record.get("event_type") == "strategic_plan_commit"
+        and record.get("result_disposition")
+    )
     return {
         "sample_size": len(records),
         "advice_count": len(advice_events),
@@ -191,6 +319,24 @@ def summarize(records: list[dict], *, source: str = "") -> dict:
             "publish_p50": _percentile(publish_latency, 0.50),
             "publish_p95": _percentile(publish_latency, 0.95),
             "publish_samples": len(publish_latency),
+            "queue_wait_p50": _percentile(stage_latencies["queue_wait"], 0.50),
+            "queue_wait_p95": _percentile(stage_latencies["queue_wait"], 0.95),
+            "queue_wait_samples": len(stage_latencies["queue_wait"]),
+            "pre_provider_p50": _percentile(stage_latencies["pre_provider"], 0.50),
+            "pre_provider_p95": _percentile(stage_latencies["pre_provider"], 0.95),
+            "pre_provider_samples": len(stage_latencies["pre_provider"]),
+            "http_p50": _percentile(stage_latencies["http"], 0.50),
+            "http_p95": _percentile(stage_latencies["http"], 0.95),
+            "http_samples": len(stage_latencies["http"]),
+            "parse_p50": _percentile(stage_latencies["parse"], 0.50),
+            "parse_p95": _percentile(stage_latencies["parse"], 0.95),
+            "parse_samples": len(stage_latencies["parse"]),
+            "worker_p50": _percentile(stage_latencies["worker"], 0.50),
+            "worker_p95": _percentile(stage_latencies["worker"], 0.95),
+            "worker_samples": len(stage_latencies["worker"]),
+            "commit_p50": _percentile(stage_latencies["commit"], 0.50),
+            "commit_p95": _percentile(stage_latencies["commit"], 0.95),
+            "commit_samples": len(stage_latencies["commit"]),
             "legacy_unclassified_p50": _percentile(legacy_latency, 0.50),
             "legacy_unclassified_p95": _percentile(legacy_latency, 0.95),
             "legacy_unclassified_samples": len(legacy_latency),
@@ -199,6 +345,8 @@ def summarize(records: list[dict], *, source: str = "") -> dict:
         # ``provider_request`` is the canonical decision-trace event.  The
         # older provider/brain_call names remain accepted for replayed logs.
         "provider_calls": len(provider_attempts),
+        "strategic_result_dispositions": dict(dispositions),
+        "postmortem": postmortem,
         "provider_duplicate_event_count": max(
             0, sum(max(0, count - 1) for count in provider_event_counts.values())),
         "fallback_rate": (sum(1 for r in fallback_events if r.get("fallback")) /

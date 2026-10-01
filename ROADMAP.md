@@ -377,3 +377,24 @@ verification report is in
 This is not a claim that the entire plan is complete: Linux runtime evidence,
 real Java/game integration, live providers, expert labels and paired outcomes
 remain explicitly unverified.
+
+## Phase-scoped strategic review (2026-09-30)
+
+- [x] Live `stdio` supports `--jev-only`: JEV and local rules remain active,
+  strategic provider calls are disabled, and the mode is visible in startup logs.
+- [x] Real-game smoke launches with a live JEV backend requirement and rejects
+  offline mock/LLM substitutes; unfinished strategic requests are release failures.
+- [x] Trace events distinguish `real_game` from `synthetic` and require a matching
+  `run_started`/`run_ended` lifecycle before a run can feed postmortem review.
+- [x] One explicit, bounded post-run strategic request can create
+  `pending_review` experience proposals; no model output is automatically enabled.
+- [x] Human approval and local fixed-response fixture execution with recomputed
+  SHA-256 identity are required before activation; supplied report counters are not trusted.
+- [x] Active experiences reach JEV only as redacted, bounded soft context; they do
+  not change candidates, legality, commands or hard rules, and can be revoked.
+- [ ] Collect real `advise` runs with the installed game and JEV, then review each
+  run manually before proposing experiences.
+- [ ] Build and run fixed-response replay fixtures from those real runs; do not
+  promote a heuristic from synthetic evidence or claim win-rate improvement.
+- [ ] Compare JEV-only gameplay with any online-strategy control only after paired
+  seeds and sufficient real outcomes exist; report unknown when labels are absent.

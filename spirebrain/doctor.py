@@ -241,6 +241,29 @@ def check_workshop(rep: Report, appid: str = "646570",
     return found_dir
 
 
+def check_modthespire_metadata(rep: Report, workshop_content: Path | None) -> None:
+    """Distinguish a loader-package manifest warning from this mod's manifest."""
+    if workshop_content is None:
+        return
+    jar = workshop_content / "1605060445" / "ModTheSpire.jar"
+    if not jar.is_file():
+        return
+    try:
+        import zipfile
+
+        with zipfile.ZipFile(jar) as archive:
+            manifest = json.loads(archive.read("ModTheSpire.json").decode("utf-8"))
+        version = manifest.get("version") if isinstance(manifest, dict) else None
+    except (OSError, KeyError, ValueError, zipfile.BadZipFile):
+        version = None
+    if not isinstance(version, str) or not version.strip():
+        rep.add(WARN, "ModTheSpire package metadata",
+                "the Workshop loader jar has no readable version field; this may be an upstream loader-enumeration warning",
+                "do not patch the loader jar; update/verify Workshop item 1605060445 and check the ModTheSpire launch log if the dialog persists")
+    else:
+        rep.add(PASS, "ModTheSpire package metadata", f"version {version.strip()}")
+
+
 def find_communicationmod(mods_jars: list[Path],
                           environment: EnvironmentAdapter | Mapping[str, str] | None = None) -> list[Path]:
     """Every CommunicationMod jar we can find, best candidate first.
@@ -599,6 +622,7 @@ def check_brain_config(rep: Report) -> None:
         "openai", "gpt", "deepseek", "qwen", "tongyi", "zhipu", "glm",
         "moonshot", "kimi", "siliconflow", "doubao", "openai-compatible",
         "openai_compatible", "compatible", "local", "vllm", "ollama",
+        "hiyo-codex",
     }:
         # Use the same resolver as the game-launched Agent.  The old check
         # parsed `.env` independently and missed valid `export KEY=...` lines,
@@ -635,6 +659,7 @@ def probe_strategic_provider(runtime, provider_factory=None) -> dict:
         api_key=runtime.brain_api_key,
         model=runtime.openai_model,
         endpoint=runtime.openai_endpoint,
+        reasoning_effort=getattr(runtime, "brain_reasoning_effort", ""),
         timeout_ms=runtime.timeout_ms,
         max_output_tokens=runtime.max_output_tokens,
         max_calls=1,
@@ -665,13 +690,21 @@ def probe_strategic_provider(runtime, provider_factory=None) -> dict:
         }],
     }
     response = client.plan(payload)
-    return {
+    result = {
         "ok": bool(response.plan is not None and not response.fallback),
         "backend": str(response.backend or backend),
         "model": str(response.model or runtime.openai_model),
         "latency_ms": response.latency_ms,
         "error_kind": str(response.error_kind or "") if response.fallback else "",
     }
+    http_status = getattr(response, "http_status", None)
+    if http_status is not None:
+        result["http_status"] = int(http_status)
+    for field in ("http_error_code", "http_error_param"):
+        value = getattr(response, field, None)
+        if isinstance(value, str) and value:
+            result[field] = value
+    return result
 
 
 def check_backend(rep: Report, live: bool) -> None:
@@ -734,6 +767,7 @@ def main(argv: list[str]) -> int:
     # reported as a missing mandatory download.
     jars = find_communicationmod(mods_jars, environment)
     content = check_workshop(rep, local_jar=bool(jars), environment=environment)
+    check_modthespire_metadata(rep, content)
     have_cm = check_communicationmod(rep, jars)
     check_single_communicationmod(rep, game, mods_jars, environment)
     check_overlay_jar(rep, game)
@@ -759,7 +793,10 @@ def main(argv: list[str]) -> int:
                     rep.add(FAIL, "Live strategic probe",
                             f"backend={result['backend']} model={result['model']} "
                             f"latency={result['latency_ms']} ms error_kind="
-                            f"{result['error_kind'] or 'unknown'}",
+                            f"{result['error_kind'] or 'unknown'} http_status="
+                            f"{result.get('http_status') or 'unknown'} "
+                            f"http_error_code={result.get('http_error_code') or 'unknown'} "
+                            f"http_error_param={result.get('http_error_param') or 'unknown'}",
                             "check effective endpoint, model access, quota and provider status")
             except Exception as exc:  # noqa: BLE001 - diagnostics must not leak details
                 rep.add(FAIL, "Live strategic probe",

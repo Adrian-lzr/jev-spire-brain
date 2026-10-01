@@ -98,7 +98,14 @@ All seven are implemented in `spirebrain/jev_brain/decisions.py` and covered by 
 - **Boss relics** — `Score` × 3; the pick is mandatory, so an unsure pick is flagged rather than skipped (`BossRelicJudge`)
 - **Combat risk** — `Noul` (will predicted damage exceed the HP budget?) →tactical posture (`CombatRiskGate`)
 
-GPT is called at strategic boundaries (new run/act, map, rewards, shop, combat start and major resource changes). Ordinary combat steps do not call GPT again: local combat rules enumerate the next legal card, target, potion or end-turn action, and JEV can rank only that bounded set. No model can emit a raw CommunicationMod command.
+In the optional `--strategic-online` mode, GPT is called only at strategic
+boundaries (new run/act, map, rewards, shop, combat start and major resource
+changes). The default real-game path is `--jev-only`: gameplay makes zero
+strategic-model requests, records the run, and uses the strategic model only
+when the player explicitly runs the post-run review command. Ordinary combat
+steps never call GPT again: local combat rules enumerate the next legal card,
+target, potion or end-turn action, and JEV can rank only that bounded set. No
+model can emit a raw CommunicationMod command.
 
 ## Two conventions that shape every decision module
 
@@ -335,6 +342,44 @@ python tools/verify_offline.py           # tests + compile + contracts + metrics
 python tools/auto_smoke.py                # bounded launcher + dashboard smoke (mock, no game/API)
 python tools/real_game_smoke.py --allow-real-game --duration 30  # opt-in game smoke; backs up/restores saves
 ```
+
+### 实机推荐：JEV-only，局后再用战略模型
+
+实时游玩不需要让战略模型参与每个轮询。使用 `--jev-only` 启动时，游戏期间只保留
+规则、合法候选和 JEV 局部判断，战略模型请求数为零；`advise` 仍只会向游戏发送
+`wait/state`。结束一局后，使用轨迹中的 `run_id` 和 `run_epoch` 做一次显式复盘：
+
+```bash
+python start.py --jev-only --advise --setup
+python -m spirebrain.analysis.postmortem --input logs/decision_trace.jsonl \
+  --run-id <run_id> --run-epoch <run_epoch>
+python -m spirebrain.analysis.postmortem --input logs/decision_trace.jsonl \
+  --run-id <run_id> --run-epoch <run_epoch> --propose-experiences \
+  --ledger logs/strategy_experiences.jsonl
+```
+
+局后模型输出先进入 `pending_review`，不会自动改变 JEV。人工批准后，审核入口会从
+指定 fixture 文件重新计算 SHA-256，并在本地执行固定响应解析/计划校验；报告中的
+通过标记和计数不会被信任。该检查不调用模型或网络，也不代表真实游戏质量验证。只有
+回放通过后才能激活：
+
+```bash
+python -m spirebrain.analysis.experience --ledger logs/strategy_experiences.jsonl --list
+python -m spirebrain.analysis.experience --ledger logs/strategy_experiences.jsonl --approve <proposal_id>
+python -m spirebrain.analysis.experience --ledger logs/strategy_experiences.jsonl \
+  --replay-report replay-report.json --proposal-id <proposal_id>
+python -m spirebrain.analysis.experience --ledger logs/strategy_experiences.jsonl --activate <proposal_id>
+```
+
+`replay-report.json` 至少要指向本地 `fixture_path` 并包含该文件的
+`sha256:<64 hex>`；审核命令会重新读取并执行 `synthetic`/
+`fixed_provider_responses` fixture，忽略调用方伪造的通过计数。缺少文件、哈希不匹配、
+响应无效或提案未被 fixture 声明时不会进入 `replay_passed`。
+
+激活内容只作为脱敏、限长的软偏好提示，不能生成命令、放宽合法性
+或替代当前状态事实。`real_game`、`synthetic` 和未验证轨迹分开处理，合成回放不会
+生成可晋升的经验；中途退出或没有 `victory/death/game_over` 终局标签的记录只能保持
+`unknown`。
 
 指标输入缺失时命令会以非零状态退出；合成 fixture 只用于验证管道和字段契约，
 不代表真实游戏胜率。

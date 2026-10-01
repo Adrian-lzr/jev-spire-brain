@@ -29,6 +29,20 @@ def test_runtime_config_priority_and_public_fingerprint(tmp_path: Path):
     assert "api_key" not in json.dumps(public).lower()
 
 
+def test_dashboard_brain_probe_uses_agent_secret_source_precedence(tmp_path, monkeypatch):
+    from spirebrain.overlay.config import get_secret
+
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("BRAIN_API_KEY=dotenv-canonical\n", encoding="utf-8")
+    monkeypatch.delenv("BRAIN_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "process-legacy")
+
+    assert get_secret(dotenv, "brain_api_key") == resolve_runtime_config(
+        tmp_path, dotenv={"BRAIN_API_KEY": "dotenv-canonical",
+                          "OPENAI_API_KEY": "process-legacy"},
+    ).brain_api_key == "process-legacy"
+
+
 def test_runtime_config_reads_strategy_and_dotenv(tmp_path: Path):
     (tmp_path / ".env").write_text("JEV_BACKEND=openrouter\n", encoding="utf-8")
     config = resolve_runtime_config(
@@ -174,6 +188,82 @@ def test_compatible_base_endpoint_gets_chat_route_and_jev_endpoint_is_effective(
     assert config.jev_endpoint == "https://openrouter.test"
 
 
+def test_official_openai_base_endpoint_gets_responses_route(tmp_path: Path):
+    config = resolve_runtime_config(
+        tmp_path,
+        environ={"OPENAI_BRAIN_ENDPOINT": "https://api.openai.com/v1"},
+        strategy={"brain": {}, "jev": {"backend": "mock"}},
+    )
+    assert config.openai_endpoint == "https://api.openai.com/v1/responses"
+
+
+def test_runtime_config_resolves_reasoning_effort_and_keeps_it_public(tmp_path: Path):
+    config = resolve_runtime_config(
+        tmp_path,
+        environ={},
+        dotenv={"BRAIN_REASONING_EFFORT": "max"},
+        strategy={"brain": {}, "jev": {"backend": "mock"}},
+    )
+    assert config.brain_reasoning_effort == "max"
+    assert config.sources["brain_reasoning_effort"] == "dotenv"
+    assert config.public_dict()["brain_reasoning_effort"] == "max"
+
+
+def test_cli_reasoning_effort_overrides_stale_dotenv(tmp_path: Path):
+    config = resolve_runtime_config(
+        tmp_path,
+        cli={"brain_reasoning_effort": "max"},
+        environ={},
+        dotenv={"BRAIN_REASONING_EFFORT": "low"},
+    )
+    assert config.brain_reasoning_effort == "max"
+    assert config.sources["brain_reasoning_effort"] == "command_line"
+
+
+def test_hiyo_codex_preset_uses_gpt6sol_responses_route_and_scoped_key(tmp_path: Path):
+    config = resolve_runtime_config(
+        tmp_path,
+        environ={},
+        dotenv={
+            "BRAIN_BACKEND": "hiyo-codex",
+            "BRAIN_REASONING_EFFORT": "max",
+            "BRAIN_API_KEY": "unrelated-provider-key",
+            "CODEX_API_KEY": "codex-gateway-key",
+        },
+        strategy={"brain": {}, "jev": {"backend": "mock"}},
+    )
+    assert config.openai_model == "gpt-6-sol"
+    assert config.openai_endpoint == "https://codex.hiyo.top/v1/responses"
+    assert config.brain_reasoning_effort == "max"
+    assert config.brain_api_key == "codex-gateway-key"
+    assert "codex-gateway-key" not in json.dumps(config.public_dict())
+
+
+def test_hiyo_codex_never_falls_back_to_generic_brain_key(tmp_path: Path):
+    config = resolve_runtime_config(
+        tmp_path,
+        environ={},
+        dotenv={
+            "BRAIN_BACKEND": "hiyo-codex",
+            "BRAIN_API_KEY": "unrelated-provider-key",
+        },
+        strategy={"brain": {}, "jev": {"backend": "mock"}},
+    )
+    assert config.brain_api_key == ""
+    assert config.brain_key_source == "default"
+
+
+def test_invalid_reasoning_effort_falls_back_without_changing_model(tmp_path: Path):
+    config = resolve_runtime_config(
+        tmp_path,
+        environ={"BRAIN_REASONING_EFFORT": "unsafe-value"},
+        strategy={"brain": {"model": "gpt-6-sol"}, "jev": {"backend": "mock"}},
+    )
+    assert config.openai_model == "gpt-6-sol"
+    assert config.brain_reasoning_effort == ""
+    assert config.sources["brain_reasoning_effort"] == "default"
+
+
 def test_dashboard_public_config_distinguishes_saved_and_effective(tmp_path: Path):
     from spirebrain.overlay.config import get_public_config
     (tmp_path / ".env").write_text("BRAIN_BACKEND=mock\nJEV_BACKEND=mock\n", encoding="utf-8")
@@ -196,6 +286,40 @@ def test_dashboard_legacy_model_fields_update_canonical_brain_aliases(tmp_path: 
                   if "=" in line)
     assert values["BRAIN_MODEL"] == "deepseek-flash"
     assert values["BRAIN_ENDPOINT"].endswith("/chat/completions")
+
+
+def test_dashboard_saves_reasoning_effort_without_touching_secret(tmp_path: Path):
+    from spirebrain.overlay.config import save_config
+
+    path = tmp_path / ".env"
+    path.write_text("BRAIN_API_KEY=keep-this-private\n", encoding="utf-8")
+    public = save_config(path, {
+        "brain_backend": "openai-compatible",
+        "brain_model": "gpt-6-sol",
+        "brain_endpoint": "https://codex.hiyo.top/v1/chat/completions",
+        "brain_reasoning_effort": "max",
+    })
+    contents = path.read_text(encoding="utf-8")
+    assert "BRAIN_REASONING_EFFORT=max" in contents
+    assert "BRAIN_MODEL=gpt-6-sol" in contents
+    assert "BRAIN_API_KEY=keep-this-private" in contents
+    assert "keep-this-private" not in json.dumps(public)
+    assert public["effective"]["brain_reasoning_effort"] == "max"
+    assert public["effective"]["brain_key_available"] is False
+
+
+def test_dashboard_secret_lookup_uses_endpoint_scoped_codex_credential(tmp_path: Path):
+    from spirebrain.overlay.config import get_secret
+
+    path = tmp_path / ".env"
+    path.write_text(
+        "BRAIN_API_KEY=unrelated-provider-key\nCODEX_API_KEY=codex-gateway-key\n",
+        encoding="utf-8",
+    )
+    assert get_secret(path, "brain_api_key",
+                      endpoint="https://codex.hiyo.top/v1/responses") == "codex-gateway-key"
+    assert get_secret(path, "brain_api_key",
+                      endpoint="https://other.test/v1/responses") == "unrelated-provider-key"
 
 
 def test_launcher_setup_uses_saved_provider_when_form_omits_it(tmp_path: Path, monkeypatch):

@@ -1,6 +1,6 @@
 # Jev Spire Brain 架构说明
 
-本文描述当前仓库中的实际实现（2026-09-27），不是未来功能清单。项目的目标是为《杀戮尖塔》提供游戏内实时建议：玩家继续操作，agent 只在 `advise` 模式观察状态并给出当前一步建议。
+本文描述当前仓库中的实际实现（2026-09-30），不是未来功能清单。项目的目标是为《杀戮尖塔》提供游戏内实时建议：玩家继续操作，agent 只在 `advise` 模式观察状态并给出当前一步建议。
 
 ## 1. 运行链路
 
@@ -50,12 +50,72 @@ seed 或 `run_id` 也不会继承旧记忆。
 
 ## 3. GPT、JEV 与规则的职责
 
-GPT 是战略层：在新局、换幕、地图、奖励、商店、精英/Boss、构筑或资源发生重大变化时生成最多 2-5 步的短计划。普通战斗中的每张牌不重复请求 GPT，使用仍有效的计划和本地战术层。
+### 实机阶段模式：JEV-only + 局后战略复盘
+
+对于需要稳定实时响应的实机运行，推荐使用阶段化模式。启动命令加入
+`--jev-only` 后，live `stdio` 会把战略规划器设为 `planning_enabled=False`：
+游戏过程中只运行本地规则、合法候选和 JEV 局部判断，战略 provider 请求数必须为
+零；JEV 仍然可以在当前合法候选内工作。`advise` 仍是默认模式，发往游戏的命令
+仍严格限制为 `wait/state`。离线 replay 会显式标记为 `synthetic`，不会被当作实机局。
+
+```text
+实机状态 -> 规则/候选 -> JEV -> check_action -> 建议与 trace
+                                                |
+                                                v
+                                  run_ended 后显式局后复盘
+                                  -> pending experience
+                                  -> 人工审核
+                                  -> fixed-response replay
+                                  -> active soft preference
+```
+
+可以用下面的入口安装或预览该模式（只有显式 `--setup` 才会写入外部
+CommunicationMod 配置）：
+
+```text
+python start.py --jev-only --advise --no-browser
+python start.py --jev-only --advise --setup
+# optional hybrid mode; strategic requests run only at explicit phase checkpoints
+python start.py --strategic-online --advise --no-browser
+python start.py --strategic-online --advise --setup
+```
+
+实机运行结束后，先按 `run_id` 和 `run_epoch` 检查完整轨迹；只有同一代同时存在
+真实 `run_started`、带 `victory/death/game_over` 标签的 `run_ended`，复盘才会被标为
+`real_game` 并允许生成经验提案。仅退回菜单或中途退出的局仍可查看，但结果保持
+`unknown`，不能进入经验晋升：
+
+```text
+python -m spirebrain.analysis.postmortem --input logs/decision_trace.jsonl \
+  --run-id <run_id> --run-epoch <run_epoch>
+python -m spirebrain.analysis.postmortem --input logs/decision_trace.jsonl \
+  --run-id <run_id> --run-epoch <run_epoch> --propose-experiences \
+  --ledger logs/strategy_experiences.jsonl
+```
+
+`--propose-experiences` 是唯一的局后战略模型入口，一次复盘最多发起一次请求；
+没有完整实机生命周期、密钥或有效响应时会失败而不生成经验。提案默认是
+`pending_review`，必须经过人工批准、带 SHA-256 的固定响应回放且确认零非法动作、
+零候选集变化和零硬约束违规后才能 `active`。激活内容只作为脱敏、限长的 JEV
+软提示，绝不会改变候选集合、合法性或生成游戏命令；可随时撤回。
+
+在兼容的 hybrid 运行中，GPT 仍是阶段战略服务：在新局/换幕、路线与构筑选择、进入商店、战斗遭遇开始、敌群变化或 HP 进入危险区等战略检查点生成最多 2-5 步的短计划。同一楼层商店购买导致的金币/货架变化不会重复请求 GPT；当前策略继续指导余下选择，候选签名变化则使旧的具体商品偏好失效。战斗中的手牌、能量、目标或动画变化由本地战术层及时处理，不因 `expires_after` 的动作计数而再次请求 GPT。相同阶段的模型失败有界冷却，新的战略检查点仍可立即重试。实机阶段化模式通过 `--jev-only` 关闭这条在线路径，把同一战略 provider 的一次调用推迟到局后复盘。
+
+具体候选引用仍绑定生成计划时的实体签名；跨状态只允许保留能匹配当前候选签名的偏好，战略目标与资源约束可在同一幕内复用。`advise` 的异步动作若已过期会丢弃；同局同幕的战略计划可单独提交，并先按新状态重绑候选，因此慢模型不能发布旧动作，也不必把仍有用的战略目标一并丢掉。
+
+`advise` 的主循环是阶段服务的唯一 owner：它在状态轮询边界调用 `prepare_advice_strategy()`，由 `StrategicOrchestrator` 判断是否到达新战略检查点、排队请求并提交已完成的计划。后台建议 clone 收到冻结的 `PhaseStrategySnapshot`，其战略规划开关关闭，只能基于该快照运行规则、战斗战术和 JEV；它不会因为手牌/能量变化自行再发 GPT 请求。GPT 计划在仍适用的阶段返回后，owner 重新绑定当前合法候选，并让最新状态再计算一次建议；原建议动作仍按状态代际失效。计划尚未返回时，快速规则建议和战术 worker 不等待 GPT 网络请求。
 
 战略请求会附带一个本地、可复现的 `knowledge_context`。它来自
 `spirebrain/data/strategy_knowledge.jsonl` 的短篇来源引用断言，当前只覆盖铁甲战士；
 检索使用标准库 lexical TF-IDF-like 评分，不在游戏运行时联网。RAG 只能提供流派、路线和
-资源分配的软证据，不能提供卡牌数值、协议命令或候选 ID；本机游戏数据和硬规则优先级更高。
+资源分配的软证据及带来源的基础机制事实，不能提供卡牌具体伤害推算、协议命令或候选 ID；
+本机游戏数据和硬规则优先级更高。每条知识保留游戏范围、claim 类型、许可、适用条件、例外
+和内容哈希；Wiki 机制只作为需由本机版本继续校验的证据。
+
+战略 provider 按 endpoint 后缀使用对应协议：官方 `/v1/responses` 使用 Responses
+请求体，OpenAI-compatible `/chat/completions` 使用 Chat Completions。Dashboard 的测试按钮
+复用同一客户端并验证结构化战略计划；HTTP 200 但无效响应会显示失败。该探针会发送一次真实
+模型请求，可能计费，且只证明该配置能返回计划，不代表当前游戏阶段、Agent 截止时间或候选绑定均已验证。
 
 JEV 是战术层：只能在本地已确认合法、且符合战略约束的候选中选择或评分，返回候选 ID、置信度和短判断。JEV 不生成自由格式命令。
 
@@ -71,7 +131,19 @@ JEV 是战术层：只能在本地已确认合法、且符合战略约束的候�
 
 回放和单元测试可以衡量建议合法率、场景覆盖、采纳率、JEV/GPT fallback 率、不确定率和决策延迟，但这些指标不等于胜率。只有在相同难度和成对种子的真实对照实验中完成至少 100 对局并报告 95% 置信区间后，才能宣称胜率变化；在此之前只能报告建议质量指标。
 
-## 6. 当前已知边界与后续顺序
+## 6. 外部架构参考
+
+本节依据 2026-09-29 查阅的公开代码与 README，仅借鉴职责划分和评测方法，不把外部结果视为本项目验证。
+
+- [AttemorySystem/spire-agent](https://github.com/AttemorySystem/spire-agent/tree/8fcaa767479f62aa2528d2e9be260de97172c6b0)：其 `GameAgent` 只执行固定的状态→路由→决策→校验→执行事务；地图、构筑、战斗由分开的 agent/tool 负责，并记录可回放运行。借鉴宏观战略与本地专用战术分离、校验留在本地、慢任务的结果需可追踪。它包含独立的模拟器和 Mod 补丁，不适合直接移植到当前 CommunicationMod 助手。
+- [Jialeiv/sts-rl-agent](https://github.com/Jialeiv/sts-rl-agent/tree/039c199933b7d3a2e5d8fde51ae77a9175e1031f)：把非战斗构筑策略与模拟器 MCTS 战斗控制分开，并报告固定 50 个用于验证/评估的 A0 铁甲战士 seeds；该集合不是未触碰的最终测试集，作者也记录了多种战斗策略实验的负结果。借鉴“按决策时间尺度选策略”和固定输入比较，不移植其依赖 `sts_lightspeed` 的网络/MCTS，也不引用其指标作为本项目效果。
+- [AlayaLab/AgenticSTS](https://github.com/AlayaLab/AgenticSTS/tree/e93a7b166b0c4b8721bd802d1e9d6731eecbffcf)：README 的分层与路由说明（[L66-L76](https://github.com/AlayaLab/AgenticSTS/blob/e93a7b166b0c4b8721bd802d1e9d6731eecbffcf/README.md#L66-L76)）把触发式战略指南和高频战斗处理区分开；`v2_engine.py` 的 `_get_v2_tier()`（[L423-L470](https://github.com/AlayaLab/AgenticSTS/blob/e93a7b166b0c4b8721bd802d1e9d6731eecbffcf/AgenticSTS/src/brain/v2_engine.py#L423-L470)）按是否简单战斗或重规划选择模型层级。该项目面向《杀戮尖塔 2》，其 README 报告的每局调用量未经本项目独立复现；只借鉴显式触发与快慢层路由，不引入多级 provider、自动技能写入或外部游戏数据。
+
+因此，本项目保留现有 GPT/JEV/规则与 CombatTacticalEngine，只把 GPT 请求约束到战略检查点；当前游戏动作仍由场景候选、JEV/本地战术与 `check_action()` 处理。回归测试证明调用频率与过期结果的行为契约，不证明实际游戏胜率提升。
+
+这一划分适用于本项目的延迟约束：战略计划是有作用范围和失效条件的阶段服务，普通轮询与战斗出牌由本地快速层响应。异步计划尚未返回时，当前合法候选仍能产生规则建议；计划到达后只提交同一运行中仍适用的战略目标和可按签名重新绑定的偏好。这样降低逐动作网络调用的依赖，但不把慢模型响应误当成实时控制，也不保证其内容正确。
+
+## 7. 当前已知边界与后续顺序
 
 1. `stdio.py` 仍同时承担传输生命周期和部分兼容路由；后续可按行为边界拆出 transport/guards/modes，但必须保持现有协议和 `advise` 约束。
 2. Python、网页和 Java overlay 目前通过共享 JSON fixture 和静态消费者检查约束字段、空值、默认值与枚举；Java 游戏依赖缺失时仍不会伪造编译通过。
@@ -79,14 +151,14 @@ JEV 是战术层：只能在本地已确认合法、且符合战略约束的候�
 4. `deck_policy.synergy_weight` 已删除，因为仓库没有读取点；流派协同规则继续由 `spirebrain/cards/knowledge.py` 管理，避免保留失效配置。
 5. 战斗搜索已覆盖可见确定性卡牌×目标分支，但力量、虚弱、复杂 Power、随机效果和遗物链仍会降级；需要继续用固定回放集评估目标、商店预算和未知效果模型。
 
-## 7. 兼容契约
+## 8. 兼容契约
 
 - 默认模式是 `advise`，实际发送给游戏的命令严格限制为 `wait` 或 `state`。
 - 旧的 JEV-only 后端仍可通过 `brain.backend=jev` 或启动参数使用。
 - CommunicationMod 原始字典、stdio 命令协议和旧测试入口保持兼容。
 - 所有模型结果都必须匹配当前状态代际；过期异步结果直接丢弃。
 
-## 8. 离线回放与指标
+## 9. 离线回放与指标
 
 机器相关路径通过 `spirebrain.environment.EnvironmentAdapter` 注入。它承载
 `LOCALAPPDATA`/`APPDATA`、`STS_GAME_DIR` 和 Steam 根目录；生产调用默认读取
@@ -143,8 +215,9 @@ bind preferences to signatures at generation time; a changed hand, target or
 shop shelf therefore falls back to current legal candidates instead of reusing
 an index with a new meaning.
 
-Each decision has a shared `DecisionBudget` (default `decision_budget_ms=6000`,
-`max_model_calls=4`). GPT and JEV adapters reserve remaining time before
+Each decision has a shared `DecisionBudget` (tracked project config uses
+`decision_budget_ms=12000`, `max_model_calls=4`; environment overrides may
+lower it). GPT and JEV adapters reserve remaining time before
 network I/O, so a later tactical call cannot inherit an exhausted deadline.
 The real OpenRouter JEV client retains a 2500 ms provider-local ceiling and at
 most one retry. Authentication failures stop immediately. Timeout, HTTP,

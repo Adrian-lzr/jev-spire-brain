@@ -357,6 +357,12 @@ run has actually been captured. `provider_request` is the canonical model
 request event, while `provider` and `brain_call` are accepted for older logs.
 Decision events and provider requests have separate identities, so request
 counts must not be interpreted as player-decision counts.
+Post-run strategic review is reported separately under `postmortem`: review
+requests are deduplicated by `(run_id, run_epoch, request_id)`, with completed
+and failed counts, bounded attempt totals, failure reasons, and completion
+latency p50/p95. Missing completion or latency evidence remains
+`incomplete`, `unknown`, or `null`; it is never counted as a successful zero.
+These review requests are not mixed into real-time provider-call counts.
 New reports keep provider request latency, end-to-end decision/advice latency,
 first-advice latency, and local feed-publish latency in separate distributions.
 Legacy `latency_ms` values that cannot be classified are reported separately;
@@ -370,6 +376,29 @@ not counted as an execution `result`; only a `result_record` can contribute a
 real game outcome.
 
 Phase-5 comparison: `python -m spirebrain.analysis.evaluate --input tests/fixtures/replay/advisor_states.json` reports rules, JEV, strategic and full modes with separate correctness, experience, efficiency and decision-quality fields. Synthetic fixtures leave adoption and real outcomes unknown; they are not win-rate evidence.
+
+## Phase-scoped JEV-only evidence
+
+For a real-time run intended to measure JEV without online strategic latency, the
+live process must be launched with `--jev-only`. The trace must then show
+`run_started` and a terminal `run_ended` result (`victory`, `death` or
+`game_over`) with `source_type: real_game`, while strategic provider request
+count remains zero. A replay launched through `--replay` is
+tagged `source_type: synthetic` and cannot create post-run experience proposals.
+
+Review one isolated run with:
+
+```text
+python -m spirebrain.analysis.postmortem --input logs/decision_trace.jsonl \
+  --run-id <run_id> --run-epoch <run_epoch>
+```
+
+The optional `--propose-experiences` flag makes the only strategic model request
+in this workflow. Its bounded output is `pending_review`; it is not a gameplay
+decision and is not active until a human reviewer and a fixed-provider replay
+confirm the scoped soft preference. An active experience may be counted as JEV
+context coverage, but it must not be counted as a legality, adoption or win-rate
+improvement. If a run has no terminal result label, the result remains `unknown`.
 
 ## Strategy RAG evidence
 

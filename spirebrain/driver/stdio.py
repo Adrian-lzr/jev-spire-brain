@@ -620,7 +620,10 @@ class StdioTransport:
 def _build_agent(strategy_path: str | None, backend: str | None, acceptance: str | None,
                  dashboard_url: str | None = None, brain_backend: str | None = None,
                  brain_model: str | None = None, brain_endpoint: str | None = None,
-                 jev_endpoint: str | None = None):
+                 jev_endpoint: str | None = None,
+                 brain_reasoning_effort: str | None = None,
+                 strategy_planning_enabled: bool = True,
+                 trace_source_type: str = "unknown"):
     """Construct the router lazily so imports stay cheap for --replay.
 
     With `dashboard_url`, the agent gets a BridgeFeed: every decision is
@@ -639,7 +642,10 @@ def _build_agent(strategy_path: str | None, backend: str | None, acceptance: str
                            strategy_path=strategy_path, acceptance=acceptance,
                            feed=feed, brain_backend=brain_backend,
                            brain_model=brain_model, brain_endpoint=brain_endpoint,
-                           jev_endpoint=jev_endpoint)
+                           brain_reasoning_effort=brain_reasoning_effort,
+                           jev_endpoint=jev_endpoint,
+                           strategy_planning_enabled=strategy_planning_enabled,
+                           trace_source_type=trace_source_type)
 
 
 def replay(paths: list[Path], agent, *, log_path: str | Path | None = None,
@@ -686,7 +692,13 @@ def main(argv: list[str]) -> int:
     brain_backend = value("brain-backend")
     brain_model = value("brain-model")
     brain_endpoint = value("brain-endpoint")
+    brain_reasoning_effort = value("brain-reasoning-effort")
     jev_endpoint = value("jev-endpoint")
+    if "--jev-only" in argv and "--strategic-online" in argv:
+        print("[stdio] choose either --jev-only or --strategic-online, not both",
+              file=sys.stderr)
+        return 2
+    strategy_planning_enabled = "--strategic-online" in argv
     mode = ("play" if "--play" in argv else
             "advise" if "--advise" in argv else (value("mode") or DEFAULT_MODE))
     if mode not in MODES:
@@ -697,7 +709,10 @@ def main(argv: list[str]) -> int:
 
     if replay_dir:
         agent = _build_agent(strategy_path, backend, acceptance, dashboard_url, brain_backend,
-                             brain_model, brain_endpoint, jev_endpoint)
+                             brain_model, brain_endpoint, jev_endpoint,
+                             brain_reasoning_effort,
+                             strategy_planning_enabled=strategy_planning_enabled,
+                             trace_source_type="synthetic")
         files = sorted(Path(replay_dir).glob("*.json"))
         if not files:
             print(f"[stdio] no .json messages in {replay_dir}", file=sys.stderr)
@@ -711,7 +726,17 @@ def main(argv: list[str]) -> int:
 
     # Live mode: this is what CommunicationMod launches.
     agent = _build_agent(strategy_path, backend, acceptance, dashboard_url, brain_backend,
-                         brain_model, brain_endpoint, jev_endpoint)
+                         brain_model, brain_endpoint, jev_endpoint,
+                         brain_reasoning_effort,
+                         strategy_planning_enabled=strategy_planning_enabled,
+                         trace_source_type="real_game")
+    if not strategy_planning_enabled:
+        print("[stdio] JEV-ONLY MODE: strategic provider calls are disabled during this run; "
+              "JEV/rules remain active. Use the post-run review command after the run ends.",
+              file=sys.stderr)
+    else:
+        print("[stdio] ONLINE STRATEGY MODE: strategic provider calls may run at phase checkpoints.",
+              file=sys.stderr)
     if dashboard_url:
         print(f"[stdio] decisions stream to {dashboard_url} "
               f"(start run_dashboard.py to watch; silent when it is not up)",
@@ -748,7 +773,8 @@ def main(argv: list[str]) -> int:
         transport.log_path = Path(log_path)
     # ASCII only in every stderr line - see _announce_stall.
     resolved_jev = agent.jev.backend_name
-    resolved_brain = agent.strategic.backend_name
+    resolved_brain = (agent.strategic.backend_name if strategy_planning_enabled
+                      else "disabled_by_design")
     print(f"[stdio] ready - JEV={resolved_jev} brain={resolved_brain} "
           f"config={agent.runtime_config.config_id} "
           f"acceptance={acceptance or 'margin'} mode={transport.mode}; "

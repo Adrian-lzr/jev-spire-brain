@@ -20,6 +20,7 @@ CONFIG_KEYS = {
     "brain_backend": "BRAIN_BACKEND",
     "brain_model": "BRAIN_MODEL",
     "brain_endpoint": "BRAIN_ENDPOINT",
+    "brain_reasoning_effort": "BRAIN_REASONING_EFFORT",
     "decision_budget_ms": "DECISION_BUDGET_MS",
     "max_model_calls": "MAX_MODEL_CALLS",
     "jev_budget_ms": "JEV_BUDGET_MS",
@@ -31,6 +32,7 @@ CONFIG_KEYS = {
 SECRET_KEYS = {
     "brain_api_key": "BRAIN_API_KEY",
     "openai_api_key": "OPENAI_API_KEY",
+    "codex_api_key": "CODEX_API_KEY",
     "openrouter_api_key": "OPENROUTER_API_KEY",
     "typesafe_api_key": "TYPESAFE_API_KEY",
     "cloudflare_api_token": "CLOUDFLARE_API_TOKEN",
@@ -77,12 +79,13 @@ def get_public_config(path: Path) -> dict:
     }
 
 
-def get_secret(path: Path, field: str) -> str:
+def get_secret(path: Path, field: str, *, endpoint: str | None = None) -> str:
     """Resolve a secret for a provider request without exposing it to clients."""
-    env_name = SECRET_KEYS[field]
     if field == "brain_api_key":
-        return (os.environ.get("BRAIN_API_KEY") or _values(path).get("BRAIN_API_KEY")
-                or os.environ.get("OPENAI_API_KEY") or _values(path).get("OPENAI_API_KEY", ""))
+        cli = {"brain_endpoint": endpoint} if endpoint else None
+        return resolve_runtime_config(
+            path.parent, cli=cli, dotenv=_values(path)).brain_api_key
+    env_name = SECRET_KEYS[field]
     return os.environ.get(env_name) or _values(path).get(env_name, "")
 
 
@@ -154,32 +157,99 @@ def _http_post(url: str, api_key: str, payload: dict, timeout: float) -> tuple[i
         return response.status, body
 
 
-def test_brain_connection(settings: dict, key: str) -> dict:
+def test_brain_connection(settings: dict, key: str, *, provider_factory=None) -> dict:
     if not key:
         return {"ok": False, "message": "尚未配置 GPT API Key"}
     endpoint = settings.get("openai_endpoint", "https://api.openai.com/v1/responses").strip()
     model = settings.get("openai_model", "gpt-4.1-mini").strip()
     if not endpoint.startswith("https://") or len(endpoint) > 512 or not model or len(model) > 128:
         return {"ok": False, "message": "模型地址或名称无效"}
-    if "chat/completions" in endpoint:
-        payload = {"model": model, "messages": [{"role": "user", "content": "Reply OK."}], "max_tokens": 8}
-    else:
-        payload = {"model": model, "input": "Reply OK.", "max_output_tokens": 8}
     started = time.monotonic()
     try:
-        status, body = _http_post(endpoint, key, payload, 15)
-        if 200 <= status < 300 and isinstance(body, dict):
-            return {"ok": True, "message": "GPT API 连接成功", "model": model,
-                    "latency_ms": int((time.monotonic() - started) * 1000)}
-        return {"ok": False, "message": "GPT API 返回了无法识别的响应"}
+        if provider_factory is None:
+            from spirebrain.brain.gpt_client import OpenAIStrategicClient
+
+            provider_factory = OpenAIStrategicClient
+        client = provider_factory(
+            api_key=key, model=model, endpoint=endpoint,
+            reasoning_effort=settings.get("reasoning_effort"),
+            timeout_ms=15_000, max_output_tokens=900, max_calls=1,
+        )
+        state_id = "dashboard-provider-probe-state"
+        run_id = "dashboard-provider-probe-run"
+        candidate_id = "probe:wait"
+        response = client.plan({
+            "run_id": run_id,
+            "run_epoch": 0,
+            "decision_id": "dashboard-provider-probe-decision",
+            "state_id": state_id,
+            "trigger": "provider_probe",
+            "max_plan_steps": 2,
+            "state": {"screen_type": "MAP", "character": "IRONCLAD",
+                      "act": 1, "floor": 1, "current_hp": 50,
+                      "max_hp": 80, "gold": 99},
+            "candidates": [{
+                "candidate_id": candidate_id,
+                "candidate_signature": "dashboard-provider-probe",
+                "kind": "wait", "label": "Wait for the next state",
+                "command": {"command": "wait"}, "legal": True,
+            }],
+        })
+        latency = getattr(response, "latency_ms", 0) or int(
+            (time.monotonic() - started) * 1000)
+        plan = getattr(response, "plan", None)
+        preferences = set(getattr(plan, "preferred_candidates", ()) or ())
+        preferences.update(getattr(plan, "avoid_candidates", ()) or ())
+        valid = bool(
+            plan is not None and not getattr(response, "fallback", True)
+            and plan.state_id == state_id and plan.run_id == run_id
+            and preferences <= {candidate_id}
+        )
+        if valid:
+            return {"ok": True, "message": "已收到可解析的战略计划",
+                    "model": getattr(response, "model", "") or model,
+                    "latency_ms": latency}
+        error_kind = str(getattr(response, "error_kind", "") or "invalid_plan")
+        messages = {
+            "missing_key": "尚未配置 GPT API Key",
+            "auth": "API Key 或账户权限未通过",
+            "rate_limit": "模型服务限流，请稍后再试",
+            "timeout": "模型请求超时",
+            "network": "无法连接模型服务",
+            "parse_or_validation": "服务已响应，但没有返回有效战略计划",
+            "budget_exhausted": "战略请求预算已耗尽",
+        }
+        diagnostic_parts = []
+        for field in ("http_status", "http_error_code", "http_error_param"):
+            value = getattr(response, field, None)
+            if isinstance(value, int) and not isinstance(value, bool):
+                diagnostic_parts.append(f"HTTP {value}")
+            elif isinstance(value, str) and value:
+                diagnostic_parts.append(f"{field.removeprefix('http_error_')}={value}")
+        message = messages.get(error_kind, "模型请求失败，未获得有效战略计划")
+        if diagnostic_parts:
+            message += "（" + ", ".join(diagnostic_parts) + "）"
+        result = {"ok": False, "message": message,
+                  "error_kind": error_kind, "model": model, "latency_ms": latency}
+        for field in ("http_status", "http_error_code", "http_error_param"):
+            value = getattr(response, field, None)
+            if isinstance(value, (int, str)) and not isinstance(value, bool):
+                result[field] = value
+        return result
     except urllib.error.HTTPError as exc:
-        message = "API Key 或账户权限未通过" if exc.code in (401, 403) else f"服务返回 HTTP {exc.code}"
+        error_kind = ("auth" if exc.code in (401, 403) else
+                      "rate_limit" if exc.code == 429 else "http")
+        message = ("API Key 或账户权限未通过" if error_kind == "auth" else
+                   "模型服务限流，请稍后再试" if error_kind == "rate_limit" else
+                   f"模型服务返回 HTTP {exc.code}")
     except (urllib.error.URLError, TimeoutError, OSError):
-        message = "网络连接失败或请求超时"
-    except (ValueError, UnicodeError):
-        message = "服务响应格式无效"
-    return {"ok": False, "message": message,
-            "latency_ms": int((time.monotonic() - started) * 1000)}
+        error_kind = "timeout_or_network"
+        message = "无法连接模型服务或请求超时"
+    except Exception:
+        error_kind = "probe_error"
+        message = "战略计划测试失败，请检查模型地址、密钥和模型权限"
+    return {"ok": False, "message": message, "error_kind": error_kind,
+            "model": model, "latency_ms": int((time.monotonic() - started) * 1000)}
 
 
 def test_jev_connection(backend: str, key: str, account_id: str = "") -> dict:

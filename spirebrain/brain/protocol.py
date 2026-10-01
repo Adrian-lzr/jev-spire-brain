@@ -345,7 +345,12 @@ class ActionCandidate:
 
 @dataclass
 class StrategicPlan:
-    """A short, state-bound plan returned by the strategic model."""
+    """A phase-level strategy with candidate references bound to its source state.
+
+    ``expires_after`` remains in the wire schema for provider compatibility,
+    but local strategic checkpoints, not tactical action counts, control when
+    the provider is called again.
+    """
 
     plan_id: str
     state_id: str
@@ -514,6 +519,35 @@ class BrainResponse:
     # remains the short human-facing explanation for compatibility.
     error_kind: str = ""
     fallback: bool = False
+    http_latency_ms: int | None = None
+    parse_latency_ms: int | None = None
+    response_bytes: int | None = None
+    http_status: int | None = None
+    http_error_code: str | None = None
+    http_error_param: str | None = None
+
+
+@dataclass(frozen=True)
+class PhaseStrategySnapshot:
+    """Read-only strategic context handed from the owner loop to advice workers."""
+
+    run_id: str
+    run_epoch: int
+    state_id: str
+    phase_key: str
+    phase_token: str = ""
+    screen_type: str = ""
+    act: int = 0
+    floor: int = 0
+    plan: StrategicPlan | None = None
+    context_plan: StrategicPlan | None = None
+    context_reason: str = ""
+    response: BrainResponse | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "plan", copy.deepcopy(self.plan))
+        object.__setattr__(self, "context_plan", copy.deepcopy(self.context_plan))
+        object.__setattr__(self, "response", copy.deepcopy(self.response))
 
 
 @dataclass(frozen=True)

@@ -122,6 +122,29 @@ def test_metrics_uses_canonical_provider_response_latency_once():
     assert report["latency_ms"]["request_p50"] == 125
 
 
+def test_metrics_reports_strategic_stage_timings_with_sample_counts():
+    from spirebrain.analysis.metrics import summarize
+
+    report = summarize([
+        {"event_type": "provider_request", "run_id": "r", "decision_id": "d1",
+         "request_id": "q1", "attempt_id": "q1:1", "queue_wait_ms": 10,
+         "pre_provider_ms": 20},
+        {"event_type": "provider_response", "run_id": "r", "decision_id": "d1",
+         "request_id": "q1", "attempt_id": "q1:1", "http_latency_ms": 100,
+         "parse_latency_ms": 5, "worker_elapsed_ms": 125},
+        {"event_type": "strategic_plan_commit", "run_id": "r", "decision_id": "d1",
+         "request_id": "q1", "commit_latency_ms": 130,
+         "result_disposition": "committed_context"},
+    ])
+
+    assert report["latency_ms"]["queue_wait_p50"] == 10
+    assert report["latency_ms"]["http_p50"] == 100
+    assert report["latency_ms"]["parse_p50"] == 5
+    assert report["latency_ms"]["commit_p50"] == 130
+    assert report["latency_ms"]["queue_wait_samples"] == 1
+    assert report["strategic_result_dispositions"] == {"committed_context": 1}
+
+
 def test_metrics_counts_only_same_event_type_duplicates():
     from spirebrain.analysis.metrics import summarize
 
@@ -136,6 +159,65 @@ def test_metrics_counts_only_same_event_type_duplicates():
 
     assert report["provider_calls"] == 1
     assert report["provider_duplicate_event_count"] == 1
+
+
+def test_metrics_deduplicates_postmortem_review_and_reports_latency_and_failures():
+    from spirebrain.analysis.metrics import summarize
+
+    report = summarize([
+        {"event_type": "review_started", "run_id": "r1", "run_epoch": 1,
+         "request_id": "review-1", "attempt_count": 0},
+        {"event_type": "review_completed", "run_id": "r1", "run_epoch": 1,
+         "request_id": "review-1", "attempt_count": 2, "latency_ms": 120,
+         "status": "completed", "proposal_count": 1, "error_kind": None},
+        {"event_type": "review_completed", "run_id": "r1", "run_epoch": 1,
+         "request_id": "review-1", "attempt_count": 2, "latency_ms": 120,
+         "status": "completed", "proposal_count": 1, "error_kind": None},
+        {"event_type": "review_started", "run_id": "r2", "run_epoch": 1,
+         "request_id": "review-2", "attempt_count": 0},
+        {"event_type": "review_completed", "run_id": "r2", "run_epoch": 1,
+         "request_id": "review-2", "attempt_count": 1, "latency_ms": 240,
+         "status": "failed", "proposal_count": None, "error_kind": "timeout"},
+    ])
+
+    review = report["postmortem"]
+    assert review["unique_request_count"] == 2
+    assert review["request_count"] == 2
+    assert review["completed_count"] == 1
+    assert review["failed_count"] == 1
+    assert review["attempt_count"] == 3
+    assert review["failure_reasons"] == {"timeout": 1}
+    assert review["latency_ms"] == {"p50": 180.0, "p95": 234.0, "samples": 2}
+    assert review["status"] == "complete"
+    assert report["unattributed_event_count"] == 0
+
+
+def test_metrics_marks_missing_postmortem_evidence_unknown_and_tracks_unattributed_rows():
+    from spirebrain.analysis.metrics import summarize
+
+    report = summarize([
+        {"event_type": "review_started", "run_id": "r", "run_epoch": 1,
+         "attempt_count": 0},
+    ])
+
+    review = report["postmortem"]
+    assert review["unique_request_count"] == 0
+    assert review["sample_count"] == 1
+    assert review["incomplete_count"] == 1
+    assert review["attempt_count"] == 0
+    assert review["latency_ms"] == {"p50": None, "p95": None, "samples": 0}
+    assert review["status"] == "incomplete"
+    assert review["unattributed_event_count"] == 1
+    assert report["unattributed_event_count"] == 1
+
+
+def test_metrics_reports_unknown_postmortem_when_no_review_events():
+    from spirebrain.analysis.metrics import summarize
+
+    review = summarize([])["postmortem"]
+    assert review["status"] == "unknown"
+    assert review["attempt_count"] is None
+    assert review["latency_ms"]["p50"] is None
 
 
 def test_metrics_cli_rejects_missing_and_empty_inputs(tmp_path, capsys):

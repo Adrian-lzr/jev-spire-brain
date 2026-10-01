@@ -46,6 +46,9 @@ Usage
     python -m spirebrain.install_mod_config --mode advise --write
     python -m spirebrain.install_mod_config --mode play --auto-start --write
 
+    # Keep gameplay local/JEV-only and reserve the strategic model for review:
+    python -m spirebrain.install_mod_config --jev-only --write
+
 Preview is the default because this writes outside the repository, into the user's
 own mod settings directory.
 """
@@ -267,8 +270,10 @@ def default_command(backend: str = DEFAULT_BACKEND, *, auto_start: bool = False,
                    mode: str | None = None, dashboard_url: str | None = None,
                    brain_backend: str | None = None,
                    brain_model: str | None = None, brain_endpoint: str | None = None,
+                   brain_reasoning_effort: str | None = None,
                    jev_endpoint: str | None = None,
-                   open_dashboard: bool = False) -> str:
+                   open_dashboard: bool = False,
+                   strategy_planning_enabled: bool = False) -> str:
     """`<python> <repo>/run_agent.py --backend <backend> [agent flags]`.
 
     Never the module file: running a script puts *that script's* directory first
@@ -293,12 +298,18 @@ def default_command(backend: str = DEFAULT_BACKEND, *, auto_start: bool = False,
     2026-09-22 20:49) is why this parameter exists; `start.py` always passes it.
     """
     agent = f"{sys.executable} {ROOT / 'run_agent.py'} --backend {backend}"
+    if strategy_planning_enabled:
+        agent += " --strategic-online"
+    else:
+        agent += " --jev-only"
     if brain_backend:
         agent += f" --brain-backend {brain_backend}"
     if brain_model:
         agent += f" --brain-model {brain_model}"
     if brain_endpoint:
         agent += f" --brain-endpoint {brain_endpoint}"
+    if brain_reasoning_effort:
+        agent += f" --brain-reasoning-effort {brain_reasoning_effort}"
     if jev_endpoint:
         agent += f" --jev-endpoint {jev_endpoint}"
     if klass:
@@ -342,6 +353,10 @@ def main(argv: list[str]) -> int:
             hit = argv[argv.index(f"--{name}") + 1]
         return hit
 
+    if "--jev-only" in argv and "--strategic-online" in argv:
+        print("choose either --jev-only or --strategic-online, not both")
+        return 2
+
     paths = family_config_paths()
     path = paths[0]
 
@@ -362,15 +377,37 @@ def main(argv: list[str]) -> int:
 
     backend = value("backend") or DEFAULT_BACKEND
     mode = value("mode")
+    brain_backend = value("brain-backend")
+    brain_model = value("brain-model")
+    brain_endpoint = value("brain-endpoint")
+    brain_reasoning_effort = value("brain-reasoning-effort")
+    jev_endpoint = value("jev-endpoint")
+    strategy_planning_enabled = "--strategic-online" in argv
     # These three were documented in the usage block but never actually read, so
     # `--auto-start --write` silently wrote a config without it. Found while
     # adding `--mode` (2026-09-22): a documented flag that does nothing is worse
     # than a missing one, because it costs a user their debugging session.
-    command = value("command") or default_command(
-        backend, mode=mode,
-        auto_start="--auto-start" in argv,
-        klass=value("class"),
-        ascension=int(value("ascension")) if value("ascension") else None)
+    command_override = value("command")
+    if command_override:
+        command = command_override
+        command_flags = set(command.split())
+        if strategy_planning_enabled and "--strategic-online" not in command_flags:
+            command += " --strategic-online"
+        elif not strategy_planning_enabled and "--strategic-online" not in command_flags \
+                and "--jev-only" not in command_flags:
+            command += " --jev-only"
+    else:
+        command = default_command(
+            backend, mode=mode,
+            brain_backend=brain_backend,
+            brain_model=brain_model,
+            brain_endpoint=brain_endpoint,
+            brain_reasoning_effort=brain_reasoning_effort,
+            jev_endpoint=jev_endpoint,
+            auto_start="--auto-start" in argv,
+            klass=value("class"),
+            ascension=int(value("ascension")) if value("ascension") else None,
+            strategy_planning_enabled=strategy_planning_enabled)
     argv_check = check_argv(command)
 
     print(f"repo            : {ROOT}")
@@ -383,6 +420,8 @@ def main(argv: list[str]) -> int:
                  else "  (auto-play: the agent plays the run itself)"))
     print()
     print(f"command (raw)   : {command}")
+    if not strategy_planning_enabled:
+        print("strategy mode   : JEV-only; strategic planning disabled during gameplay")
     print(f"argv the mod will build ({argv_check['argv_count']} elements):")
     for i, arg in enumerate(argv_check["argv"]):
         mark = "ok " if Path(arg).exists() or not arg.endswith((".exe", ".py")) else "MISSING"

@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from spirebrain.redaction import redact_text
+
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_RULES = ROOT / "config" / "guide_rules.json"
 
@@ -140,19 +142,134 @@ class GuideBook:
 
 
 class GuideAwareClient:
-    """Adds matched guide evidence to every JEV question in this state."""
+    """Adds matched guide evidence and approved experience as advisory context."""
+
+    MAX_EXPERIENCES = 3
+    MAX_EXPERIENCE_CONTEXT_CHARS = 4000
+
+    @staticmethod
+    def _is_replay_validated_active(experience: Any) -> bool:
+        if not isinstance(experience, dict):
+            return False
+        validation = experience.get("replay_validation")
+        if not isinstance(validation, dict):
+            return False
+        counts = (
+            validation.get("illegal_action_count"),
+            validation.get("candidate_set_change_count"),
+            validation.get("hard_constraint_violation_count"),
+        )
+        sample_count = validation.get("sample_count")
+        experience_id = str(experience.get("experience_id") or "")
+        fixture_hash = str(validation.get("fixture_hash") or "")
+        return (
+            experience.get("status") == "active"
+            and experience.get("policy_type") == "soft_preference"
+            and validation.get("passed") is True
+            and validation.get("fixture_type") == "fixed_provider_responses"
+            and bool(experience_id)
+            and validation.get("experience_id") == experience_id
+            and validation.get("experience_applied") is True
+            and len(fixture_hash) == 71
+            and fixture_hash.startswith("sha256:")
+            and all(char in "0123456789abcdef" for char in fixture_hash[7:])
+            and type(sample_count) is int and sample_count > 0
+            and all(type(value) is int and value == 0 for value in counts)
+        )
+
+    @classmethod
+    def _experience_context(cls, experiences: Any) -> list[dict] | None:
+        """Build a small prompt-only projection; never forward ledger records."""
+        if not isinstance(experiences, (list, tuple)):
+            return None
+
+        items = []
+        total_chars = 0
+        for experience in experiences:
+            if not cls._is_replay_validated_active(experience):
+                continue
+            character = str(experience.get("character") or "").upper()
+            scenes = experience.get("scenes")
+            acts = experience.get("acts")
+            if character != "IRONCLAD" or not isinstance(scenes, list) or not scenes \
+                    or not isinstance(acts, list) or not acts:
+                continue
+
+            def text(value: Any, limit: int) -> str:
+                return redact_text(value, limit=limit).strip()
+
+            prerequisites = experience.get("prerequisites", [])
+            exceptions = experience.get("exceptions", [])
+            if not isinstance(prerequisites, (list, tuple)):
+                prerequisites = []
+            if not isinstance(exceptions, (list, tuple)):
+                exceptions = []
+
+            # Copy only bounded, human-reviewable prose. IDs and replay proof
+            # stay in the ledger; model output never becomes an executable rule.
+            item = {
+                "experience_id": text(experience.get("experience_id"), 80),
+                "policy_type": "soft_preference",
+                "priority": "optional; below current state and legal question options",
+                "guidance": (
+                    "Do not treat as a rule or command, or permission to select an "
+                    "unavailable action. Ignore when current facts or legal options conflict."
+                ),
+                "title": text(experience.get("title"), 120),
+                "soft_preference": text(experience.get("claim"), 500),
+                "prerequisites": [text(value, 160) for value in prerequisites[:6]
+                                  if isinstance(value, str) and value.strip()],
+                "exceptions": [text(value, 160) for value in exceptions[:6]
+                               if isinstance(value, str) and value.strip()],
+                "scope": {
+                    "character": "IRONCLAD",
+                    "scenes": [text(value, 40).upper() for value in scenes[:6]
+                               if isinstance(value, str)],
+                    "acts": [value for value in acts[:3]
+                             if type(value) is int and 1 <= value <= 3],
+                },
+            }
+            if not item["experience_id"] or not item["title"] or not item["soft_preference"]:
+                continue
+            item_chars = sum(len(value) for value in (
+                item["title"], item["soft_preference"], *item["prerequisites"],
+                *item["exceptions"],
+            ))
+            if total_chars + item_chars > cls.MAX_EXPERIENCE_CONTEXT_CHARS:
+                break
+            items.append(item)
+            total_chars += item_chars
+            if len(items) >= cls.MAX_EXPERIENCES:
+                break
+
+        if not items:
+            return None
+        return items
 
     def __init__(self, inner: Any) -> None:
         self.inner = inner
         self.active: list[dict] = []
+        self.experiences: list[dict] = []
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.inner, name)
 
     def ask(self, state: Any, questions: dict) -> Any:
-        if self.active:
-            if isinstance(state, dict):
-                state = {**state, "guide_rules": self.active}
-            else:
-                state = {"game_state": state, "guide_rules": self.active}
+        experience_context = self._experience_context(self.experiences)
+        if isinstance(state, dict):
+            # The wrapper may be called repeatedly by adapters that reuse a
+            # state object. Remove our prior projection before adding the
+            # current one, so a revoked or out-of-scope item cannot linger.
+            state = dict(state)
+            state.pop("verified_experiences", None)
+            if self.active:
+                state["guide_rules"] = self.active
+            if experience_context:
+                state["verified_experiences"] = experience_context
+        elif self.active or experience_context:
+            state = {"game_state": state}
+            if self.active:
+                state["guide_rules"] = self.active
+            if experience_context:
+                state["verified_experiences"] = experience_context
         return self.inner.ask(state, questions)

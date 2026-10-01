@@ -17,6 +17,8 @@ import urllib.request
 from pathlib import Path
 import threading
 from typing import Any
+from urllib.parse import urlsplit
+import re
 
 from .protocol import BrainResponse, PlanValidationError, StrategicPlan
 from spirebrain.redaction import redact_text, redact_value
@@ -58,8 +60,46 @@ SYSTEM_PROMPT = """你是 Slay the Spire 的战略规划大脑。
 当前状态会带有一个保守的打法 profile（力量成长、消耗引擎、格挡堆叠、自伤收益、异常牌转化或自适应端口）。
 只有在卡组信号足够时才延续该打法；信号冲突或不足时选择自适应端口，优先解决输出、防御、运转三端中最弱的一端。
 不要为了凑流派牺牲当前战斗生存、HP 预算、金币保留或路线可行性。
+这是跨多个局部动作复用的阶段策略，不是逐张牌或逐次轮询的动作脚本。replan_triggers 只描述真正的战略变化；expires_after 表示计划视野，不代表每执行若干个动作就必须再次调用模型。
 优先保护明确的生存约束，解释只写简短、可展示的理由，不输出隐藏思维链。
 返回严格符合给定 JSON Schema 的短计划。"""
+
+MAX_STRATEGIC_RESPONSE_BYTES = 256 * 1024
+MAX_HTTP_ERROR_BYTES = 8 * 1024
+_SAFE_HTTP_DETAIL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/\[\]{}-]{0,127}$")
+
+
+def _safe_http_detail(value: Any) -> str | None:
+    """Return a bounded, non-secret provider error token.
+
+    Provider error bodies are untrusted and may echo request fragments or
+    credentials.  Only compact identifier-like ``code``/``param`` values are
+    retained; messages and the raw body are deliberately discarded.
+    """
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value or len(value) > 128 or not _SAFE_HTTP_DETAIL.fullmatch(value):
+        return None
+    return value
+
+
+def _http_error_details(exc: urllib.error.HTTPError) -> tuple[str | None, str | None]:
+    """Extract safe ``code`` and ``param`` fields from a bounded HTTP body."""
+    try:
+        raw = exc.read(MAX_HTTP_ERROR_BYTES + 1)
+    except (OSError, ValueError, AttributeError):
+        return None, None
+    if not isinstance(raw, (bytes, bytearray)) or len(raw) > MAX_HTTP_ERROR_BYTES:
+        return None, None
+    try:
+        decoded = json.loads(bytes(raw).decode("utf-8", "replace"))
+    except (UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+        return None, None
+    error = decoded.get("error") if isinstance(decoded, dict) else None
+    if not isinstance(error, dict):
+        error = decoded if isinstance(decoded, dict) else {}
+    return _safe_http_detail(error.get("code")), _safe_http_detail(error.get("param"))
 
 
 def _json_text(value: Any) -> str:
@@ -363,6 +403,7 @@ class OpenAIStrategicClient:
                  endpoint: str | None = None, timeout_ms: int = 6000,
                  max_output_tokens: int = 900, opener=None,
                  structured_output: bool | None = None,
+                 reasoning_effort: str | None = None,
         provider_name: str = "openai", max_calls: int = 1) -> None:
         self.provider_name = provider_name or "openai"
         self.backend_name = self.provider_name
@@ -385,6 +426,9 @@ class OpenAIStrategicClient:
         # gateways that emit JSON with long candidate/context strings. Keep a
         # bounded response while leaving enough room for a complete object.
         self.max_output_tokens = max(128, int(max_output_tokens))
+        allowed_efforts = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+        requested_effort = str(reasoning_effort or "").strip().lower()
+        self.reasoning_effort = requested_effort if requested_effort in allowed_efforts else ""
         self.opener = opener or urllib.request.urlopen
         # Compatible gateways often reject vendor-specific json_schema output;
         # local StrategicPlan validation remains strict and is the default.
@@ -410,6 +454,11 @@ class OpenAIStrategicClient:
                                  request_id=request_id, error="战略决策预算已耗尽",
                                  error_kind="budget_exhausted",
                                  fallback=True)
+        http_latency_ms = None
+        parse_latency_ms = None
+        parse_started = None
+        response_bytes = None
+        http_status = None
         try:
             body = self._request_body(payload)
             request = urllib.request.Request(
@@ -422,19 +471,44 @@ class OpenAIStrategicClient:
                 },
                 method="POST",
             )
+            http_started = time.monotonic()
             try:
                 with self.opener(request, timeout=reserved_ms / 1000) as response:
-                    raw = response.read()
+                    raw = response.read(MAX_STRATEGIC_RESPONSE_BYTES + 1)
+                http_latency_ms = int((time.monotonic() - http_started) * 1000)
             except urllib.error.HTTPError as exc:
-                # Do not copy the response body into an error. Gateways can
-                # echo request fragments or credentials, and the status code
-                # is sufficient for retry/fallback classification.
+                http_latency_ms = int((time.monotonic() - http_started) * 1000)
+                http_status = int(exc.code)
+                http_error_code, http_error_param = _http_error_details(exc)
+                # Only the independently sanitized code/parameter may leave
+                # the adapter; never copy the provider message or raw body.
+                details = " ".join(
+                    f"{name}={value}" for name, value in (
+                        ("code", http_error_code), ("param", http_error_param))
+                    if value is not None)
                 return self._failure(
                     request_id, started,
-                    f"HTTP {exc.code} from strategic provider",
+                    f"HTTP {exc.code} from strategic provider"
+                    + (f" ({details})" if details else ""),
                     error_kind=("auth" if exc.code in {401, 403} else
                                 "rate_limit" if exc.code == 429 else "http"),
+                    http_latency_ms=http_latency_ms,
+                    http_status=http_status,
+                    http_error_code=http_error_code,
+                    http_error_param=http_error_param,
                 )
+            except (urllib.error.URLError, TimeoutError, OSError):
+                http_latency_ms = int((time.monotonic() - http_started) * 1000)
+                raise
+            response_bytes = len(raw)
+            if response_bytes > MAX_STRATEGIC_RESPONSE_BYTES:
+                return self._failure(
+                    request_id, started, "战略模型响应超过字节上限",
+                    error_kind="response_too_large",
+                    http_latency_ms=http_latency_ms,
+                    response_bytes=response_bytes,
+                )
+            parse_started = time.monotonic()
             decoded = _unicode_safe_json(json.loads(raw.decode("utf-8", "replace")))
             texts = [_unicode_safe_json(item) for item in _extract_texts(decoded)]
             if not texts:
@@ -470,6 +544,7 @@ class OpenAIStrategicClient:
                     break
             if plan is None:
                 raise parse_error or ValueError("模型响应中没有有效战略计划")
+            parse_latency_ms = int((time.monotonic() - parse_started) * 1000)
             usage = decoded.get("usage") if isinstance(decoded, dict) else {}
             return BrainResponse(
                 plan=plan,
@@ -478,22 +553,43 @@ class OpenAIStrategicClient:
                 latency_ms=int((time.monotonic() - started) * 1000),
                 request_id=request_id,
                 usage=usage if isinstance(usage, dict) else {},
+                http_latency_ms=http_latency_ms,
+                parse_latency_ms=parse_latency_ms,
+                response_bytes=response_bytes,
             )
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             # Exception text may include an endpoint with a query-string key.
             return self._failure(request_id, started,
                                  f"请求超时：{type(exc).__name__}" if isinstance(exc, TimeoutError)
                                  else f"网络错误：{type(exc).__name__}",
-                                 error_kind="timeout" if isinstance(exc, TimeoutError) else "network")
+                                 error_kind="timeout" if isinstance(exc, TimeoutError) else "network",
+                                 http_latency_ms=http_latency_ms,
+                                 parse_latency_ms=(int((time.monotonic() - parse_started) * 1000)
+                                                   if parse_started is not None else None),
+                                 response_bytes=response_bytes)
         except UnicodeError as exc:
             return self._failure(request_id, started, f"计划解析编码失败：{type(exc).__name__}",
-                                 error_kind="unicode_parse")
+                                 error_kind="unicode_parse",
+                                 http_latency_ms=http_latency_ms,
+                                 parse_latency_ms=(int((time.monotonic() - parse_started) * 1000)
+                                                   if parse_started is not None else None),
+                                 response_bytes=response_bytes)
         except (ValueError, KeyError, TypeError, json.JSONDecodeError, PlanValidationError) as exc:
             return self._failure(request_id, started, redact_text(f"计划解析失败：{exc}"),
-                                 error_kind="parse_or_validation")
+                                 error_kind="parse_or_validation",
+                                 http_latency_ms=http_latency_ms,
+                                 parse_latency_ms=(int((time.monotonic() - parse_started) * 1000)
+                                                   if parse_started is not None else None),
+                                 response_bytes=response_bytes)
 
     def _failure(self, request_id: str, started: float, error: str,
-                 *, error_kind: str = "provider") -> BrainResponse:
+                 *, error_kind: str = "provider",
+                 http_latency_ms: int | None = None,
+                 parse_latency_ms: int | None = None,
+                 response_bytes: int | None = None,
+                 http_status: int | None = None,
+                 http_error_code: str | None = None,
+                 http_error_param: str | None = None) -> BrainResponse:
         return BrainResponse(
             backend=self.backend_name,
             model=self.model,
@@ -502,34 +598,61 @@ class OpenAIStrategicClient:
             error=error,
             error_kind=error_kind,
             fallback=True,
+            http_latency_ms=http_latency_ms,
+            parse_latency_ms=parse_latency_ms,
+            response_bytes=response_bytes,
+            http_status=http_status,
+            http_error_code=http_error_code,
+            http_error_param=http_error_param,
         )
 
     def _request_body(self, payload: dict) -> dict:
-        """Build the only supported wire shape: OpenAI-compatible chat.
-
-        The configured strategic gateway is not guaranteed to implement the
-        OpenAI Responses API. Sending a Responses payload to a compatible
-        ``/v1`` gateway produced opaque 401/404 fallbacks in live runs, so the
-        provider adapter deliberately has one protocol and one parser.
-        """
-        user_text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        # Moonshot's Kimi K3 endpoint currently only accepts temperature=1.
-        # Sending the normal low-temperature planning value (0.1) makes the
-        # request fail with HTTP 400 before the model can return a plan. Keep
-        # the conservative default for other OpenAI-compatible models and
-        # constrain only the K3 family to the provider-supported value.
+        """Build a request matching the configured endpoint's API protocol."""
+        telemetry_only = {"strategy_fingerprint", "strategic_scope_id"}
+        public_payload = {key: value for key, value in payload.items()
+                          if not str(key).startswith("_internal_")
+                          and key not in telemetry_only}
+        user_text = json.dumps(public_payload, ensure_ascii=False, separators=(",", ":"))
         model_name = str(self.model or "").strip().lower()
+        # Reasoning endpoints reject sampling controls such as temperature;
+        # Kimi K3 has the opposite contract and requires its provider default.
+        reasoning_model = bool(self.reasoning_effort) or model_name.startswith(
+            ("gpt-5", "gpt-6", "o1", "o3", "o4"))
         temperature = 1 if model_name.startswith("kimi-k3") else 0.1
+        system_text = SYSTEM_PROMPT + "\nJSON Schema:\n" + json.dumps(
+            PLAN_SCHEMA, ensure_ascii=False, separators=(",", ":"))
+        path = urlsplit(self.endpoint).path.rstrip("/").lower()
+        if path.endswith("/responses"):
+            body = {
+                "model": self.model,
+                "instructions": system_text,
+                "input": user_text,
+                "max_output_tokens": self.max_output_tokens,
+                "text": {"format": {"type": "json_object"}},
+            }
+            if not reasoning_model:
+                body["temperature"] = temperature
+            if self.structured_output:
+                body["text"] = {"format": {
+                    "type": "json_schema",
+                    "name": "strategic_plan",
+                    "strict": False,
+                    "schema": PLAN_SCHEMA,
+                }}
+            if self.reasoning_effort:
+                body["reasoning"] = {"effort": self.reasoning_effort}
+            return body
+
         body = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT + "\nJSON Schema:\n" +
-                 json.dumps(PLAN_SCHEMA, ensure_ascii=False, separators=(",", ":"))},
+                {"role": "system", "content": system_text},
                 {"role": "user", "content": user_text},
             ],
-            "temperature": temperature,
             "max_tokens": self.max_output_tokens,
         }
+        if not reasoning_model:
+            body["temperature"] = temperature
         # DeepSeek and several OpenAI-compatible mainland gateways support the
         # portable JSON-object mode even when they reject OpenAI's strict
         # json_schema extension. It prevents the truncated prose/empty-content
@@ -544,6 +667,8 @@ class OpenAIStrategicClient:
             }
         elif json_model:
             body["response_format"] = {"type": "json_object"}
+        if self.reasoning_effort:
+            body["reasoning_effort"] = self.reasoning_effort
         return body
 
 
@@ -584,7 +709,8 @@ class LoggingStrategicClient:
         request_id = str(payload.get("request_id") or uuid.uuid4())
         identity = {key: payload.get(key) for key in
                     ("run_id", "run_epoch", "decision_id", "state_id", "plan_id",
-                     "config_id", "generation", "trigger")}
+                     "config_id", "generation", "trigger", "strategy_fingerprint",
+                     "strategic_scope_id")}
         identity["request_id"] = request_id
         identity["logical_request_id"] = str(payload.get("logical_request_id") or request_id)
         identity["attempt_id"] = str(payload.get("attempt_id") or f"{request_id}:1")
@@ -593,10 +719,20 @@ class LoggingStrategicClient:
             identity["knowledge_citation_ids"] = [str(value) for value in
                                                    (knowledge.get("citation_ids") or [])][:8]
         self._remember_request(str(identity.get("decision_id") or ""), request_id)
+        internal_timing = payload.get("_internal_timing")
+        internal_timing = internal_timing if isinstance(internal_timing, dict) else {}
+        duration_fields = ("queue_wait_ms", "pre_provider_ms")
+        timing_fields = {
+            key: max(0, int(internal_timing[key]))
+            for key in duration_fields
+            if isinstance(internal_timing.get(key), (int, float))
+            and not isinstance(internal_timing.get(key), bool)
+        }
         if self.event_sink is not None:
             try:
                 self.event_sink("provider_request", {**identity, "provider": self.backend_name,
                     "model": getattr(self.inner, "model", ""),
+                    **timing_fields,
                     "state_blob": payload.get("state"),
                     "candidate_blob": payload.get("candidates"),
                     "knowledge_citation_ids": identity.get("knowledge_citation_ids", [])})
@@ -611,6 +747,8 @@ class LoggingStrategicClient:
         # The wrapper owns the cross-provider correlation ID. Preserve the
         # provider's opaque ID only in the legacy log.
         result.request_id = request_id
+        worker_elapsed_ms = int((time.monotonic() - started) * 1000) + timing_fields.get(
+            "pre_provider_ms", 0)
         plan = result.plan.model_dict() if result.plan is not None else None
         record = redact_value({
             "ts": time.time(),
@@ -618,6 +756,15 @@ class LoggingStrategicClient:
             "model": result.model,
             "request_id": result.request_id,
             "latency_ms": result.latency_ms or int((time.monotonic() - started) * 1000),
+            "http_latency_ms": result.http_latency_ms,
+            "parse_latency_ms": result.parse_latency_ms,
+            "response_bytes": result.response_bytes,
+            "http_status": result.http_status,
+            "http_error_code": result.http_error_code,
+            "http_error_param": result.http_error_param,
+            "queue_wait_ms": timing_fields.get("queue_wait_ms"),
+            "pre_provider_ms": timing_fields.get("pre_provider_ms"),
+            "worker_elapsed_ms": worker_elapsed_ms,
             "usage": result.usage,
             "error": result.error,
             "error_kind": result.error_kind,
@@ -641,6 +788,15 @@ class LoggingStrategicClient:
                     "request_id": result.request_id, "provider_request_id": provider_request_id,
                     "provider": result.backend or self.backend_name,
                     "model": result.model, "latency_ms": record["latency_ms"],
+                    "http_latency_ms": result.http_latency_ms,
+                    "parse_latency_ms": result.parse_latency_ms,
+                    "response_bytes": result.response_bytes,
+                    "http_status": result.http_status,
+                    "http_error_code": result.http_error_code,
+                    "http_error_param": result.http_error_param,
+                    "queue_wait_ms": timing_fields.get("queue_wait_ms"),
+                    "pre_provider_ms": timing_fields.get("pre_provider_ms"),
+                    "worker_elapsed_ms": worker_elapsed_ms,
                     "usage": result.usage, "error": result.error, "error_kind": result.error_kind,
                     "fallback": bool(result.fallback),
                     "response_blob": plan,
@@ -663,6 +819,7 @@ def get_strategic_brain(backend: str | None = None, **kwargs):
         "openai", "gpt", "deepseek", "qwen", "tongyi", "zhipu", "glm",
         "moonshot", "kimi", "siliconflow", "doubao", "openai-compatible",
         "openai_compatible", "compatible", "local", "vllm", "ollama",
+        "hiyo-codex",
     }
     if selected in compatible:
         return OpenAIStrategicClient(

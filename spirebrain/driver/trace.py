@@ -28,13 +28,20 @@ _FIELDS = {
     "error_kind", "budget", "attempts", "network_errors", "auth_errors", "rate_limits",
     "decision_latency_ms", "first_advice_latency_ms", "publish_latency_ms", "fallback",
     "fallback_reason", "legal", "legality_reason", "uncertain", "player_action", "verdict",
-    "result", "evidence", "record_kind", "act", "floor", "cost_usd", "timeout", "http_status", "expired_result",
+    "result", "evidence", "record_kind", "act", "floor", "cost_usd", "timeout", "http_status",
+    "http_error_code", "http_error_param", "expired_result",
     "expired_result_count", "fixture_type", "code_version", "previous_advice_revision", "replacement_reason", "usage", "provider_request_id",
     "provider_request_ids", "generation",
+    "queue_wait_ms", "pre_provider_ms", "http_latency_ms",
+    "parse_latency_ms", "worker_elapsed_ms", "commit_latency_ms",
+    "response_bytes", "strategy_fingerprint", "strategic_scope_id",
+    "result_disposition", "http_status",
     "trigger", "context_only", "pending_state_id", "pending_generation",
     "pending_run_id", "in_flight", "lifecycle_reason",
     "state_blob", "candidate_blob", "response_blob", "knowledge_citation_ids",
     "contract_errors",
+    "character", "terminal_screen", "review_status", "proposal_count",
+    "provider_attempted", "attempt_count", "review_request_id", "review_error_kind",
 }
 
 

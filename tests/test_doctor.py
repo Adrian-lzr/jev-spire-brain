@@ -21,6 +21,7 @@ from spirebrain.doctor import (
     WARN,
     Report,
     WORKSHOP_EXPECTED,
+    check_modthespire_metadata,
     check_single_communicationmod,
     enabled_mod_jars,
     read_workshop_ledger,
@@ -126,6 +127,44 @@ def test_the_expected_items_identify_communicationmod():
     """If this id ever changes, docs/SETUP.md and the download instructions with it."""
     name, required, why = WORKSHOP_EXPECTED["2131373661"]
     assert name == "CommunicationMod" and required is True and "pipe" in why
+
+
+def test_doctor_identifies_missing_version_in_loader_package(tmp_path):
+    import json
+    import zipfile
+
+    content = tmp_path / "content" / "646570"
+    loader_dir = content / "1605060445"
+    loader_dir.mkdir(parents=True)
+    jar = loader_dir / "ModTheSpire.jar"
+    with zipfile.ZipFile(jar, "w") as archive:
+        archive.writestr("ModTheSpire.json", json.dumps({
+            "modid": "modthespire", "name": "ModTheSpire",
+            "mts_version": "999.999.999",
+        }))
+
+    report = Report()
+    check_modthespire_metadata(report, content)
+
+    assert report.lines[0][0] == WARN
+    assert report.lines[0][1] == "ModTheSpire package metadata"
+    assert "no readable version field" in report.lines[0][2]
+
+
+def test_doctor_accepts_loader_version_without_touching_other_mods(tmp_path):
+    import json
+    import zipfile
+
+    content = tmp_path / "content" / "646570"
+    loader_dir = content / "1605060445"
+    loader_dir.mkdir(parents=True)
+    with zipfile.ZipFile(loader_dir / "ModTheSpire.jar", "w") as archive:
+        archive.writestr("ModTheSpire.json", json.dumps({"version": "3.30.0"}))
+
+    report = Report()
+    check_modthespire_metadata(report, content)
+
+    assert report.lines == [(PASS, "ModTheSpire package metadata", "version 3.30.0")]
 
 
 def _with_localappdata(tmp: str, body):

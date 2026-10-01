@@ -374,7 +374,7 @@ def test_advice_worker_uses_the_owner_run_epoch(tmp_path):
     session.close()
 
 
-def test_advice_worker_adopts_owner_memory_and_invalidates_plan_after_deviation(tmp_path):
+def test_advice_worker_adopts_owner_memory_but_never_starts_strategy_requests(tmp_path):
     from spirebrain.brain.protocol import BrainResponse
 
     agent = SpireBrainAgent(jev_backend="mock", brain_backend="none", log_dir=tmp_path)
@@ -412,9 +412,7 @@ def test_advice_worker_adopts_owner_memory_and_invalidates_plan_after_deviation(
     state.update(run_id="run-memory", seed="same-seed")
     worker.choose_action(state)
 
-    assert calls
-    assert any(event["event_type"] == "deviation_record"
-               for event in calls[0]["memory"]["recent_events"])
+    assert not calls
     assert agent.strategic.memory.digest() == owner_memory
 
 
@@ -472,4 +470,167 @@ def test_advice_worker_plan_is_committed_by_owner_after_current_result(tmp_path)
     assert agent.strategic.current_plan.plan_id == "worker-plan"
     assert agent.strategic.memory.plan_id == "worker-plan"
     assert agent.strategic.current_plan is not worker.strategic.current_plan
+    session.close()
+
+
+def test_advisor_owns_phase_plan_request_across_tactical_state_changes(tmp_path):
+    from spirebrain.brain.protocol import BrainResponse, StrategicPlan
+
+    started = threading.Event()
+    release = threading.Event()
+    returned = threading.Event()
+
+    class SlowPhaseProvider:
+        backend_name = "phase-owner"
+        async_required = True
+
+        def __init__(self):
+            self.calls = 0
+
+        def plan(self, payload):
+            self.calls += 1
+            started.set()
+            assert release.wait(2)
+            plan = StrategicPlan.from_dict({
+                "plan_id": "combat-phase-plan",
+                "state_id": payload["state_id"],
+                "run_id": payload["run_id"],
+                "current_objective": "优先处理当前遭遇威胁",
+                "long_term_goal": "保留生命并维持铁甲构筑方向",
+                "priority": ["survive"], "preferred_candidates": [],
+                "avoid_candidates": [], "resource_constraints": {},
+                "next_steps": ["按当前合法候选评估行动"],
+                "replan_triggers": ["enemy_changed"],
+                "reason": "阶段服务固定响应", "uncertainty": "",
+                "expires_after": 3,
+            }, state_id=payload["state_id"], run_id=payload["run_id"])
+            returned.set()
+            return BrainResponse(plan=plan, backend=self.backend_name,
+                                 request_id="phase-request-1")
+
+    provider = SlowPhaseProvider()
+    agent = SpireBrainAgent(
+        jev_backend="mock", brain_backend="scripted", brain_client=provider,
+        async_planning=True, log_dir=tmp_path,
+    )
+    agent.begin_new_run("run-phase-owner", seed="fixed-seed")
+    session = AdviseSession(
+        agent, advice_path=None, poll_frames=20,
+        warn_stream=io.StringIO(), ensure_offered=lambda line, *a, **k: line,
+        fingerprint=lambda state: json.dumps(state, sort_keys=True),
+        message_count=lambda: 1,
+    )
+    available = ["play", "end", "potion", "wait", "state"]
+    latest = combat_game()
+    latest.update(run_id="run-phase-owner", seed="fixed-seed")
+
+    assert session.advise(latest, available, True) == "wait 20"
+    assert started.wait(1)
+    for energy in (1, 0):
+        latest = json.loads(json.dumps(latest))
+        latest["combat"]["player"]["energy"] = energy
+        latest["combat"]["hand"][0]["damage"] += 1
+        assert session.advise(latest, available, True) == "wait 20"
+
+    release.set()
+    assert returned.wait(1)
+    plan_thread = agent.strategic._plan_thread
+    if plan_thread is not None:
+        plan_thread.join(timeout=2)
+
+    # A same-phase plan completion must refresh the latest state, not replay
+    # the action computed for the first hand/energy snapshot.
+    assert session.advise(latest, available, True) == "wait 20"
+    worker_thread = session._worker_thread
+    if worker_thread is not None:
+        worker_thread.join(timeout=2)
+    session._drain_completed()
+
+    assert provider.calls == 1
+    assert agent.strategic.current_plan is not None
+    assert agent.strategic.current_plan.plan_id == "combat-phase-plan"
+    assert session.tracker.pending is not None
+    assert session.tracker.pending.state_id == semantic_state_id(latest)
+    assert session.tracker.pending.plan_id == "combat-phase-plan"
+    assert session.tracker.pending.command in ({"command": "end"},
+                                               {"command": "play", "card": 0, "target": 1})
+    session.close()
+
+
+def test_stale_advice_action_is_dropped_but_same_act_plan_is_rebound(tmp_path):
+    from spirebrain.brain.action_broker import build_action_candidates
+    from spirebrain.brain.protocol import (
+        AdviceWorkerResult, DecisionContext, DecisionRequest,
+        RunSessionSnapshot, StrategicPlan,
+    )
+    from spirebrain.driver.live_state import GameSnapshot
+
+    agent = SpireBrainAgent(jev_backend="mock", brain_backend="none",
+                            log_dir=tmp_path)
+    agent.begin_new_run("run-late-plan", seed="fixed-seed")
+    source = combat_game()
+    source.update(run_id="run-late-plan", seed="fixed-seed")
+    source_snapshot = GameSnapshot.from_communication(source)
+    source_candidates = build_action_candidates(source_snapshot.payload)
+    preferred_id = source_candidates[0].candidate_id
+    plan = StrategicPlan.from_dict({
+        "plan_id": "late-phase-plan", "state_id": source_snapshot.state_id,
+        "run_id": "run-late-plan", "current_objective": "保留生命",
+        "long_term_goal": "稳定通过当前幕", "priority": ["survive"],
+        "preferred_candidates": [preferred_id], "avoid_candidates": [],
+        "resource_constraints": {}, "next_steps": ["重新评估当前威胁"],
+        "replan_triggers": ["enemy_changed"], "reason": "固定响应",
+        "uncertainty": "", "expires_after": 2,
+    }, state_id=source_snapshot.state_id, run_id="run-late-plan")
+    plan.bind_candidates(source_candidates)
+
+    current = json.loads(json.dumps(source))
+    current["combat"]["hand"][0]["id"] = "Bash"
+    current["combat"]["hand"][0]["damage"] = 8
+    current_snapshot = GameSnapshot.from_communication(current)
+    assert current_snapshot.state_id != source_snapshot.state_id
+    assert (build_action_candidates(current_snapshot.payload)[0].candidate_signature
+            != source_candidates[0].candidate_signature)
+
+    session = AdviseSession(
+        agent, advice_path=None, poll_frames=20,
+        warn_stream=io.StringIO(), ensure_offered=lambda line, *a, **k: line,
+        fingerprint=lambda value: json.dumps(value, sort_keys=True),
+        message_count=lambda: 1,
+    )
+    epoch = agent.run_session.run_epoch
+    session._generation = 2
+    session._latest_fp = "state-b"
+    session._latest_state_id = current_snapshot.state_id
+    session._latest_game = dict(current, available_commands=current["available_commands"])
+
+    request = DecisionRequest(
+        context=DecisionContext(
+            run=RunSessionSnapshot(run_id="run-late-plan", run_epoch=epoch,
+                                   seed="fixed-seed", mode="advise"),
+            state_id=source_snapshot.state_id, decision_id="decision-a",
+            generation=1, state=source,
+        ),
+        state=source,
+    )
+    proposal = AdviceWorkerResult(
+        request=request, command={"command": "play", "card": 0, "target": 1},
+        plan=plan,
+    )
+    session._completed.put((
+        "state-a", 1, "run-late-plan", epoch, source, proposal.command,
+        None, None, proposal,
+    ))
+    session._drain_completed()
+
+    assert session.tracker.pending is None
+    assert agent.strategic.plan_valid is True
+    assert agent.strategic.current_plan.plan_id == "late-phase-plan"
+    assert agent.strategic.current_plan.state_id == current_snapshot.state_id
+    assert agent.strategic.current_plan.preferred_candidates == []
+    assert agent.strategic.current_plan.candidate_bindings == {}
+    assert session.dropped_completions == 0
+    expired = agent.trace.find_decision("decision-a")["expired"]
+    assert len(expired) == 1
+    assert expired[0]["fallback_reason"] == "generation_mismatch"
     session.close()

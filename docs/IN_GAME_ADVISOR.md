@@ -1,12 +1,12 @@
 # 游戏内实时攻略顾问
 
-运行 `python start.py`，然后通过 ModTheSpire 启动游戏。勾选 BaseMod、一个 CommunicationMod 和 SpireBrainOverlay。默认 `advise` 模式只发送 `wait` / `state`，由玩家操作角色。首次配置可运行 `python start.py --setup`。
+运行 `python start.py --jev-only --advise`，然后通过 ModTheSpire 启动游戏。勾选 BaseMod、一个 CommunicationMod 和 SpireBrainOverlay。默认 `advise` 模式只发送 `wait` / `state`，由玩家操作角色；实时游戏只使用 JEV 与本地规则，战略模型留到终局复盘。只有明确需要在战略检查点在线规划时才使用 `python start.py --strategic-online --advise`。首次配置可运行对应命令加 `--setup`。
 
 建议直接出现在游戏内面板：当前一步（含卡牌、敌人或药水）、简短原因、攻略规则 / JEV 判断 / 规则兜底。浏览器详细记录通过 `python start.py --browser` 打开；两种面板读取同一个本地事件服务。
 
 攻略文件为 `config/guide_rules.json`。每条规则包含唯一 `id`、`characters`、`scenes`、`priority`、`when`、`effect`、`reason` 和 `source`。条件使用 `hp_ratio__lt`、`deck_size__gte` 等声明式比较，不执行代码。数值以游戏状态为准；地图预计损血只是策略估计。首版只对铁甲战士应用这些专属规则，其他角色显示覆盖不足。
 
-状态变化后立即更新面板状态；能确定的规则建议先显示。模型在后台运行，只有结果的状态指纹和局数版本仍匹配时才显示，过期结果会被丢弃。每一步显示前核对当前选项、能量、目标及药水可用性。无法核对时显示暂无可靠建议；缺少伤害或特殊效果数据时明确提示不确定性。
+状态变化后立即更新面板状态；能确定的规则建议先显示。`--jev-only` 实时路径不启动战略模型 worker；每局轨迹在终局后可显式提交一次战略复盘。`--strategic-online` 下模型结果仍必须匹配状态指纹和运行代次，过期结果会被丢弃。每一步显示前核对当前选项、能量、目标及药水可用性。无法核对时显示暂无可靠建议；缺少伤害或特殊效果数据时明确提示不确定性。
 
 验证命令：
 

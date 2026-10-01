@@ -100,7 +100,8 @@ def start_dashboard(port: int, open_browser: bool) -> tuple[object, str]:
 
 
 def mod_config_command(url: str, backend: str, auto_start: bool, mode: str,
-                       brain_backend: str | None = None, runtime=None) -> str:
+                       brain_backend: str | None = None, runtime=None,
+                       strategy_planning_enabled: bool = False) -> str:
     """The exact command line CommunicationMod should launch, with the dashboard wired.
 
     The mode is part of the command, never left implicit: this string is the only
@@ -115,9 +116,12 @@ def mod_config_command(url: str, backend: str, auto_start: bool, mode: str,
     command = default_command(backend, brain_backend=brain_backend,
                               brain_model=getattr(runtime, "openai_model", None),
                               brain_endpoint=getattr(runtime, "openai_endpoint", None),
+                              brain_reasoning_effort=getattr(
+                                  runtime, "brain_reasoning_effort", None),
                               jev_endpoint=getattr(runtime, "jev_endpoint", None),
                               auto_start=auto_start, mode=mode,
-                              dashboard_url=url, open_dashboard=True)
+                              dashboard_url=url, open_dashboard=True,
+                              strategy_planning_enabled=strategy_planning_enabled)
     return command
 
 
@@ -179,10 +183,15 @@ def main(argv: list[str] | None = None) -> int:
         "brain_backend": _value(argv, "brain-backend"),
         "brain_model": _value(argv, "brain-model"),
         "brain_endpoint": _value(argv, "brain-endpoint"),
+        "brain_reasoning_effort": _value(argv, "brain-reasoning-effort"),
         "jev_endpoint": _value(argv, "jev-endpoint"),
     })
     backend = runtime.jev_backend
     brain_backend = runtime.brain_backend
+    if "--jev-only" in argv and "--strategic-online" in argv:
+        print("choose either --jev-only or --strategic-online, not both")
+        return 2
+    strategy_planning_enabled = "--strategic-online" in argv
     mode = ("play" if "--play" in argv else
             "advise" if "--advise" in argv else (_value(argv, "mode") or "advise"))
     if mode not in ("advise", "play"):
@@ -197,6 +206,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"providers: JEV={backend} ({runtime.sources['jev_backend']}), "
           f"brain={brain_backend} ({runtime.sources['brain_backend']}); "
           f"config={runtime.config_id}")
+    print("strategy mode: " + ("JEV-only during gameplay; strategic review is post-run only"
+                              if not strategy_planning_enabled
+                              else "online phase-scoped strategic planning enabled"))
     if mode == "advise":
         print("mode: ADVISE (军师模式) - the agent will recommend, never play:")
         print("      it sends the game only polls, and it will not start a run for you.")
@@ -260,7 +272,9 @@ def main(argv: list[str] | None = None) -> int:
             server.shutdown()
         return 0
 
-    command = mod_config_command(url, backend, auto_start, mode, brain_backend, runtime)
+    command = mod_config_command(
+        url, backend, auto_start, mode, brain_backend, runtime,
+        strategy_planning_enabled=strategy_planning_enabled)
     config_status = communication_config_status(command)
     print("\n[3/3] tell the game to launch the brain:")
     print(f"      {command}")

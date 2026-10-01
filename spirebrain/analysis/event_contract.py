@@ -38,6 +38,14 @@ _IDENTITY_TYPES = {
 # Strict validation is opt-in so old schema-2 records remain readable, while
 # new producer/consumer fixtures can assert semantic fields and types.
 _EVENT_FIELDS = {
+    "run_started": {
+        "run_id": (str,), "run_epoch": (int,), "state_id": (str,),
+        "source_type": (str,),
+    },
+    "run_ended": {
+        "run_id": (str,), "run_epoch": (int,), "state_id": (str,),
+        "source_type": (str,), "result": (str, type(None)),
+    },
     "state_observed": {"state_id": (str,)},
     "provider_request": {
         "run_id": (str, type(None)), "run_epoch": (int, type(None)),
@@ -53,6 +61,17 @@ _EVENT_FIELDS = {
         "logical_request_id": (str,), "attempt_id": (str,),
         "provider": (str,), "latency_ms": (int, float),
         "error_kind": (str,), "fallback": (bool,),
+    },
+    "strategic_plan_commit": {
+        "run_id": (str, type(None)), "run_epoch": (int, type(None)),
+        "decision_id": (str, type(None)), "state_id": (str, type(None)),
+        "request_id": (str, type(None)), "plan_id": (str, type(None)),
+        "result_disposition": (str,), "commit_latency_ms": (int, float),
+        "fallback_reason": (str, type(None)),
+    },
+    "plan_validation_rejected": {
+        "decision_id": (str, type(None)), "state_id": (str,),
+        "error_kind": (str,), "fallback_reason": (str,),
     },
     "decision": {"decision_id": (str,), "state_id": (str,),
                   "command": (dict,), "source_type": (str,)},
@@ -79,13 +98,46 @@ _EVENT_FIELDS = {
                           "verdict": (str,)},
     "result_record": {"state_id": (str,), "result":
                        (str, dict, list, int, float, bool, type(None))},
+    "review_started": {
+        "run_id": (str,), "run_epoch": (int,), "request_id": (str,),
+        "provider": (str,), "model": (str,), "provider_attempted": (bool,),
+        "attempt_count": (int,),
+    },
+    "review_completed": {
+        "run_id": (str,), "run_epoch": (int,), "request_id": (str,),
+        "provider": (str,), "model": (str,), "provider_attempted": (bool,),
+        "attempt_count": (int,), "latency_ms": (int, float), "status": (str,),
+        "proposal_count": (int, type(None)), "error_kind": (str, type(None)),
+    },
 }
 _OPTIONAL_EVENT_FIELDS = {
     "provider_request": {"generation": (int, type(None)),
-                          "trigger": (str, type(None))},
+                          "trigger": (str, type(None)),
+                          "queue_wait_ms": (int, type(None)),
+                          "pre_provider_ms": (int, type(None)),
+                          "http_latency_ms": (int, float, type(None)),
+                          "parse_latency_ms": (int, float, type(None)),
+                          "response_bytes": (int, type(None)),
+                          "http_status": (int, type(None)),
+                          "http_error_code": (str, type(None)),
+                          "http_error_param": (str, type(None)),
+                          "worker_elapsed_ms": (int, type(None)),
+                          "strategy_fingerprint": (str, type(None)),
+                          "strategic_scope_id": (str, type(None))},
     "provider_response": {"generation": (int, type(None)),
                            "trigger": (str, type(None)),
-                           "provider_request_id": (str, type(None))},
+                           "provider_request_id": (str, type(None)),
+                           "queue_wait_ms": (int, type(None)),
+                           "pre_provider_ms": (int, type(None)),
+                           "http_latency_ms": (int, float, type(None)),
+                           "parse_latency_ms": (int, float, type(None)),
+                           "response_bytes": (int, type(None)),
+                           "http_status": (int, type(None)),
+                           "http_error_code": (str, type(None)),
+                           "http_error_param": (str, type(None)),
+                           "worker_elapsed_ms": (int, type(None)),
+                           "strategy_fingerprint": (str, type(None)),
+                           "strategic_scope_id": (str, type(None))},
     "decision": {"provider_request_ids": (list,)},
     "state_observed": {"provider_request_ids": (list,)},
     "expired_result": {"provider_request_ids": (list,),
@@ -164,7 +216,9 @@ def validate_event(event: dict, *, strict: bool = False) -> list[str]:
 
 def decision_chain(records: Iterable[dict], decision_id: str) -> dict:
     """Return the evidence needed to reconstruct one decision point."""
-    groups = {"inputs": [], "requests": [], "responses": [], "decisions": [],
+    groups = {"inputs": [], "requests": [], "responses": [],
+              "plan_commits": [],
+              "plan_validations": [], "decisions": [],
               "advice_versions": [], "outcomes": [], "results": [], "expired": [],
               "skipped": [], "strategic_context": [], "unattributed": [],
               "unattributed_total": 0,
@@ -179,6 +233,8 @@ def decision_chain(records: Iterable[dict], decision_id: str) -> dict:
         "state_observed": "inputs", "state": "inputs", "input": "inputs",
         "provider_request": "requests", "brain_call": "requests", "jev_call": "requests",
         "provider_response": "responses", "brain_response": "responses",
+        "strategic_plan_commit": "plan_commits",
+        "plan_validation_rejected": "plan_validations",
         "decision": "decisions", "final_decision": "decisions",
         "advice": "advice_versions", "advice_history": "advice_versions",
         "advice_replaced": "advice_versions",

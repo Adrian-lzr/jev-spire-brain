@@ -193,12 +193,14 @@
         <h3>战略大脑 · GPT</h3>
         <div class="config-help">负责构筑方向、资源预算和阶段目标。你只需在此窗口选择模型并测试连接，密钥由程序安全保存在本机。</div>
         <div class="config-grid">
-          <div class="config-field"><label for="brainBackend">运行后端</label><select id="brainBackend" name="brain_backend"><option value="openai">OpenAI 兼容接口</option><option value="deepseek">DeepSeek</option><option value="qwen">通义千问</option><option value="zhipu">智谱 GLM</option><option value="moonshot">月之暗面 Kimi</option><option value="siliconflow">硅基流动</option><option value="doubao">火山引擎豆包</option><option value="openai-compatible">其他 OpenAI 兼容接口</option><option value="jev">旧版 JEV 兼容模式</option><option value="mock">Mock 离线测试</option><option value="disabled">关闭战略大脑</option></select></div>
+          <div class="config-field"><label for="brainBackend">运行后端</label><select id="brainBackend" name="brain_backend"><option value="openai">OpenAI 兼容接口</option><option value="hiyo-codex">Codex Hiyo 网关</option><option value="deepseek">DeepSeek</option><option value="qwen">通义千问</option><option value="zhipu">智谱 GLM</option><option value="moonshot">月之暗面 Kimi</option><option value="siliconflow">硅基流动</option><option value="doubao">火山引擎豆包</option><option value="openai-compatible">其他 OpenAI 兼容接口</option><option value="jev">旧版 JEV 兼容模式</option><option value="mock">Mock 离线测试</option><option value="disabled">关闭战略大脑</option></select></div>
           <div class="config-field"><label for="openaiModel">模型名称</label><input id="openaiModel" name="openai_model" maxlength="128" autocomplete="off" placeholder="例如 gpt-5.6-sol / deepseek-chat"></div>
+          <div class="config-field"><label for="brainReasoningEffort">推理强度</label><select id="brainReasoningEffort" name="brain_reasoning_effort"><option value="">服务默认</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">XHigh</option><option value="max">Max</option></select></div>
           <div class="config-field full"><label for="openaiEndpoint">兼容 API 地址</label><input id="openaiEndpoint" name="openai_endpoint" maxlength="512" autocomplete="url" placeholder="https://api.deepseek.com/v1/chat/completions"></div>
           <div class="config-field full"><label for="openaiKey">战略大脑 API Key <span id="openaiKeyState" class="secret-state"></span></label><input id="openaiKey" type="password" name="openai_api_key" maxlength="4096" autocomplete="new-password" placeholder="支持国产模型 Key；留空则保留当前密钥"><label class="config-clear"><input type="checkbox" name="clear_openai">清除已保存密钥</label></div>
+          <div class="config-field full"><label for="codexKey">Codex 网关专用 Key <span id="codexKeyState" class="secret-state"></span></label><input id="codexKey" type="password" name="codex_api_key" maxlength="4096" autocomplete="new-password" placeholder="codex.hiyo.top 专用；留空则保留当前密钥"><label class="config-clear"><input type="checkbox" name="clear_codex">清除已保存密钥</label></div>
         </div>
-        <div class="config-test"><button class="config-btn" type="button" id="testBrain">测试 GPT 连接</button><span id="brainResult" class="config-result" role="status"></span></div>
+        <div class="config-test"><button class="config-btn" type="button" id="testBrain" title="会发送一次真实的短战略计划请求，可能产生模型费用">测试战略计划</button><span class="config-result">将调用一次模型并校验计划格式，可能产生费用。</span><span id="brainResult" class="config-result" role="status"></span></div>
       </section>
       <section class="config-section">
         <h3>战术判断 · JEV</h3>
@@ -213,7 +215,7 @@
         <div class="config-test"><button class="config-btn" type="button" id="testJev">测试 JEV 连接</button><span id="jevResult" class="config-result" role="status"></span></div>
       </section>
       <div class="config-effective" id="effectiveConfig" role="status"></div>
-      <div class="config-note" style="padding-top:12px">保存后需重启游戏 agent 才会应用到当前游戏。连接测试会实际向所选服务发送一次小请求，可能产生少量 API 用量。</div>
+      <div class="config-note" style="padding-top:12px">保存后需重启游戏 agent 才会应用到当前游戏。测试通过只证明服务返回了可解析计划，不能代替游戏中的状态与提交验证。</div>
     </div>
     <div class="config-foot"><span id="saveResult" class="config-result" role="status"></span><span class="spacer"></span><button type="button" class="config-btn" id="cancelConfig">取消</button><button type="submit" class="config-btn primary" id="saveConfig">保存配置</button></div>
   </form>
@@ -321,9 +323,11 @@ async function readConfig() {
   publicConfig = await response.json();
   document.getElementById("brainBackend").value = publicConfig.brain_backend || "openai";
   document.getElementById("openaiModel").value = publicConfig.brain_model || publicConfig.openai_model || "gpt-4.1-mini";
+  document.getElementById("brainReasoningEffort").value = (publicConfig.effective || {}).brain_reasoning_effort || "";
   document.getElementById("openaiEndpoint").value = publicConfig.brain_endpoint || publicConfig.openai_endpoint || "https://api.openai.com/v1/responses";
   document.getElementById("jevBackend").value = publicConfig.jev_backend || "mock";
   document.getElementById("openaiKeyState").textContent = (publicConfig.secrets.brain_api_key || publicConfig.secrets.openai_api_key) ? "· 本机已配置" : "· 未配置";
+  document.getElementById("codexKeyState").textContent = publicConfig.secrets.codex_api_key ? "· 本机已配置" : "· 未配置";
   document.getElementById("openrouterKeyState").textContent = publicConfig.secrets.openrouter_api_key ? "· 本机已配置" : "· 未配置";
   document.getElementById("typesafeKeyState").textContent = publicConfig.secrets.typesafe_api_key ? "· 本机已配置" : "· 未配置";
   document.getElementById("cloudflareAccountState").textContent = publicConfig.secrets.cloudflare_account_id ? "· 本机已配置" : "· 未配置";
@@ -343,9 +347,10 @@ async function ensureConfigLoaded() {
 
 function configValues() {
   const data = Object.fromEntries(new FormData(configForm).entries());
-  for (const key of ["clear_openai", "clear_openrouter", "clear_typesafe", "clear_cloudflare_account", "clear_cloudflare_token"]) delete data[key];
+  for (const key of ["clear_openai", "clear_codex", "clear_openrouter", "clear_typesafe", "clear_cloudflare_account", "clear_cloudflare_token"]) delete data[key];
   data.clear_secrets = [];
   if (configForm.elements.clear_openai.checked) data.clear_secrets.push("openai_api_key");
+  if (configForm.elements.clear_codex.checked) data.clear_secrets.push("codex_api_key");
   if (configForm.elements.clear_openrouter.checked) data.clear_secrets.push("openrouter_api_key");
   if (configForm.elements.clear_typesafe.checked) data.clear_secrets.push("typesafe_api_key");
   if (configForm.elements.clear_cloudflare_account.checked) data.clear_secrets.push("cloudflare_account_id");
@@ -406,6 +411,7 @@ document.getElementById("applySetup").addEventListener("click", async event => {
   } finally { button.disabled = false; }
 });
 const brainPresets = {
+  "hiyo-codex": ["gpt-6-sol", "https://codex.hiyo.top/v1/responses"],
   deepseek: ["deepseek-flash", "https://api.deepseek.com/v1/chat/completions"],
   qwen: ["qwen-plus", "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"],
   zhipu: ["glm-4.5", "https://open.bigmodel.cn/api/paas/v4/chat/completions"],
@@ -430,8 +436,8 @@ document.getElementById("testBrain").addEventListener("click", async event => {
   const values = configValues();
   try {
     const result = await postConfig("/api/config/test-brain", {
-      settings: {openai_model: values.openai_model, openai_endpoint: values.openai_endpoint},
-      api_key: values.openai_api_key || "",
+      settings: {openai_model: values.openai_model, openai_endpoint: values.openai_endpoint, reasoning_effort: values.brain_reasoning_effort},
+      api_key: values.codex_api_key || values.openai_api_key || "",
     });
     showConfigResult("brainResult", result);
   } catch (error) { showConfigResult("brainResult", {ok: false, message: error.message}); }

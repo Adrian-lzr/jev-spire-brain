@@ -32,6 +32,7 @@ from typing import Any, Callable
 
 from spirebrain.brain.protocol import (
     AdviceWorkerResult, DecisionContext, DecisionRequest, RunSessionSnapshot,
+    PhaseStrategySnapshot, StrategicPlan,
 )
 from spirebrain.brain.action_broker import build_action_candidates
 from spirebrain.driver.modes import ADVISE_POLL_VERBS
@@ -102,7 +103,10 @@ class AdviseSession:
         self._worker_agent = agent.clone_for_advice() if hasattr(agent, "clone_for_advice") else None
         self._latest_fp: str | None = None
         self._latest_state_id: str | None = None
+        self._latest_game: dict | None = None
         self._generation = 0
+        self._committed_plan_generation = -1
+        self._owner_phase_token = ""
         self._decision_sequence = 0
         self._advice_revisions: dict[str, int] = {}
         self._last_published_advice: Advice | None = None
@@ -146,9 +150,12 @@ class AdviseSession:
         self._issued_state_ids.clear()
         self._latest_fp = None
         self._latest_state_id = None
+        self._latest_game = None
+        self._owner_phase_token = ""
         self._state_started_at.clear()
         self._first_advice_latency.clear()
         self._generation += 1
+        self._committed_plan_generation = self._generation
         with self._work_lock:
             queued = self._queued_work
             self._queued_work = None
@@ -171,6 +178,10 @@ class AdviseSession:
         """
         if self._closed:
             return self._poll(available)
+        try:
+            self._latest_game = copy.deepcopy(dict(game, available_commands=available))
+        except Exception:
+            self._latest_game = dict(game, available_commands=available)
         # Include the legal command view in the recommendation identity.  Poll
         # metadata and animation noise are removed by the shared projection.
         fp = self._fingerprint(dict(game, available_commands=available))
@@ -204,7 +215,8 @@ class AdviseSession:
             self._drain_completed()
             return self._poll(available)
 
-        if fp != self.advised_fp:
+        new_state = fp != self.advised_fp
+        if new_state:
             self.advised_fp = fp
             self._latest_fp = fp
             self._latest_state_id = state_version
@@ -213,12 +225,48 @@ class AdviseSession:
             # new request from a late result produced for the earlier visit.
             self._generation += 1
             self._begin_decision(fp, state_version, game)
+        phase_snapshot = self._prepare_phase_strategy(
+            game, available, request_if_needed=new_state)
+        phase_token = (phase_snapshot.phase_token
+                       if isinstance(phase_snapshot, PhaseStrategySnapshot) else "")
+        phase_changed = bool(phase_token and phase_token != self._owner_phase_token)
+        self._owner_phase_token = phase_token
+        if phase_changed and not new_state:
+            # A completed phase plan can improve the current advice, but it
+            # must not create a new player-decision identity for the same state.
+            self._generation += 1
+        if new_state or phase_changed:
             if self._worker_agent is None:
                 self._advise_once(game, available)
             else:
-                self._advise_async(game, available, fp)
+                self._advise_async(game, available, fp, phase_snapshot=phase_snapshot)
         self._drain_completed()
         return self._poll(available)
+
+    def _prepare_phase_strategy(self, game: dict, available: Any, *,
+                                request_if_needed: bool):
+        if self._worker_agent is None:
+            return None
+        method_name = ("prepare_advice_strategy" if request_if_needed
+                       else "refresh_advice_strategy")
+        prepare = getattr(self.agent, method_name, None)
+        if not callable(prepare) and not request_if_needed:
+            prepare = getattr(self.agent, "advice_strategy_snapshot", None)
+        if not callable(prepare):
+            return None
+        payload = copy.deepcopy(dict(game, available_commands=available))
+        try:
+            return prepare(payload, decision_id=self._current_decision_id)
+        except Exception as exc:  # noqa: BLE001 - strategic service is optional
+            self._trace("strategic_prepare_failed", {
+                "run_id": self._run_id() or None,
+                "run_epoch": int(getattr(getattr(self.agent, "run_session", None),
+                                         "run_epoch", 0) or 0),
+                "decision_id": self._current_decision_id or None,
+                "state_id": semantic_state_id(payload),
+                "reason": type(exc).__name__,
+            })
+            return None
 
     def _handle_outcome_for_strategy(self, outcome, *, observed_state: dict | None = None) -> None:
         """Submit player feedback through the owning main-loop boundary."""
@@ -251,7 +299,8 @@ class AdviseSession:
             except Exception:  # noqa: BLE001
                 pass
 
-    def _advise_async(self, game: dict, available: Any, fp: str) -> None:
+    def _advise_async(self, game: dict, available: Any, fp: str, *,
+                      phase_snapshot: PhaseStrategySnapshot | None = None) -> None:
         # The worker receives a private snapshot. It never shares nested live
         # CommunicationMod objects with the main loop.
         payload = copy.deepcopy(dict(game, available_commands=available))
@@ -269,8 +318,16 @@ class AdviseSession:
         memory_snapshotter = getattr(owner_memory, "snapshot", None)
         memory_snapshot = memory_snapshotter() if callable(memory_snapshotter) else None
         owner_strategic = getattr(self.agent, "strategic", None)
-        owner_plan = (copy.deepcopy(getattr(owner_strategic, "current_plan", None))
-                      if getattr(owner_strategic, "plan_valid", False) else None)
+        if phase_snapshot is None:
+            snapshotter = getattr(self.agent, "advice_strategy_snapshot", None)
+            if callable(snapshotter):
+                try:
+                    phase_snapshot = snapshotter(payload)
+                except Exception:
+                    phase_snapshot = None
+        owner_plan = (copy.deepcopy(phase_snapshot.plan)
+                      if isinstance(phase_snapshot, PhaseStrategySnapshot)
+                      else None)
         try:
             quick = self.agent.quick_advice(payload)
         except Exception as exc:  # noqa: BLE001
@@ -301,7 +358,7 @@ class AdviseSession:
                 return
             replaced = self._queued_work
             self._queued_work = (fp, payload, self._generation, run_snapshot,
-                                 memory_snapshot, owner_plan)
+                                 memory_snapshot, owner_plan, phase_snapshot)
             if not self._work_running:
                 self._work_running = True
                 self._worker_thread = threading.Thread(
@@ -335,7 +392,8 @@ class AdviseSession:
                     if self._worker_thread is threading.current_thread():
                         self._worker_thread = None
                     return
-                fp, payload, generation, run_snapshot, memory_snapshot, owner_plan = job
+                (fp, payload, generation, run_snapshot, memory_snapshot,
+                 owner_plan, phase_snapshot) = job
             run_id = str(getattr(run_snapshot, "run_id", "") or "")
             run_epoch = int(getattr(run_snapshot, "run_epoch", 0) or 0)
             request = DecisionRequest(
@@ -354,15 +412,16 @@ class AdviseSession:
                 adopt = getattr(self._worker_agent, "adopt_run_snapshot", None)
                 if adopt is not None:
                     adopt(run_snapshot, memory_snapshot, owner_plan)
+                adopt_strategy = getattr(
+                    self._worker_agent, "adopt_advice_strategy_snapshot", None)
+                if callable(adopt_strategy) and isinstance(
+                        phase_snapshot, PhaseStrategySnapshot):
+                    adopt_strategy(phase_snapshot)
                 command = self._worker_agent.choose_action(payload)
                 entry = dict(self._worker_agent.history[-1]) if self._worker_agent.history else None
-                worker_plan = None
-                strategic = getattr(self._worker_agent, "strategic", None)
-                if strategic is not None and getattr(strategic, "plan_valid", False):
-                    worker_plan = copy.deepcopy(getattr(strategic, "current_plan", None))
                 proposal = AdviceWorkerResult(
                     request=request, command=command,
-                    history_entry=entry, plan=worker_plan,
+                    history_entry=entry,
                 )
                 self._enqueue_completed((fp, generation, run_id, run_epoch,
                                          payload, command, entry, None, proposal))
@@ -399,6 +458,8 @@ class AdviseSession:
         if isinstance(typed_result, AdviceWorkerResult):
             context = typed_result.request.context
             payload = dict(typed_result.request.state)
+            payload.setdefault("decision_id", context.decision_id)
+            payload.setdefault("state_id", context.state_id)
             entry = copy.deepcopy(typed_result.history_entry)
             run_id = context.run_id
             run_epoch = context.run_epoch
@@ -492,6 +553,23 @@ class AdviseSession:
             if (generation != self._generation or fp != self._latest_fp
                     or run_epoch != current_epoch or run_changed
                     or worker_identity_mismatch):
+                if (isinstance(worker_plan, StrategicPlan)
+                        and self._latest_game is not None
+                        and generation >= self._committed_plan_generation):
+                    owner_strategic = getattr(self.agent, "strategic", None)
+                    commit_late = getattr(owner_strategic,
+                                          "commit_late_worker_plan", None)
+                    if callable(commit_late):
+                        try:
+                            committed = commit_late(
+                                worker_plan, payload, self._latest_game,
+                                run_id=run_id, run_epoch=run_epoch,
+                                generation=generation,
+                            )
+                            if committed:
+                                self._committed_plan_generation = generation
+                        except Exception:  # noqa: BLE001 - stale actions stay dropped
+                            pass
                 self._record_expired_completion(
                     completed,
                     "generation_mismatch" if generation != self._generation
@@ -521,8 +599,14 @@ class AdviseSession:
                 commit = getattr(owner_strategic, "commit_worker_plan", None)
                 if commit is not None:
                     try:
-                        commit(worker_plan, payload,
-                               candidates=build_action_candidates(payload))
+                        committed = commit(
+                            worker_plan, payload,
+                            candidates=build_action_candidates(payload),
+                            advisor_generation=generation,
+                        )
+                        if committed:
+                            self._committed_plan_generation = max(
+                                self._committed_plan_generation, generation)
                     except Exception:  # noqa: BLE001 - proposal commit is non-fatal
                         pass
             self._record_action(payload, command, self._worker_agent,
