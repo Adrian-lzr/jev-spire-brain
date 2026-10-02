@@ -2,4 +2,4 @@
 #
 # The agent speaks CommunicationMod's line protocol directly and has no required
 # third-party runtime packages. pytest is used by the offline verification suite.
-pytest>=8.0
+pytest>=9.1.1
